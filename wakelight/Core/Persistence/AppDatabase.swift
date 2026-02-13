@@ -1,9 +1,6 @@
 import Foundation
 import GRDB
 
-import Foundation
-import GRDB
-
 struct AppDatabase {
     private let writer: DatabaseWriter
     
@@ -75,6 +72,15 @@ struct AppDatabase {
                 t.column("isUnlocked", .boolean).notNull().defaults(to: false)
                 t.column("unlockedAt", .datetime)
                 t.column("updatedAt", .datetime).notNull()
+            }
+        }
+        
+        migrator.registerMigration("v2-visit-layer-photos") { db in
+            // 关联表：VisitLayer <-> PhotoAsset (多对多)
+            try db.create(table: "visitLayerPhotoAsset") { t in
+                t.column("visitLayerId", .text).notNull().references("visitLayer", onDelete: .cascade)
+                t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
+                t.primaryKey(["visitLayerId", "photoAssetId"])
             }
         }
         

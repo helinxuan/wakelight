@@ -4,6 +4,7 @@ import UIKit
 
 struct ExplorationMapView: UIViewRepresentable {
     @ObservedObject var viewModel: ExploreViewModel
+    @Binding var selectedCluster: PlaceCluster?
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: ExplorationMapView
@@ -33,6 +34,16 @@ struct ExplorationMapView: UIViewRepresentable {
             view.markerTintColor = UIColor.systemYellow
             view.glyphImage = UIImage(systemName: "sparkle")
             return view
+        }
+
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            guard let ann = view.annotation as? ClusterAnnotation else { return }
+            parent.selectedCluster = ann.cluster
+        }
+
+        func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            guard view.annotation is ClusterAnnotation else { return }
+            parent.selectedCluster = nil
         }
     }
 

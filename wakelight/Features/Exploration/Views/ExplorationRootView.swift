@@ -2,10 +2,11 @@ import SwiftUI
 
 struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
-    
+    @State private var selectedCluster: PlaceCluster?
+
     var body: some View {
         ZStack {
-            ExplorationMapView(viewModel: viewModel)
+            ExplorationMapView(viewModel: viewModel, selectedCluster: $selectedCluster)
                 .ignoresSafeArea()
             
             VStack {
@@ -23,6 +24,9 @@ struct ExplorationRootView: View {
                     .padding()
                 }
             }
+        }
+        .sheet(item: $selectedCluster) { cluster in
+            MemoryPanelView(placeCluster: cluster)
         }
     }
 }

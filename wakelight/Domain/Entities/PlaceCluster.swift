@@ -7,7 +7,7 @@ enum FogState: String, Codable {
     case revealed
 }
 
-struct PlaceCluster: Codable, FetchableRecord, PersistableRecord {
+struct PlaceCluster: Codable, FetchableRecord, PersistableRecord, Identifiable {
     static let databaseTableName = "placeCluster"
 
     var id: UUID

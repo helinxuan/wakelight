@@ -35,8 +35,8 @@ final class ExploreViewModel: ObservableObject {
         Task {
             do {
                 _ = try await ImportPhotosUseCase().run()
-                // 导入完成后自动运行聚类
                 _ = try await GeneratePlaceClustersUseCase().run()
+                _ = try await GenerateVisitLayersUseCase().run()
             } catch {
                 print("Failed to import photos: \(error)")
             }
