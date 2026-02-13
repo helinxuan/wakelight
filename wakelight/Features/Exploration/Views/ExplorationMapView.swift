@@ -25,25 +25,63 @@ struct ExplorationMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation { return nil }
 
-            let reuseId = "cluster"
-            let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView
-                ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+            guard let clusterAnnotation = annotation as? ClusterAnnotation else { return nil }
+            let cluster = clusterAnnotation.cluster
 
-            view.annotation = annotation
-            view.canShowCallout = true
-            view.markerTintColor = UIColor.systemYellow
-            view.glyphImage = UIImage(systemName: "sparkle")
-            return view
+            if cluster.hasStory {
+                let reuseId = "story"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? StoryAnnotationView
+                    ?? StoryAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+
+                view.annotation = annotation
+                view.canShowCallout = true
+                
+                // 添加“阅读故事”详情按钮
+                let detailButton = UIButton(type: .detailDisclosure)
+                view.rightCalloutAccessoryView = detailButton
+                
+                let localId = parent.viewModel.storyThumbnails[cluster.id]
+                view.configure(with: localId)
+                return view
+            } else {
+                let reuseId = "cluster"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+
+                view.annotation = annotation
+                view.canShowCallout = true
+                
+                // 普通光点也添加详情按钮，以便点击打开记忆面板
+                let detailButton = UIButton(type: .detailDisclosure)
+                view.rightCalloutAccessoryView = detailButton
+                
+                view.markerTintColor = UIColor.systemYellow
+                view.glyphImage = UIImage(systemName: "sparkle")
+                return view
+            }
         }
 
-        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+        func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
             guard let ann = view.annotation as? ClusterAnnotation else { return }
             parent.selectedCluster = ann.cluster
         }
 
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            guard let ann = view.annotation as? ClusterAnnotation else { return }
+            if parent.selectedCluster?.id != ann.cluster.id {
+                Task { @MainActor in
+                    parent.selectedCluster = ann.cluster
+                }
+            }
+        }
+
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
             guard view.annotation is ClusterAnnotation else { return }
-            parent.selectedCluster = nil
+            if parent.selectedCluster != nil {
+                Task { @MainActor in
+                    parent.selectedCluster = nil
+                }
+            }
         }
     }
 

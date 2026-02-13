@@ -3,15 +3,26 @@ import SwiftUI
 struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
     @State private var selectedCluster: PlaceCluster?
+    @State private var showBadges: Bool = false
 
     var body: some View {
         ZStack {
             ExplorationMapView(viewModel: viewModel, selectedCluster: $selectedCluster)
                 .ignoresSafeArea()
-            
+
             VStack {
                 Spacer()
-                HStack {
+                HStack(spacing: 12) {
+                    Button(action: {
+                        showBadges = true
+                    }) {
+                        Label("Badges", systemImage: "medal.fill")
+                            .padding()
+                            .background(Color.black.opacity(0.7))
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                    }
+
                     Button(action: {
                         viewModel.importPhotos()
                     }) {
@@ -21,12 +32,15 @@ struct ExplorationRootView: View {
                             .foregroundColor(.white)
                             .cornerRadius(10)
                     }
-                    .padding()
                 }
+                .padding()
             }
         }
         .sheet(item: $selectedCluster) { cluster in
             MemoryPanelView(placeCluster: cluster)
+        }
+        .sheet(isPresented: $showBadges) {
+            BadgeWallView()
         }
     }
 }

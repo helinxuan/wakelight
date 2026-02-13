@@ -5,6 +5,7 @@ import GRDB
 
 final class ExploreViewModel: ObservableObject {
     @Published var clusters: [PlaceCluster] = []
+    @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> localIdentifier
     
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
@@ -15,18 +16,36 @@ final class ExploreViewModel: ObservableObject {
     }
     
     private func observeClusters() {
-        // 监听数据库中 PlaceCluster 表的变化
         ValueObservation
             .tracking { db in
-                try PlaceCluster.fetchAll(db)
+                let clusters = try PlaceCluster.fetchAll(db)
+                var thumbnails: [UUID: String] = [:]
+                
+                for cluster in clusters where cluster.hasStory {
+                    // 优化：取最新沉淀的 Story (settledAt DESC) 的第一张图
+                    let sql = """
+                        SELECT p.localIdentifier 
+                        FROM photoAsset p
+                        JOIN visitLayerPhotoAsset vlp ON vlp.photoAssetId = p.id
+                        JOIN visitLayer vl ON vl.id = vlp.visitLayerId
+                        WHERE vl.placeClusterId = ? AND vl.isStoryNode = 1
+                        ORDER BY vl.settledAt DESC
+                        LIMIT 1
+                    """
+                    if let localId = try String.fetchOne(db, sql: sql, arguments: [cluster.id]) {
+                        thumbnails[cluster.id] = localId
+                    }
+                }
+                return (clusters, thumbnails)
             }
             .publisher(in: db.reader)
             .sink { completion in
                 if case .failure(let error) = completion {
                     print("Error observing clusters: \(error)")
                 }
-            } receiveValue: { [weak self] clusters in
+            } receiveValue: { [weak self] (clusters, thumbnails) in
                 self?.clusters = clusters
+                self?.storyThumbnails = thumbnails
             }
             .store(in: &cancellables)
     }

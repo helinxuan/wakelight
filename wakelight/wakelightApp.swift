@@ -12,6 +12,9 @@ struct wakelightApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onAppear {
+                    _ = AchievementService.shared
+                }
         }
     }
 }
