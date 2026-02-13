@@ -7,6 +7,7 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var selectedCluster: PlaceCluster?
 
     final class Coordinator: NSObject, MKMapViewDelegate {
+        private var fogOverlay: FogOverlay?
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
 
@@ -20,6 +21,21 @@ struct ExplorationMapView: UIViewRepresentable {
             let annotations = parent.viewModel.clusters.map { ClusterAnnotation(cluster: $0) }
             currentAnnotations = annotations
             mapView.addAnnotations(annotations)
+            
+            // 更新迷雾
+            if let oldFog = fogOverlay {
+                mapView.removeOverlay(oldFog)
+            }
+            let newFog = FogOverlay(clusters: parent.viewModel.clusters)
+            fogOverlay = newFog
+            mapView.addOverlay(newFog)
+        }
+
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let fog = overlay as? FogOverlay {
+                return FogOverlayRenderer(overlay: fog)
+            }
+            return MKOverlayRenderer(overlay: overlay)
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {

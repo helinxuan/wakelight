@@ -23,12 +23,24 @@ struct GenerateTimeRouteUseCase {
                     .filter(Column("id") == layer.placeClusterId)
                     .fetchOne(db)
                 
+                // 获取封面图：该访次内最新的一张照片
+                let sql = """
+                    SELECT p.localIdentifier 
+                    FROM photoAsset p
+                    JOIN visitLayerPhotoAsset vlp ON vlp.photoAssetId = p.id
+                    WHERE vlp.visitLayerId = ?
+                    ORDER BY p.creationDate DESC
+                    LIMIT 1
+                """
+                let coverId = try String.fetchOne(db, sql: sql, arguments: [layer.id])
+                
                 let node = TimeRouteNode(
                     id: UUID(),
                     visitLayerId: layer.id,
                     sortOrder: index,
-                    displayTitle: cluster?.geohash, // 临时使用 geohash 作为标题，后续可优化
+                    displayTitle: self.formatDateRange(layer),
                     displaySummary: layer.userText,
+                    coverPhotoIdentifier: coverId,
                     visitLayer: layer,
                     placeCluster: cluster
                 )
@@ -36,5 +48,12 @@ struct GenerateTimeRouteUseCase {
             }
             return nodes
         }
+    }
+
+    private func formatDateRange(_ layer: VisitLayer) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: layer.startAt)
     }
 }

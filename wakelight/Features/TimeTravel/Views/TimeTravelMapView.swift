@@ -52,8 +52,12 @@ struct TimeTravelMapView: UIViewRepresentable {
             if parent.nodes.indices.contains(parent.selectedIndex),
                let cluster = parent.nodes[parent.selectedIndex].placeCluster {
                 let center = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-                let region = MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 25, longitudeDelta: 25))
-                mapView.setRegion(region, animated: true)
+
+                let camera = MKMapCamera(lookingAtCenter: center, fromDistance: 1_200_000, pitch: 50, heading: 0)
+
+                UIView.animate(withDuration: 1.1, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
+                    mapView.setCamera(camera, animated: false)
+                }
             }
         }
 
