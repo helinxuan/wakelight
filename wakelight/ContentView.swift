@@ -11,7 +11,17 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        ExplorationRootView()
+        TabView {
+            ExplorationRootView()
+                .tabItem {
+                    Label("Explore", systemImage: "map.fill")
+                }
+
+            TimeTravelView()
+                .tabItem {
+                    Label("Time Travel", systemImage: "clock.arrow.circlepath")
+                }
+        }
     }
 }
 

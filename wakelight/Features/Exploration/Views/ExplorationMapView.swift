@@ -8,7 +8,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: ExplorationMapView
-        private var currentAnnotations: [ClusterAnnotation] = []
+        var currentAnnotations: [ClusterAnnotation] = []
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -28,37 +28,20 @@ struct ExplorationMapView: UIViewRepresentable {
             guard let clusterAnnotation = annotation as? ClusterAnnotation else { return nil }
             let cluster = clusterAnnotation.cluster
 
-            if cluster.hasStory {
-                let reuseId = "story"
-                let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? StoryAnnotationView
-                    ?? StoryAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+            let reuseId = "lightPoint"
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? LightPointAnnotationView
+                ?? LightPointAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
 
-                view.annotation = annotation
-                view.canShowCallout = true
-                
-                // 添加“阅读故事”详情按钮
-                let detailButton = UIButton(type: .detailDisclosure)
-                view.rightCalloutAccessoryView = detailButton
-                
-                let localId = parent.viewModel.storyThumbnails[cluster.id]
-                view.configure(with: localId)
-                return view
-            } else {
-                let reuseId = "cluster"
-                let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView
-                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+            view.annotation = annotation
+            view.canShowCallout = true
 
-                view.annotation = annotation
-                view.canShowCallout = true
-                
-                // 普通光点也添加详情按钮，以便点击打开记忆面板
-                let detailButton = UIButton(type: .detailDisclosure)
-                view.rightCalloutAccessoryView = detailButton
-                
-                view.markerTintColor = UIColor.systemYellow
-                view.glyphImage = UIImage(systemName: "sparkle")
-                return view
-            }
+            // 点击打开记忆面板
+            let detailButton = UIButton(type: .detailDisclosure)
+            view.rightCalloutAccessoryView = detailButton
+
+            view.isStoryPoint = cluster.hasStory
+            view.updateStyle()
+            return view
         }
 
         func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
@@ -67,6 +50,7 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            print("DEBUG: Map didSelect - cluster: \((view.annotation as? ClusterAnnotation)?.cluster.id.uuidString ?? "unknown")")
             guard let ann = view.annotation as? ClusterAnnotation else { return }
             if parent.selectedCluster?.id != ann.cluster.id {
                 Task { @MainActor in
@@ -76,6 +60,7 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            print("DEBUG: Map didDeselect")
             guard view.annotation is ClusterAnnotation else { return }
             if parent.selectedCluster != nil {
                 Task { @MainActor in
@@ -108,6 +93,10 @@ struct ExplorationMapView: UIViewRepresentable {
 
     func updateUIView(_ uiView: MKMapView, context: Context) {
         context.coordinator.parent = self
-        context.coordinator.applyAnnotations(to: uiView)
+
+        // 避免每次 SwiftUI 刷新都移除/重建 annotation，导致选中状态和 callout 被打断
+        if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
+            context.coordinator.applyAnnotations(to: uiView)
+        }
     }
 }
