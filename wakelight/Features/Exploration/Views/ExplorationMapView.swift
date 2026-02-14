@@ -31,11 +31,11 @@ struct ExplorationMapView: UIViewRepresentable {
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard parent.isAwakenMode else { return }
 
+            let mapView = gesture.view as! MKMapView
+            let location = gesture.location(in: mapView)
+
             // 只在滑动过程中命中（避免 begin/end 重复）
             guard gesture.state == .changed else { return }
-
-            let location = gesture.location(in: gesture.view)
-            let mapView = gesture.view as! MKMapView
 
             // 3.1.2: 扩大 hit-test 响应区
             let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
@@ -104,10 +104,12 @@ struct ExplorationMapView: UIViewRepresentable {
 
             let newFog = FogOverlay(clusters: parent.viewModel.clusters, revealedClusterIds: parent.revealedClusterIds)
             
-            // 保持动画状态
+            // 保持状态（避免 SwiftUI 刷新导致 overlay 重建后洞/刮痕丢失）
             if let oldFog = fogOverlay {
                 newFog.animatingClusterId = oldFog.animatingClusterId
                 newFog.animationStartTime = oldFog.animationStartTime
+                newFog.scratchPaths = oldFog.scratchPaths
+                newFog.scratchLineWidthPoints = oldFog.scratchLineWidthPoints
             }
 
             fogOverlay = newFog

@@ -8,10 +8,15 @@ final class FogOverlay: NSObject, MKOverlay {
 
     var clusters: [PlaceCluster]
     var revealedClusterIds: Set<UUID>
-    
-    // 3.1.2: 动画状态
+
+
+    // 动画状态
     var animatingClusterId: UUID?
     var animationStartTime: TimeInterval?
+
+    // 刮痕（用于滑动“刮开”迷雾效果）。由 MapView 在 overlay 重建时拷贝保持状态。
+    var scratchPaths: [UIBezierPath] = []
+    var scratchLineWidthPoints: CGFloat = 22
 
     init(clusters: [PlaceCluster], revealedClusterIds: Set<UUID>) {
         self.clusters = clusters
@@ -24,9 +29,12 @@ final class FogOverlay: NSObject, MKOverlay {
 final class FogOverlayRenderer: MKOverlayRenderer {
     private let fogColor = UIColor.black.withAlphaComponent(0.65)
     private let revealRadiusPoints: CGFloat = 60
-    private let awakenedRadiusPoints: CGFloat = 120
-    private let animationDuration: TimeInterval = 0.6
-    
+
+    private let holeBaseRadiusPoints: CGFloat = 34
+    private let holeMaxRadiusPoints: CGFloat = 170
+    private let burstDuration: TimeInterval = 0.6
+    private let burstRingCount: Int = 2
+
     private var displayLink: CADisplayLink?
     private var isAnimating: Bool = false
 
@@ -57,23 +65,52 @@ final class FogOverlayRenderer: MKOverlayRenderer {
             
             if cluster.id == fogOverlay.animatingClusterId, let start = fogOverlay.animationStartTime {
                 let elapsed = currentTime - start
-                let progress = min(1.0, elapsed / animationDuration)
-                
-                // 3.1.2: 从 0 开始爆发散开成洞
-                r = awakenedRadiusPoints * CGFloat(progress)
-                
+                let progress = min(1.0, elapsed / burstDuration)
+
+                // 统一屏幕半径策略：爆发时从 18 扩大大 60
+                let baseR = holeBaseRadiusPoints + (holeMaxRadiusPoints - holeBaseRadiusPoints) * CGFloat(progress)
+                r = (max(18, min(baseR, 60))) / zoomScale
+
                 if progress < 1.0 {
                     hasActiveAnimation = true
                 }
+
+                if r > 0 {
+                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
+                    context.fillEllipse(in: circleRect)
+                }
+
+                context.setBlendMode(.normal)
+                context.setStrokeColor(UIColor.systemYellow.withAlphaComponent(0.35).cgColor)
+                context.setLineWidth(max(1.0, 4.0 / zoomScale))
+
+                for i in 0..<burstRingCount {
+                    let ringP = min(1.0, progress + Double(i) * 0.12)
+                    let ringR = (max(20, min(holeBaseRadiusPoints + (holeMaxRadiusPoints * 1.1 - holeBaseRadiusPoints) * CGFloat(ringP), 70))) / zoomScale
+                    let alpha = CGFloat(max(0.0, 1.0 - ringP))
+                    context.setStrokeColor(UIColor.systemYellow.withAlphaComponent(0.35 * alpha).cgColor)
+                    let ringRect = CGRect(x: point.x - ringR, y: point.y - ringR, width: ringR * 2, height: ringR * 2)
+                    context.strokeEllipse(in: ringRect)
+                }
+
+                context.setBlendMode(.destinationOut)
+                context.setFillColor(UIColor.black.cgColor)
             } else if fogOverlay.revealedClusterIds.contains(cluster.id) {
-                r = awakenedRadiusPoints
+                // 常驻洞屏幕半径固定在 55 左右
+                r = 55 / zoomScale
+
+                if r > 0 {
+                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
+                    context.fillEllipse(in: circleRect)
+                }
             } else {
-                r = revealRadiusPoints
-            }
-            
-            if r > 0 {
-                let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
-                context.fillEllipse(in: circleRect)
+                // 默认小洞屏幕半径固定在 15
+                r = 15 / zoomScale
+
+                if r > 0 {
+                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
+                    context.fillEllipse(in: circleRect)
+                }
             }
         }
 
