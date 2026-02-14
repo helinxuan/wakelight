@@ -224,6 +224,18 @@ final class FogScreenView: UIView {
         let currentTime = CACurrentMediaTime()
         var hasActiveAnimation = false
 
+        // 优化缩放曲线：
+        // span 越小（越近），factor 接近 1.0
+        // span 越大（越远），factor 迅速下降，但在极远距离保持一个可见的最小值
+        let span = Double(mapView.region.span.longitudeDelta)
+        // 连续函数：当 span=0 时为 1.0，当 span=180 (全球) 时约为 0.25
+        let zoomFactor = CGFloat(1.0 / (1.0 + pow(span / 20.0, 0.8)))
+        
+        // 限制收缩下限，确保世界级别下洞口变小但不消失（最小约 20pt）
+        let minRadius: CGFloat = 14.0
+        let currentBaseRadius = max(6.0, baseHoleRadius * zoomFactor)
+        let currentRevealedRadius = max(minRadius, revealedHoleRadius * zoomFactor)
+
         for cluster in clusters {
             let coord = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
             let screenPoint = mapView.convert(coord, toPointTo: self)
@@ -231,7 +243,7 @@ final class FogScreenView: UIView {
             // 剔除屏幕外的点（留出 100pt 缓冲）
             guard rect.insetBy(dx: -100, dy: -100).contains(screenPoint) else { continue }
 
-            var radius: CGFloat = baseHoleRadius
+            var radius: CGFloat = currentBaseRadius
             var opacity: CGFloat = 1.0
             var isSpecial = false
 
@@ -240,12 +252,12 @@ final class FogScreenView: UIView {
                 let progress = min(1.0, elapsed / animationDuration)
                 let easeOut = 1 - pow(1 - progress, 3)
                 
-                radius = baseHoleRadius + (revealedHoleRadius - baseHoleRadius) * CGFloat(easeOut)
+                radius = currentBaseRadius + (currentRevealedRadius - currentBaseRadius) * CGFloat(easeOut)
                 opacity = CGFloat(easeOut)
                 isSpecial = true
                 if progress < 1.0 { hasActiveAnimation = true }
             } else if revealedClusterIds.contains(cluster.id) {
-                radius = revealedHoleRadius
+                radius = currentRevealedRadius
                 isSpecial = true
             }
 

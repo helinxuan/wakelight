@@ -434,16 +434,16 @@ flowchart LR
 
 ## 7.1 地图 & 迷雾（Fog）
 
-- **渲染承载方式**：以 `MKOverlay` + 自定义 `MKOverlayRenderer` 作为雾层承载（雾层属于地图语义的一部分，天然跟随缩放/平移）。
-- **雾层原则**：
-  - **雾只表达状态**，不参与聚类/成就等业务推导。
-  - **避免全屏重绘**：雾层实现必须支持“低频更新 + 局部重绘”。
-- **数据边界（本地事实源）**：
-  - `CDPlaceCluster.fogState` 作为业务状态（`locked/partial/revealed`）。
-  - 若需要更强“仪式复现”（例如保存已唤醒/半显影的点集合或局部 reveal 状态），可在 SQLite/GRDB 额外存 `FogSnapshot`（tile/bitmap/压缩数据），但它是**体验缓存**，可重建、可选择不同步。
-- **光点与聚合**：
-  - 光点采用 `MKAnnotation`。
-  - 大量点必须开启 MapKit clustering；当可见点过多时，优先展示 cluster，避免强行展开单点。
+- **渲染承载方式**：
+  - **FogScreenView (UIKit 层)**：放弃原有的 `MKOverlay` 方案，改用在 `MKMapView` 上方覆盖一层透明的 `FogScreenView (UIView)`。
+  - **优势**：彻底消除 MapKit 瓦片分块渲染导致的“拼接缝隙”；通过 `mapViewDidChangeVisibleRegion` 实时转换坐标，实现 60FPS 的无缝同步刷新。
+- **渲染策略**：
+  - **屏幕空间固定半径**：迷雾洞口大小以屏幕点为基准。
+  - **动态缩放曲线**：使用非线性幂函数（如 `1/(1+(span/20)^0.8)`）使洞口在世界级别缩放时平滑收缩，避免遮挡大范围地理区域。
+  - **性能分级**：默认小洞使用 `fillEllipse` 快速挖洞；正在扩散/已解锁的重点光点使用 `CGGradient` 实现边缘羽化扩散。
+- **交互控制**：
+  - **稳定 Scope**：在地图拖动/缩放过程中不重建 Overlay 容器。
+  - **交互后更新**：仅在 `regionDidChangeAnimated` 触发且视野超出阈值（如原有 Scope 的 80%）时，才重新计算并更新迷雾覆盖范围（2 屏 Margin + World Clamp）。
 
 ## 7.2 显影与缩略图（Story Thumbnail）
 
