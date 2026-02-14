@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 
 struct AppDatabase {
-    private let writer: DatabaseWriter
+    let writer: DatabaseWriter
     
     init(_ writer: DatabaseWriter) throws {
         self.writer = writer
@@ -73,6 +73,17 @@ struct AppDatabase {
                 t.column("unlockedAt", .datetime)
                 t.column("updatedAt", .datetime).notNull()
             }
+
+            // 5.2.6 AwakenState
+            try db.create(table: "awakenState") { t in
+                t.column("id", .text).primaryKey()
+                t.column("placeClusterId", .text).notNull().unique().references("placeCluster", onDelete: .cascade)
+                t.column("energy", .integer).notNull().defaults(to: 0)
+                t.column("isHalfRevealed", .boolean).notNull().defaults(to: false)
+                t.column("awakenedPointCount", .integer).notNull().defaults(to: 0)
+                t.column("lastAwakenedAt", .datetime)
+                t.column("updatedAt", .datetime).notNull()
+            }
         }
         
         migrator.registerMigration("v2-visit-layer-photos") { db in
@@ -83,7 +94,8 @@ struct AppDatabase {
                 t.primaryKey(["visitLayerId", "photoAssetId"])
             }
         }
-        
+
+
         return migrator
     }
 }

@@ -14,6 +14,45 @@ final class ExploreViewModel: ObservableObject {
         self.db = db
         observeClusters()
     }
+
+    func loadHalfRevealedClusterIds() async -> Set<UUID> {
+        do {
+            return try await db.reader.read { db in
+                let ids = try UUID.fetchAll(
+                    db,
+                    sql: "SELECT placeClusterId FROM awakenState WHERE isHalfRevealed = 1"
+                )
+                return Set(ids)
+            }
+        } catch {
+            print("Failed to load awakenState: \(error)")
+            return []
+        }
+    }
+
+    func markClusterHalfRevealed(placeClusterId: UUID) async {
+        let now = Date()
+        do {
+            try await db.writer.write { db in
+                if var existing = try AwakenState.fetchOne(db, sql: "SELECT * FROM awakenState WHERE placeClusterId = ?", arguments: [placeClusterId]) {
+                    existing.isHalfRevealed = true
+                    existing.awakenedPointCount += 1
+                    existing.lastAwakenedAt = now
+                    existing.updatedAt = now
+                    try existing.update(db)
+                } else {
+                    var state = AwakenState(placeClusterId: placeClusterId)
+                    state.isHalfRevealed = true
+                    state.awakenedPointCount = 1
+                    state.lastAwakenedAt = now
+                    state.updatedAt = now
+                    try state.insert(db)
+                }
+            }
+        } catch {
+            print("Failed to upsert awakenState: \(error)")
+        }
+    }
     
     private func observeClusters() {
         ValueObservation

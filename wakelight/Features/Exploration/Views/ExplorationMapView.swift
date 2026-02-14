@@ -41,7 +41,8 @@ struct ExplorationMapView: UIViewRepresentable {
                     let hitCluster = annotation.cluster
                     if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) { return }
 
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    HapticPlayer.light()
+                    SystemSoundPlayer.playTick()
 
                     Task { @MainActor in
                         parent.awakenQueue.append(hitCluster)
@@ -54,6 +55,10 @@ struct ExplorationMapView: UIViewRepresentable {
                         // 通知屏幕层启动扩散动画
                         fogScreenView?.triggerDiffusion(for: hitCluster.id)
                         parent.selectedCluster = hitCluster
+
+                        Task {
+                            await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
+                        }
                     }
                     return
                 }
@@ -101,6 +106,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
             guard view.annotation is ClusterAnnotation else { return }
+            // 唤醒模式下点击空白处不退出，必须通过 UI 按钮明确退出
             if parent.isAwakenMode { return }
             if parent.selectedCluster != nil {
                 Task { @MainActor in parent.selectedCluster = nil }

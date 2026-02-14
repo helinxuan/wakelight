@@ -20,6 +20,10 @@ struct ExplorationRootView: View {
                 revealedClusterIds: $revealedClusterIds
             )
             .ignoresSafeArea()
+            .task {
+                let ids = await viewModel.loadHalfRevealedClusterIds()
+                revealedClusterIds = ids
+            }
 
             if isAwakenMode {
                 VStack {
