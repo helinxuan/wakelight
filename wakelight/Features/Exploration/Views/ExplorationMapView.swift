@@ -5,6 +5,7 @@ import UIKit
 struct ExplorationMapView: UIViewRepresentable {
     @ObservedObject var viewModel: ExploreViewModel
     @Binding var selectedCluster: PlaceCluster?
+    @Binding var awakenQueue: [PlaceCluster]
     @Binding var isAwakenMode: Bool
 
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
@@ -26,23 +27,35 @@ struct ExplorationMapView: UIViewRepresentable {
 
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard parent.isAwakenMode else { return }
-            
+
+            // 只在滑动过程中命中（避免 begin/end 重复）
+            guard gesture.state == .changed else { return }
+
             let location = gesture.location(in: gesture.view)
             let mapView = gesture.view as! MKMapView
-            
+
             // 3.1.2: 扩大 hit-test 响应区
             let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
-            
+
             for annotation in currentAnnotations {
                 let point = mapView.convert(annotation.coordinate, toPointTo: mapView)
                 if hitRect.contains(point) {
-                    // 命中逻辑
-                    if parent.selectedCluster?.id != annotation.cluster.id {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        Task { @MainActor in
-                            parent.selectedCluster = annotation.cluster
-                        }
+                    let hitCluster = annotation.cluster
+
+                    // 去重：同一个 cluster 只入队一次
+                    if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
+                        return
                     }
+
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+                    Task { @MainActor in
+                        parent.awakenQueue.append(hitCluster)
+
+                        // 用队列的“最新命中”作为当前选中（用于动画/锚点等）
+                        parent.selectedCluster = hitCluster
+                    }
+                    return
                 }
             }
         }

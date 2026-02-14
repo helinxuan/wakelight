@@ -1,8 +1,11 @@
 import SwiftUI
 
 struct ExplorationRootView: View {
+    @Environment(\.displayScale) private var displayScale
+
     @StateObject private var viewModel = ExploreViewModel()
     @State private var selectedCluster: PlaceCluster?
+    @State private var awakenQueue: [PlaceCluster] = []
     @State private var isAwakenMode: Bool = false
     @State private var showBadges: Bool = false
 
@@ -11,6 +14,7 @@ struct ExplorationRootView: View {
             ExplorationMapView(
                 viewModel: viewModel,
                 selectedCluster: $selectedCluster,
+                awakenQueue: $awakenQueue,
                 isAwakenMode: $isAwakenMode
             )
             .ignoresSafeArea()
@@ -21,6 +25,7 @@ struct ExplorationRootView: View {
                         Spacer()
                         Button(action: {
                             selectedCluster = nil
+                            awakenQueue.removeAll()
                             isAwakenMode = false
                         }) {
                             Image(systemName: "xmark.circle.fill")
@@ -61,18 +66,21 @@ struct ExplorationRootView: View {
                 }
                 .padding()
 
-                if let cluster = selectedCluster, isAwakenMode {
-                    MemoryPanelView(placeCluster: cluster)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: UIScreen.main.bounds.height * 0.5)
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .shadow(radius: 18)
-                        .transition(.move(edge: .bottom))
+                if !awakenQueue.isEmpty, isAwakenMode {
+                    GeometryReader { geometry in
+                        MemoryPanelView(clusters: awakenQueue)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: geometry.size.height * 0.5)
+                            .background(Color(.systemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .shadow(radius: 18)
+                    }
+                    .frame(height: 400) // Fallback or explicit height if needed
+                    .transition(.move(edge: .bottom))
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.22), value: selectedCluster?.id)
+        .animation(.easeInOut(duration: 0.22), value: awakenQueue.map(\.id))
         .sheet(isPresented: $showBadges) {
             BadgeWallView()
         }

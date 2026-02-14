@@ -21,7 +21,7 @@ struct TimelineCarouselView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
-            .onChange(of: selectedIndex) { newIndex in
+            .onChange(of: selectedIndex) { _, newIndex in
                 withAnimation(.easeInOut) {
                     proxy.scrollTo(newIndex, anchor: .center)
                 }

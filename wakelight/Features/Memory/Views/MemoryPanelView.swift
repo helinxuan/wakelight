@@ -4,20 +4,26 @@ import GRDB
 import UIKit
 
 struct MemoryPanelView: View {
-    let placeCluster: PlaceCluster
+    let clusters: [PlaceCluster]
 
     @StateObject private var viewModel: MemoryPanelViewModel
 
-    init(placeCluster: PlaceCluster) {
-        self.placeCluster = placeCluster
-        _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(placeCluster: placeCluster))
+    init(clusters: [PlaceCluster]) {
+        self.clusters = clusters
+        _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(clusters: clusters))
     }
 
     var body: some View {
         NavigationView {
             List {
                 if viewModel.visitLayers.isEmpty {
-                    Text("No visits yet")
+                    VStack(spacing: 20) {
+                        ProgressView()
+                        Text("唤醒记忆中...")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                    .listRowBackground(Color.clear)
                 } else {
                     ForEach(viewModel.visitLayers, id: \.id) { layer in
                         VisitLayerRowView(layer: layer)
@@ -25,8 +31,11 @@ struct MemoryPanelView: View {
                     }
                 }
             }
-            .navigationTitle("Memory")
+            .navigationTitle("\(clusters.count) 个地点的记忆")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        .onChange(of: clusters.map(\.id)) { _, _ in
+            viewModel.updateClusters(clusters)
         }
     }
 }
@@ -34,19 +43,28 @@ struct MemoryPanelView: View {
 @MainActor
 final class MemoryPanelViewModel: ObservableObject {
     @Published var visitLayers: [VisitLayer] = []
-    private let placeCluster: PlaceCluster
+    private var clusters: [PlaceCluster]
     private var cancellables = Set<AnyCancellable>()
 
-    init(placeCluster: PlaceCluster) {
-        self.placeCluster = placeCluster
+    init(clusters: [PlaceCluster]) {
+        self.clusters = clusters
+        observeVisitLayers()
+    }
+
+    func updateClusters(_ newClusters: [PlaceCluster]) {
+        self.clusters = newClusters
         observeVisitLayers()
     }
 
     private func observeVisitLayers() {
+        cancellables.removeAll()
+
+        let clusterIds = clusters.map { $0.id }
+        
         ValueObservation
             .tracking { db in
                 try VisitLayer
-                    .filter(Column("placeClusterId") == self.placeCluster.id)
+                    .filter(clusterIds.contains(Column("placeClusterId")))
                     .order(Column("startAt").desc)
                     .fetchAll(db)
             }
