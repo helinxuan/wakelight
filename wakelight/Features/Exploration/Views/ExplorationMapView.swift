@@ -8,13 +8,12 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var awakenQueue: [PlaceCluster]
     @Binding var isAwakenMode: Bool
     @Binding var revealedClusterIds: Set<UUID>
-    
 
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
-        private var fogOverlay: FogOverlay?
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
         private var panGesture: UIPanGestureRecognizer?
+        weak var fogScreenView: FogScreenView?
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -23,32 +22,24 @@ struct ExplorationMapView: UIViewRepresentable {
         func setupGestures(for mapView: MKMapView) {
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             pan.delegate = self
-            pan.cancelsTouchesInView = false // 允许手势不中断其他交互
+            pan.cancelsTouchesInView = false
             mapView.addGestureRecognizer(pan)
             self.panGesture = pan
         }
 
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard parent.isAwakenMode else { return }
-
             let mapView = gesture.view as! MKMapView
             let location = gesture.location(in: mapView)
-
-            // 只在滑动过程中命中（避免 begin/end 重复）
             guard gesture.state == .changed else { return }
 
-            // 3.1.2: 扩大 hit-test 响应区
             let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
 
             for annotation in currentAnnotations {
                 let point = mapView.convert(annotation.coordinate, toPointTo: mapView)
                 if hitRect.contains(point) {
                     let hitCluster = annotation.cluster
-
-                    // 去重：同一个 cluster 只入队一次
-                    if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
-                        return
-                    }
+                    if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) { return }
 
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
 
@@ -56,24 +47,12 @@ struct ExplorationMapView: UIViewRepresentable {
                         parent.awakenQueue.append(hitCluster)
                         parent.revealedClusterIds.insert(hitCluster.id)
 
-                        // 同步更新光点视图状态为“变黄”
                         if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
                             view.isHalfRevealed = true
                         }
 
-                        // 3.1.2: 触发显影动画
-                        if let fog = self.fogOverlay {
-                            fog.animatingClusterId = hitCluster.id
-                            fog.animationStartTime = CACurrentMediaTime()
-                            // 找到 renderer 并通知它重绘
-                            if let renderer = mapView.renderer(for: fog) as? FogOverlayRenderer {
-                                renderer.setNeedsDisplay()
-                            } else {
-                                mapView.setNeedsDisplay()
-                            }
-                        }
-
-                        // 用队列的“最新命中”作为当前选中（用于动画/锚点等）
+                        // 通知屏幕层启动扩散动画
+                        fogScreenView?.triggerDiffusion(for: hitCluster.id)
                         parent.selectedCluster = hitCluster
                     }
                     return
@@ -82,58 +61,18 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            // 在唤醒模式下，我们希望接管单指滑动，但允许地图自身的缩放等手势
             return true
         }
 
         func applyAnnotations(to mapView: MKMapView) {
             mapView.removeAnnotations(currentAnnotations)
-
             let annotations = parent.viewModel.clusters.map { ClusterAnnotation(cluster: $0) }
             currentAnnotations = annotations
             mapView.addAnnotations(annotations)
-
-            updateFogOverlay(on: mapView)
-        }
-
-        func updateFogOverlay(on mapView: MKMapView) {
-            print("DEBUG: updateFogOverlay - Revealed: \(parent.revealedClusterIds.count)")
-            if let oldFog = fogOverlay {
-                mapView.removeOverlay(oldFog)
-            }
-
-            let newFog = FogOverlay(clusters: parent.viewModel.clusters, revealedClusterIds: parent.revealedClusterIds)
-            
-            // 保持状态（避免 SwiftUI 刷新导致 overlay 重建后洞/刮痕丢失）
-            if let oldFog = fogOverlay {
-                newFog.animatingClusterId = oldFog.animatingClusterId
-                newFog.animationStartTime = oldFog.animationStartTime
-                newFog.scratchPaths = oldFog.scratchPaths
-                newFog.scratchLineWidthPoints = oldFog.scratchLineWidthPoints
-            }
-
-            fogOverlay = newFog
-            // 明确指定在 Labels 之上，确保不会被遮挡
-            mapView.addOverlay(newFog, level: .aboveLabels)
-        }
-
-        func updateAnnotationStyles() {
-            for ann in currentAnnotations {
-                // 未来：这里可以根据 revealedClusterIds 控制 annotation view 的 half-reveal 样式
-                _ = ann
-            }
-        }
-
-        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            if let fog = overlay as? FogOverlay {
-                return FogOverlayRenderer(overlay: fog)
-            }
-            return MKOverlayRenderer(overlay: overlay)
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation { return nil }
-
             guard let clusterAnnotation = annotation as? ClusterAnnotation else { return nil }
             let cluster = clusterAnnotation.cluster
 
@@ -143,44 +82,28 @@ struct ExplorationMapView: UIViewRepresentable {
 
             view.annotation = annotation
             view.canShowCallout = false
-            view.rightCalloutAccessoryView = nil
-
             view.isStoryPoint = cluster.hasStory
             view.updateStyle()
             return view
         }
 
-        func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
+        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            // 地图每一帧变动都让屏幕迷雾重绘，屏幕空间渲染极快且无缝
+            fogScreenView?.setNeedsDisplay()
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? ClusterAnnotation else { return }
-
-            // 3.1.2: 点击光点只进入“城市级锁定/唤醒模式”，不直接打开记忆面板
-            Task { @MainActor in
-                parent.isAwakenMode = true
-            }
-
-            // 飞入城市级（MVP：固定缩放到一个较近的跨度）
-            let region = MKCoordinateRegion(
-                center: ann.coordinate,
-                span: MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25)
-            )
+            Task { @MainActor in parent.isAwakenMode = true }
+            let region = MKCoordinateRegion(center: ann.coordinate, span: MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25))
             mapView.setRegion(region, animated: true)
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
             guard view.annotation is ClusterAnnotation else { return }
-
-            // 3.1.2: 唤醒模式下不因“取消选中”而关闭面板；退出由上层统一控制
-            if parent.isAwakenMode {
-                return
-            }
-
+            if parent.isAwakenMode { return }
             if parent.selectedCluster != nil {
-                Task { @MainActor in
-                    parent.selectedCluster = nil
-                }
+                Task { @MainActor in parent.selectedCluster = nil }
             }
         }
     }
@@ -189,37 +112,165 @@ struct ExplorationMapView: UIViewRepresentable {
         Coordinator(parent: self)
     }
 
-    func makeUIView(context: Context) -> MKMapView {
-        let mapView = MKMapView(frame: .zero)
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        
+        let mapView = MKMapView()
         mapView.delegate = context.coordinator
         mapView.showsUserLocation = true
-        mapView.userTrackingMode = .none
+        mapView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(mapView)
+
+        // 添加屏幕空间迷雾视图
+        let fogView = FogScreenView(mapView: mapView)
+        fogView.clusters = viewModel.clusters
+        fogView.revealedClusterIds = revealedClusterIds
+        fogView.translatesAutoresizingMaskIntoConstraints = false
+        fogView.isUserInteractionEnabled = false // 穿透交互
+        container.addSubview(fogView)
+        context.coordinator.fogScreenView = fogView
+
+        NSLayoutConstraint.activate([
+            mapView.topAnchor.constraint(equalTo: container.topAnchor),
+            mapView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            mapView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            mapView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            
+            fogView.topAnchor.constraint(equalTo: container.topAnchor),
+            fogView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            fogView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            fogView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
-        let region = MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: 34.0, longitude: 103.0),
-            span: span
-        )
+        let region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 34.0, longitude: 103.0), span: span)
         mapView.setRegion(region, animated: false)
 
         context.coordinator.applyAnnotations(to: mapView)
         context.coordinator.setupGestures(for: mapView)
-        return mapView
+        
+        return container
     }
 
-    func updateUIView(_ uiView: MKMapView, context: Context) {
+    func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.parent = self
+        guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
+              let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
 
-        // 3.1.2: 唤醒模式下禁止单指拖动地图，避免与唤醒滑动冲突
-        uiView.isScrollEnabled = !isAwakenMode
+        mapView.isScrollEnabled = !isAwakenMode
+        
+        // 同步数据到迷雾视图
+        fogView.clusters = viewModel.clusters
+        fogView.revealedClusterIds = revealedClusterIds
+        fogView.setNeedsDisplay()
 
-        // 避免每次 SwiftUI 刷新都移除/重建 annotation
         if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
-            context.coordinator.applyAnnotations(to: uiView)
-        } else {
-            // 即使数量没变，如果 revealedClusterIds 变了，也要同步更新迷雾
-            context.coordinator.updateFogOverlay(on: uiView)
-            context.coordinator.updateAnnotationStyles()
+            context.coordinator.applyAnnotations(to: mapView)
+        }
+    }
+}
+
+/// 屏幕空间迷雾视图：直接在 UIView 上绘制，解决 MapKit Overlay 的拼接和刷新延迟问题
+final class FogScreenView: UIView {
+    weak var mapView: MKMapView?
+    var clusters: [PlaceCluster] = []
+    var revealedClusterIds: Set<UUID> = []
+    
+    // 扩散动画状态
+    private var animatingClusterId: UUID?
+    private var animationStartTime: TimeInterval?
+    private var displayLink: CADisplayLink?
+    
+    private let fogAlpha: CGFloat = 0.65
+    private let baseHoleRadius: CGFloat = 15
+    private let revealedHoleRadius: CGFloat = 65
+    private let animationDuration: TimeInterval = 0.6
+
+    init(mapView: MKMapView) {
+        self.mapView = mapView
+        super.init(frame: .zero)
+        self.backgroundColor = .clear
+        self.isOpaque = false
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func triggerDiffusion(for clusterId: UUID) {
+        animatingClusterId = clusterId
+        animationStartTime = CACurrentMediaTime()
+        startDisplayLink()
+    }
+
+    private func startDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = CADisplayLink(target: self, selector: #selector(onDisplayLink))
+        displayLink?.add(to: .main, forMode: .common)
+    }
+
+    @objc private func onDisplayLink() {
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext(), let mapView = mapView else { return }
+        
+        // 1. 填充背景迷雾
+        context.setFillColor(UIColor.black.withAlphaComponent(fogAlpha).cgColor)
+        context.fill(rect)
+
+        context.saveGState()
+        context.setBlendMode(.destinationOut)
+        
+        let currentTime = CACurrentMediaTime()
+        var hasActiveAnimation = false
+
+        for cluster in clusters {
+            let coord = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+            let screenPoint = mapView.convert(coord, toPointTo: self)
+            
+            // 剔除屏幕外的点（留出 100pt 缓冲）
+            guard rect.insetBy(dx: -100, dy: -100).contains(screenPoint) else { continue }
+
+            var radius: CGFloat = baseHoleRadius
+            var opacity: CGFloat = 1.0
+            var isSpecial = false
+
+            if cluster.id == animatingClusterId, let start = animationStartTime {
+                let elapsed = currentTime - start
+                let progress = min(1.0, elapsed / animationDuration)
+                let easeOut = 1 - pow(1 - progress, 3)
+                
+                radius = baseHoleRadius + (revealedHoleRadius - baseHoleRadius) * CGFloat(easeOut)
+                opacity = CGFloat(easeOut)
+                isSpecial = true
+                if progress < 1.0 { hasActiveAnimation = true }
+            } else if revealedClusterIds.contains(cluster.id) {
+                radius = revealedHoleRadius
+                isSpecial = true
+            }
+
+            if isSpecial {
+                // 柔和边缘渐变
+                let colors = [
+                    UIColor.black.withAlphaComponent(opacity).cgColor,
+                    UIColor.black.withAlphaComponent(0).cgColor
+                ] as CFArray
+                let locations: [CGFloat] = [0.6, 1.0]
+                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: locations) {
+                    context.drawRadialGradient(gradient, startCenter: screenPoint, startRadius: 0, endCenter: screenPoint, endRadius: radius, options: .drawsAfterEndLocation)
+                }
+            } else {
+                // 普通小洞
+                context.setFillColor(UIColor.black.cgColor)
+                context.fillEllipse(in: CGRect(x: screenPoint.x - radius, y: screenPoint.y - radius, width: radius * 2, height: radius * 2))
+            }
+        }
+        
+        context.restoreGState()
+
+        if !hasActiveAnimation {
+            displayLink?.invalidate()
+            displayLink = nil
         }
     }
 }

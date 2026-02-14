@@ -71,16 +71,15 @@ struct ExplorationRootView: View {
                 }
 
                 if !awakenQueue.isEmpty, isAwakenMode {
-                    GeometryReader { geometry in
-                        MemoryPanelView(clusters: awakenQueue)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: geometry.size.height * 0.45)
-                            .background(Color(.systemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .shadow(color: Color.black.opacity(0.2), radius: 10, x: 0, y: -5)
-                    }
-                    .frame(height: 420)
-                    .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
+                    MemoryPanelView(clusters: awakenQueue)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 380)
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .shadow(color: Color.black.opacity(0.15), radius: 20, x: 0, y: -5)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 20)
+                        .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
                 }
             }
             .ignoresSafeArea(edges: .bottom)

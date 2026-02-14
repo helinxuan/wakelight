@@ -3,12 +3,14 @@ import UIKit
 
 /// 覆盖全球的迷雾 Overlay
 final class FogOverlay: NSObject, MKOverlay {
-    var coordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 0, longitude: 0)
-    var boundingMapRect: MKMapRect = .world
+    var coordinate: CLLocationCoordinate2D
+    var boundingMapRect: MKMapRect
 
     var clusters: [PlaceCluster]
     var revealedClusterIds: Set<UUID>
-
+    
+    // 性能优化：缓存 MapPoints 避免每次重绘都进行坐标转换
+    private(set) var clusterMapPoints: [UUID: MKMapPoint] = [:]
 
     // 动画状态
     var animatingClusterId: UUID?
@@ -18,10 +20,32 @@ final class FogOverlay: NSObject, MKOverlay {
     var scratchPaths: [UIBezierPath] = []
     var scratchLineWidthPoints: CGFloat = 22
 
-    init(clusters: [PlaceCluster], revealedClusterIds: Set<UUID>) {
+    init(
+        clusters: [PlaceCluster],
+        revealedClusterIds: Set<UUID>,
+        boundingMapRect: MKMapRect
+    ) {
         self.clusters = clusters
         self.revealedClusterIds = revealedClusterIds
+        self.boundingMapRect = boundingMapRect
+
+        let center = MKMapPoint(x: boundingMapRect.midX, y: boundingMapRect.midY)
+        self.coordinate = center.coordinate
+        
+        // 预计算坐标
+        var points: [UUID: MKMapPoint] = [:]
+        for c in clusters {
+            points[c.id] = MKMapPoint(CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude))
+        }
+        self.clusterMapPoints = points
+
         super.init()
+    }
+
+    func updateBoundingMapRect(_ newRect: MKMapRect) {
+        boundingMapRect = newRect
+        let center = MKMapPoint(x: newRect.midX, y: newRect.midY)
+        coordinate = center.coordinate
     }
 }
 
@@ -41,76 +65,78 @@ final class FogOverlayRenderer: MKOverlayRenderer {
     override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
         guard let fogOverlay = overlay as? FogOverlay else { return }
         
-        // DEBUG LOG: 确认渲染器正在工作
-        if fogOverlay.animatingClusterId != nil {
-            print("DEBUG: Fog Draw - Animating: \(fogOverlay.animatingClusterId?.uuidString ?? "nil"), RevealedCount: \(fogOverlay.revealedClusterIds.count)")
-        }
-
         let rect = self.rect(for: mapRect)
         context.setFillColor(fogColor.cgColor)
         context.fill(rect)
 
-        context.setBlendMode(.destinationOut)
-        context.setFillColor(UIColor.black.cgColor)
-
         let currentTime = CACurrentMediaTime()
         var hasActiveAnimation = false
 
-        for cluster in fogOverlay.clusters {
-            let coord = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-            let mapPoint = MKMapPoint(coord)
-            let point = self.point(for: mapPoint)
+        // 核心修复：
+        // 1. MapKit 的 draw 是按 tile 调用的，这里的 context 坐标系已经通过 zoomScale 缩放过了
+        // 2. 如果要实现“屏幕固定大小”的洞，我们需要把“期望的屏幕点半径”乘以 (1.0 / zoomScale)
+        //    因为在渲染器的 context 中，1个单位 = 1个地图点，而 1个屏幕点 = (1.0 / zoomScale) 个地图点
+        let scaleFactor = 1.0 / zoomScale
 
-            var r: CGFloat = 0
+        for cluster in fogOverlay.clusters {
+            guard let mapPoint = fogOverlay.clusterMapPoints[cluster.id] else { continue }
+            
+            // 快速剔除不在当前 tile 的点
+            let maxExpectedRadius = (holeMaxRadiusPoints + 20) * scaleFactor
+            let expandedTileRect = mapRect.insetBy(dx: -maxExpectedRadius, dy: -maxExpectedRadius)
+            if !expandedTileRect.contains(mapPoint) { continue }
+
+            let point = self.point(for: mapPoint)
+            var rPoints: CGFloat = 0
+            var opacity: CGFloat = 1.0
+            var isSpecialHole = false
             
             if cluster.id == fogOverlay.animatingClusterId, let start = fogOverlay.animationStartTime {
                 let elapsed = currentTime - start
                 let progress = min(1.0, elapsed / burstDuration)
-
-                // 统一屏幕半径策略：爆发时从 18 扩大大 60
-                let baseR = holeBaseRadiusPoints + (holeMaxRadiusPoints - holeBaseRadiusPoints) * CGFloat(progress)
-                r = (max(18, min(baseR, 60))) / zoomScale
-
-                if progress < 1.0 {
-                    hasActiveAnimation = true
-                }
-
-                if r > 0 {
-                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
-                    context.fillEllipse(in: circleRect)
-                }
-
-                context.setBlendMode(.normal)
-                context.setStrokeColor(UIColor.systemYellow.withAlphaComponent(0.35).cgColor)
-                context.setLineWidth(max(1.0, 4.0 / zoomScale))
-
-                for i in 0..<burstRingCount {
-                    let ringP = min(1.0, progress + Double(i) * 0.12)
-                    let ringR = (max(20, min(holeBaseRadiusPoints + (holeMaxRadiusPoints * 1.1 - holeBaseRadiusPoints) * CGFloat(ringP), 70))) / zoomScale
-                    let alpha = CGFloat(max(0.0, 1.0 - ringP))
-                    context.setStrokeColor(UIColor.systemYellow.withAlphaComponent(0.35 * alpha).cgColor)
-                    let ringRect = CGRect(x: point.x - ringR, y: point.y - ringR, width: ringR * 2, height: ringR * 2)
-                    context.strokeEllipse(in: ringRect)
-                }
-
-                context.setBlendMode(.destinationOut)
-                context.setFillColor(UIColor.black.cgColor)
+                
+                let easeOutProgress = 1 - pow(1 - progress, 3)
+                rPoints = holeBaseRadiusPoints + (holeMaxRadiusPoints - holeBaseRadiusPoints) * CGFloat(easeOutProgress)
+                opacity = CGFloat(easeOutProgress)
+                isSpecialHole = true
+                
+                if progress < 1.0 { hasActiveAnimation = true }
             } else if fogOverlay.revealedClusterIds.contains(cluster.id) {
-                // 常驻洞屏幕半径固定在 55 左右
-                r = 55 / zoomScale
-
-                if r > 0 {
-                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
-                    context.fillEllipse(in: circleRect)
-                }
+                rPoints = holeMaxRadiusPoints
+                isSpecialHole = true
             } else {
-                // 默认小洞屏幕半径固定在 15
-                r = 15 / zoomScale
+                rPoints = 15 // 未解锁的小洞基础半径
+            }
 
-                if r > 0 {
-                    let circleRect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
-                    context.fillEllipse(in: circleRect)
+            // 最终绘图半径转为地图点单位
+            let rMapPoints = rPoints * scaleFactor
+
+            if rMapPoints > 0 {
+                context.saveGState()
+                context.setBlendMode(.destinationOut)
+                
+                if isSpecialHole {
+                    // 对已解锁或正在动画的洞使用径向渐变，实现柔和边缘
+                    let colors = [
+                        UIColor.black.withAlphaComponent(opacity).cgColor,
+                        UIColor.black.withAlphaComponent(0).cgColor
+                    ] as CFArray
+                    let locations: [CGFloat] = [0.6, 1.0]
+                    
+                    if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: locations) {
+                        context.drawRadialGradient(gradient, 
+                                                startCenter: point, startRadius: 0, 
+                                                endCenter: point, endRadius: rMapPoints, 
+                                                options: .drawsAfterEndLocation)
+                    }
+                } else {
+                    // 对大量默认小洞使用简单的 fillEllipse，极大降低渲染开销
+                    context.setFillColor(UIColor.black.cgColor)
+                    let holeRect = CGRect(x: point.x - rMapPoints, y: point.y - rMapPoints, 
+                                        width: rMapPoints * 2, height: rMapPoints * 2)
+                    context.fillEllipse(in: holeRect)
                 }
+                context.restoreGState()
             }
         }
 

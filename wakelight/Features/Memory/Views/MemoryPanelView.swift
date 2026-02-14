@@ -34,6 +34,7 @@ struct MemoryPanelView: View {
             .navigationTitle("\(clusters.count) 个地点的记忆")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .background(Color(.systemBackground))
         .onChange(of: clusters.map(\.id)) { _, _ in
             viewModel.updateClusters(clusters)
         }
