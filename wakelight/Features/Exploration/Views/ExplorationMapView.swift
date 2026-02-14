@@ -56,6 +56,11 @@ struct ExplorationMapView: UIViewRepresentable {
                         parent.awakenQueue.append(hitCluster)
                         parent.revealedClusterIds.insert(hitCluster.id)
 
+                        // 同步更新光点视图状态为“变黄”
+                        if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                            view.isHalfRevealed = true
+                        }
+
                         // 3.1.2: 触发显影动画
                         if let fog = self.fogOverlay {
                             fog.animatingClusterId = hitCluster.id
@@ -87,14 +92,34 @@ struct ExplorationMapView: UIViewRepresentable {
             let annotations = parent.viewModel.clusters.map { ClusterAnnotation(cluster: $0) }
             currentAnnotations = annotations
             mapView.addAnnotations(annotations)
-            
-            // 更新迷雾
+
+            updateFogOverlay(on: mapView)
+        }
+
+        func updateFogOverlay(on mapView: MKMapView) {
+            print("DEBUG: updateFogOverlay - Revealed: \(parent.revealedClusterIds.count)")
             if let oldFog = fogOverlay {
                 mapView.removeOverlay(oldFog)
             }
+
             let newFog = FogOverlay(clusters: parent.viewModel.clusters, revealedClusterIds: parent.revealedClusterIds)
+            
+            // 保持动画状态
+            if let oldFog = fogOverlay {
+                newFog.animatingClusterId = oldFog.animatingClusterId
+                newFog.animationStartTime = oldFog.animationStartTime
+            }
+
             fogOverlay = newFog
-            mapView.addOverlay(newFog)
+            // 明确指定在 Labels 之上，确保不会被遮挡
+            mapView.addOverlay(newFog, level: .aboveLabels)
+        }
+
+        func updateAnnotationStyles() {
+            for ann in currentAnnotations {
+                // 未来：这里可以根据 revealedClusterIds 控制 annotation view 的 half-reveal 样式
+                _ = ann
+            }
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -186,9 +211,13 @@ struct ExplorationMapView: UIViewRepresentable {
         // 3.1.2: 唤醒模式下禁止单指拖动地图，避免与唤醒滑动冲突
         uiView.isScrollEnabled = !isAwakenMode
 
-        // 避免每次 SwiftUI 刷新都移除/重建 annotation，导致选中状态和 callout 被打断
+        // 避免每次 SwiftUI 刷新都移除/重建 annotation
         if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
             context.coordinator.applyAnnotations(to: uiView)
+        } else {
+            // 即使数量没变，如果 revealedClusterIds 变了，也要同步更新迷雾
+            context.coordinator.updateFogOverlay(on: uiView)
+            context.coordinator.updateAnnotationStyles()
         }
     }
 }

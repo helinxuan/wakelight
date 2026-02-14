@@ -10,6 +10,12 @@ final class LightPointAnnotationView: MKAnnotationView {
             updateStyle()
         }
     }
+
+    var isHalfRevealed: Bool = false {
+        didSet {
+            updateStyle()
+        }
+    }
     
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -34,7 +40,15 @@ final class LightPointAnnotationView: MKAnnotationView {
     
     func updateStyle() {
         let style = AppConfig.default.lightPointStyle
-        let color = isStoryPoint ? UIColor(hex: style.highlightedColorHex) : UIColor(hex: style.defaultColorHex)
+        let color: UIColor?
+        if isStoryPoint {
+            color = UIColor(hex: style.highlightedColorHex)
+        } else if isHalfRevealed {
+            color = UIColor(hex: "FFD54A")
+        } else {
+            color = UIColor(hex: style.defaultColorHex)
+        }
+
         let size = isStoryPoint ? style.highlightedSize : style.defaultSize
         
         // 增加点击区域
