@@ -96,6 +96,8 @@ flowchart TB
     ClusterPlacesUC
     UpsertVisitLayerUC
     SettleStoryNodeUC
+    MergeVisitLayersUC
+    ArchiveDormantLayersUC
     AutoCurateStoryUC
     GenerateTimeRouteUC
     EvaluateAchievementsUC
@@ -265,14 +267,18 @@ Wakelight/
 - `tags: String` (JSON string)
 - `voiceNotePath: String?`
 - `settledAt: Date?`
+- `luminance: Double`（呼吸强度，随时间衰减/手动降噪）
+- `isArchived: Bool`（是否已进入归档层）
 
-### 5.2.4 `TimeRouteNode`（时光模式节点）
+### 5.2.4 `StoryNode`（显影的故事节点）
 
 - `id: UUID` (PK)
-- `visitLayerId: UUID` (FK)
-- `sortOrder: Int`
-- `displayTitle: String?`
-- `displaySummary: String?`
+- `placeClusterId: UUID` (FK)
+- `mainTitle: String?`
+- `mainSummary: String?`
+- `coverPhotoId: String` (PHAsset identifier)
+- `subStoryIds: String` (JSON array of VisitLayer IDs, 支持章节结构)
+- `createdAt: Date`
 
 ### 5.2.5 `AchievementProgress`
 
@@ -365,20 +371,29 @@ flowchart TD
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Footprint
-  Footprint --> Footprint: 新增照片/到访批次（VisitLayer）
-  Footprint --> StoryNode: 用户写话/收藏/标记精华（沉淀）
-  StoryNode --> StoryNode: 继续补写/编辑（不回退）
+  [*] --> Explore
+  Explore --> FocusCity: 点击光点（PlaceCluster）
+  FocusCity --> Awaken: 镜头飞入城市级并锁定
+  Awaken --> MemoryPanel: 达到唤醒阈值（揉搓刮擦显影）
+  MemoryPanel --> StoryNode: 单访次写话 或 多访次合并（沉淀）
+  StoryNode --> StoryNode: 增加章节/编辑文案
+
+  Awaken --> Explore: 取消/退出唤醒
+  FocusCity --> Explore: 返回/取消
 ```
 
-显影瞬间的原子动作（同一事务/同一 UseCase）：
+交互与手势约束（工程落地口径）：
+- 进入 `Awaken` 后地图中心锁定为城市局部区域，**禁止单指拖动地图**，避免与显影手势冲突。
+- `Awaken` 的显影采用“瞬时扩散、不留轨迹”的雾层交互：每次触点产生圆形/椭圆扩散并累计唤醒进度，达到阈值触发一次爆发显影并进入 `MemoryPanel`。
 
-- 更新 `CDVisitLayer.isStoryNode = true`
-- 更新 `CDVisitLayer.settledAt = now`
-- 更新 `CDPlaceCluster.hasStory = true`
-- 选择/生成该 Story Node 的封面缩略图缓存（文件缓存层）
-- emit `StorySettled(visitLayerId, placeId)`（领域事件，见第 8 章）
-
+显影与容器逻辑说明：
+- **[单一访次写话]**：系统为该 `VisitLayer` 自动创建一个 `StoryNode` 容器，该 VisitLayer 作为唯一的章节。
+- **[多访次合并]**：用户手动选择多个 `VisitLayer` 合并，创建一个 `StoryNode` 容器，每个 VisitLayer 成为该故事的一个“章节（Chapter）”。
+- **原子动作（同一事务）**：
+  - 创建/更新 `StoryNode` 记录。
+  - 更新关联的 `VisitLayer.isStoryNode = true` 及其显影属性。
+  - 更新 `PlaceCluster.hasStory = true` 触发地图显影。
+  - emit `StorySettled(storyId, placeId)` 领域事件。
 ## 6.3 时光模式节点生成（MVP）
 
 ```mermaid
