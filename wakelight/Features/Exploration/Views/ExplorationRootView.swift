@@ -6,6 +6,7 @@ struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
     @State private var selectedCluster: PlaceCluster?
     @State private var awakenQueue: [PlaceCluster] = []
+    @State private var revealedClusterIds: Set<UUID> = []
     @State private var isAwakenMode: Bool = false
     @State private var showBadges: Bool = false
 
@@ -15,7 +16,8 @@ struct ExplorationRootView: View {
                 viewModel: viewModel,
                 selectedCluster: $selectedCluster,
                 awakenQueue: $awakenQueue,
-                isAwakenMode: $isAwakenMode
+                isAwakenMode: $isAwakenMode,
+                revealedClusterIds: $revealedClusterIds
             )
             .ignoresSafeArea()
 
@@ -40,45 +42,45 @@ struct ExplorationRootView: View {
                 }
             }
 
-            VStack {
+            VStack(spacing: 0) {
                 Spacer()
 
-                HStack(spacing: 12) {
-                    Button(action: {
-                        showBadges = true
-                    }) {
-                        Label("Badges", systemImage: "medal.fill")
-                            .padding()
-                            .background(Color.black.opacity(0.7))
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
+                if !isAwakenMode {
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            showBadges = true
+                        }) {
+                            Label("Badges", systemImage: "medal.fill")
+                                .padding()
+                                .background(Color.black.opacity(0.7))
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                        }
 
-                    Button(action: {
-                        viewModel.importPhotos()
-                    }) {
-                        Label("Import Photos", systemImage: "photo.on.rectangle")
-                            .padding()
-                            .background(Color.blue)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
+                        Button(action: {
+                            viewModel.importPhotos()
+                        }) {
+                            Label("Import Photos", systemImage: "photo.on.rectangle")
+                                .padding()
+                                .background(Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                        }
                     }
+                    .padding()
                 }
-                .padding()
 
                 if !awakenQueue.isEmpty, isAwakenMode {
-                    GeometryReader { geometry in
-                        MemoryPanelView(clusters: awakenQueue)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: geometry.size.height * 0.5)
-                            .background(Color(.systemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .shadow(radius: 18)
-                    }
-                    .frame(height: 400) // Fallback or explicit height if needed
-                    .transition(.move(edge: .bottom))
+                    MemoryPanelView(clusters: awakenQueue)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: UIScreen.main.bounds.height * 0.45)
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .shadow(color: Color.black.opacity(0.2), radius: 10, x: 0, y: -5)
+                        .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
                 }
             }
+            .ignoresSafeArea(edges: .bottom)
         }
         .animation(.easeInOut(duration: 0.22), value: awakenQueue.map(\.id))
         .sheet(isPresented: $showBadges) {

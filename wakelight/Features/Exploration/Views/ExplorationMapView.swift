@@ -7,6 +7,8 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var selectedCluster: PlaceCluster?
     @Binding var awakenQueue: [PlaceCluster]
     @Binding var isAwakenMode: Bool
+    @Binding var revealedClusterIds: Set<UUID>
+    
 
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         private var fogOverlay: FogOverlay?
@@ -21,6 +23,7 @@ struct ExplorationMapView: UIViewRepresentable {
         func setupGestures(for mapView: MKMapView) {
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             pan.delegate = self
+            pan.cancelsTouchesInView = false // 允许手势不中断其他交互
             mapView.addGestureRecognizer(pan)
             self.panGesture = pan
         }
@@ -51,6 +54,19 @@ struct ExplorationMapView: UIViewRepresentable {
 
                     Task { @MainActor in
                         parent.awakenQueue.append(hitCluster)
+                        parent.revealedClusterIds.insert(hitCluster.id)
+
+                        // 3.1.2: 触发显影动画
+                        if let fog = self.fogOverlay {
+                            fog.animatingClusterId = hitCluster.id
+                            fog.animationStartTime = CACurrentMediaTime()
+                            // 找到 renderer 并通知它重绘
+                            if let renderer = mapView.renderer(for: fog) as? FogOverlayRenderer {
+                                renderer.setNeedsDisplay()
+                            } else {
+                                mapView.setNeedsDisplay()
+                            }
+                        }
 
                         // 用队列的“最新命中”作为当前选中（用于动画/锚点等）
                         parent.selectedCluster = hitCluster
@@ -76,7 +92,7 @@ struct ExplorationMapView: UIViewRepresentable {
             if let oldFog = fogOverlay {
                 mapView.removeOverlay(oldFog)
             }
-            let newFog = FogOverlay(clusters: parent.viewModel.clusters)
+            let newFog = FogOverlay(clusters: parent.viewModel.clusters, revealedClusterIds: parent.revealedClusterIds)
             fogOverlay = newFog
             mapView.addOverlay(newFog)
         }
