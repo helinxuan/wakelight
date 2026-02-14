@@ -289,6 +289,16 @@ Wakelight/
 - `unlockedAt: Date?`
 - `updatedAt: Date`
 
+### 5.2.6 `AwakenState`（唤醒过程持久化：能量条 + 半显影）
+
+- `id: UUID` (PK)
+- `placeClusterId: UUID` (FK, Unique Index)
+- `energy: Int`（0–100；按划过光点累计，支持权重）
+- `isHalfRevealed: Bool`（是否处于半显影状态：微弱缩略图预览 + 呼吸光晕）
+- `awakenedPointCount: Int`（本轮累计已触发的光点数量，用于调参/引导）
+- `lastAwakenedAt: Date?`
+- `updatedAt: Date`
+
 ## 5.3 实体关系图（Mermaid ER）
 
 ```mermaid
@@ -374,7 +384,7 @@ stateDiagram-v2
   [*] --> Explore
   Explore --> FocusCity: 点击光点（PlaceCluster）
   FocusCity --> Awaken: 镜头飞入城市级并锁定
-  Awaken --> MemoryPanel: 达到唤醒阈值（揉搓刮擦显影）
+  Awaken --> MemoryPanel: 划过首个光点（命中）→ 打开城市 MemoryPanel（会话队列模式）
   MemoryPanel --> StoryNode: 单访次写话 或 多访次合并（沉淀）
   StoryNode --> StoryNode: 增加章节/编辑文案
 
@@ -383,8 +393,19 @@ stateDiagram-v2
 ```
 
 交互与手势约束（工程落地口径）：
-- 进入 `Awaken` 后地图中心锁定为城市局部区域，**禁止单指拖动地图**，避免与显影手势冲突。
-- `Awaken` 的显影采用“瞬时扩散、不留轨迹”的雾层交互：每次触点产生圆形/椭圆扩散并累计唤醒进度，达到阈值触发一次爆发显影并进入 `MemoryPanel`。
+- 进入 `Awaken` 后地图中心锁定为城市局部区域，**禁止单指拖动地图**，避免与唤醒滑动冲突。
+- `Awaken` 的显影采用 **Pan 滑动命中** 逻辑：
+  - 手指路径经过的光点（或光点聚类）逐个触发，产生圆形/放射状散雾。
+  - 触发瞬间通过 `DesignSystem/Particles` 与 `DesignSystem/Sounds` 接口发出暖色粒子、haptic（心跳感）与柔和音效反馈。
+  - **一键快捷唤醒（吹气仪式）**：
+    - 支持通过麦克风检测“吹气”动作（`OnBlow` 事件）。
+    - 触发后执行批量逻辑：以触发瞬间地图 `VisibleMapRect/Region` 为筛选范围，且仅作用于**归属于当前城市**的光点；将这些光点对应的 `AwakenState.isHalfRevealed = true`，并全部增量加入 `SessionQueue`，同步更新 `MemoryPanel` UI。
+  - 以“会话队列”方式累计本次唤醒结果：
+    - 划过**首个光点**时打开城市 `MemoryPanel`（半屏浮层），并将该点对应的 VisitLayer 加入本次会话队列。
+    - 后续每次命中光点，都将对应 VisitLayer **增量加入**面板队列，并触发面板内的自动聚合/去重（同一天/同一行程可合并成候选故事组）。
+  - `AwakenState` 用于持久化“半显影”与会话统计（例如已触发点数、最后唤醒时间）；不再作为必须“填满能量条”的硬门槛。
+  - **持久化状态**：已划过的点标记为 `isHalfRevealed`，记录在 `AwakenState` 中；退出唤醒层后状态保留，下次进入仍可继续在面板中增量加入新的光点。
+  - **容错**：`hit-test` 区域应略大于光点视觉尺寸，支持连续划过（画线连接）多个点。
 
 显影与容器逻辑说明：
 - **[单一访次写话]**：系统为该 `VisitLayer` 自动创建一个 `StoryNode` 容器，该 VisitLayer 作为唯一的章节。
@@ -419,7 +440,7 @@ flowchart LR
   - **避免全屏重绘**：雾层实现必须支持“低频更新 + 局部重绘”。
 - **数据边界（本地事实源）**：
   - `CDPlaceCluster.fogState` 作为业务状态（`locked/partial/revealed`）。
-  - 若需要更强“仪式复现”（例如保存刮擦形状），可在 SQLite/GRDB 额外存 `FogSnapshot`（tile/bitmap/压缩数据），但它是**体验缓存**，可重建、可选择不同步。
+  - 若需要更强“仪式复现”（例如保存已唤醒/半显影的点集合或局部 reveal 状态），可在 SQLite/GRDB 额外存 `FogSnapshot`（tile/bitmap/压缩数据），但它是**体验缓存**，可重建、可选择不同步。
 - **光点与聚合**：
   - 光点采用 `MKAnnotation`。
   - 大量点必须开启 MapKit clustering；当可见点过多时，优先展示 cluster，避免强行展开单点。
