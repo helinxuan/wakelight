@@ -15,6 +15,9 @@ struct ExplorationMapView: UIViewRepresentable {
         private var panGesture: UIPanGestureRecognizer?
         weak var fogScreenView: FogScreenView?
 
+        private var hitStreakCount: Int = 0
+        private var lastHitTime: TimeInterval = 0
+
         init(parent: ExplorationMapView) {
             self.parent = parent
         }
@@ -41,7 +44,15 @@ struct ExplorationMapView: UIViewRepresentable {
                     let hitCluster = annotation.cluster
                     if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) { return }
 
-                    HapticPlayer.light()
+                    // 渐强 haptic：连续命中越多，反馈越强（间隔太久则重置 streak）
+                    let now = CACurrentMediaTime()
+                    if now - lastHitTime > 0.8 {
+                        hitStreakCount = 0
+                    }
+                    lastHitTime = now
+                    hitStreakCount += 1
+
+                    HapticPlayer.play(forCount: hitStreakCount)
                     SystemSoundPlayer.playTick()
 
                     Task { @MainActor in
@@ -55,6 +66,13 @@ struct ExplorationMapView: UIViewRepresentable {
                         // 通知屏幕层启动扩散动画
                         fogScreenView?.triggerDiffusion(for: hitCluster.id)
                         parent.selectedCluster = hitCluster
+
+                        if let fogView = fogScreenView {
+                            let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
+                            StardustEmitter.emit(at: screenPoint, in: fogView)
+                        } else {
+                            StardustEmitter.emit(at: point, in: mapView)
+                        }
 
                         Task {
                             await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
