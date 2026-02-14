@@ -5,14 +5,51 @@ import UIKit
 struct ExplorationMapView: UIViewRepresentable {
     @ObservedObject var viewModel: ExploreViewModel
     @Binding var selectedCluster: PlaceCluster?
+    @Binding var isAwakenMode: Bool
 
-    final class Coordinator: NSObject, MKMapViewDelegate {
+    final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         private var fogOverlay: FogOverlay?
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
+        private var panGesture: UIPanGestureRecognizer?
 
         init(parent: ExplorationMapView) {
             self.parent = parent
+        }
+
+        func setupGestures(for mapView: MKMapView) {
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            pan.delegate = self
+            mapView.addGestureRecognizer(pan)
+            self.panGesture = pan
+        }
+
+        @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+            guard parent.isAwakenMode else { return }
+            
+            let location = gesture.location(in: gesture.view)
+            let mapView = gesture.view as! MKMapView
+            
+            // 3.1.2: 扩大 hit-test 响应区
+            let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
+            
+            for annotation in currentAnnotations {
+                let point = mapView.convert(annotation.coordinate, toPointTo: mapView)
+                if hitRect.contains(point) {
+                    // 命中逻辑
+                    if parent.selectedCluster?.id != annotation.cluster.id {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        Task { @MainActor in
+                            parent.selectedCluster = annotation.cluster
+                        }
+                    }
+                }
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            // 在唤醒模式下，我们希望接管单指滑动，但允许地图自身的缩放等手势
+            return true
         }
 
         func applyAnnotations(to mapView: MKMapView) {
@@ -49,11 +86,8 @@ struct ExplorationMapView: UIViewRepresentable {
                 ?? LightPointAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
 
             view.annotation = annotation
-            view.canShowCallout = true
-
-            // 点击打开记忆面板
-            let detailButton = UIButton(type: .detailDisclosure)
-            view.rightCalloutAccessoryView = detailButton
+            view.canShowCallout = false
+            view.rightCalloutAccessoryView = nil
 
             view.isStoryPoint = cluster.hasStory
             view.updateStyle()
@@ -61,23 +95,32 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
-            guard let ann = view.annotation as? ClusterAnnotation else { return }
-            parent.selectedCluster = ann.cluster
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
-            print("DEBUG: Map didSelect - cluster: \((view.annotation as? ClusterAnnotation)?.cluster.id.uuidString ?? "unknown")")
             guard let ann = view.annotation as? ClusterAnnotation else { return }
-            if parent.selectedCluster?.id != ann.cluster.id {
-                Task { @MainActor in
-                    parent.selectedCluster = ann.cluster
-                }
+
+            // 3.1.2: 点击光点只进入“城市级锁定/唤醒模式”，不直接打开记忆面板
+            Task { @MainActor in
+                parent.isAwakenMode = true
             }
+
+            // 飞入城市级（MVP：固定缩放到一个较近的跨度）
+            let region = MKCoordinateRegion(
+                center: ann.coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25)
+            )
+            mapView.setRegion(region, animated: true)
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
-            print("DEBUG: Map didDeselect")
             guard view.annotation is ClusterAnnotation else { return }
+
+            // 3.1.2: 唤醒模式下不因“取消选中”而关闭面板；退出由上层统一控制
+            if parent.isAwakenMode {
+                return
+            }
+
             if parent.selectedCluster != nil {
                 Task { @MainActor in
                     parent.selectedCluster = nil
@@ -104,11 +147,15 @@ struct ExplorationMapView: UIViewRepresentable {
         mapView.setRegion(region, animated: false)
 
         context.coordinator.applyAnnotations(to: mapView)
+        context.coordinator.setupGestures(for: mapView)
         return mapView
     }
 
     func updateUIView(_ uiView: MKMapView, context: Context) {
         context.coordinator.parent = self
+
+        // 3.1.2: 唤醒模式下禁止单指拖动地图，避免与唤醒滑动冲突
+        uiView.isScrollEnabled = !isAwakenMode
 
         // 避免每次 SwiftUI 刷新都移除/重建 annotation，导致选中状态和 callout 被打断
         if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
