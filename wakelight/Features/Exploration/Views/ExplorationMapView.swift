@@ -138,7 +138,10 @@ struct ExplorationMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? ClusterAnnotation else { return }
-            Task { @MainActor in parent.isAwakenMode = true }
+            Task { @MainActor in
+                parent.isAwakenMode = true
+                parent.selectedCluster = ann.cluster
+            }
             let region = MKCoordinateRegion(center: ann.coordinate, span: MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25))
             mapView.setRegion(region, animated: true)
         }
