@@ -461,12 +461,6 @@ private struct StoryNodeRowView: View {
                     .foregroundColor(.secondary)
             }
 
-            if let title = node.mainTitle, !title.isEmpty {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.primary)
-            }
-
             if !coverLocalIdentifiers.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
