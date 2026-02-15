@@ -60,6 +60,20 @@ struct MemoryPanelView: View {
         _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(clusters: clusters, selectedClusterId: selectedClusterId))
     }
 
+    @State private var selectedDetailItem: DetailItem?
+
+    enum DetailItem: Identifiable {
+        case unhandled(VisitLayer)
+        case story(StoryNode)
+
+        var id: String {
+            switch self {
+            case .unhandled(let layer): return "unhandled-\(layer.id)"
+            case .story(let node): return "story-\(node.id)"
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             List {
@@ -87,20 +101,17 @@ struct MemoryPanelView: View {
                         .frame(maxWidth: .infinity, minHeight: 200)
                         .listRowBackground(Color.clear)
                     } else {
-                        // 按 placeClusterId 分组展示
                         let groupedLayers = Dictionary(grouping: visibleLayers, by: { $0.placeClusterId })
                         let sortedClusterIds = Array(Set(visibleLayers.map { $0.placeClusterId })).sorted { id1, id2 in
-                            // 如果是当前选中的点，排最前面
                             if id1 == viewModel.selectedClusterId { return true }
                             if id2 == viewModel.selectedClusterId { return false }
-                            // 否则按该组内最新的时间排
                             let time1 = groupedLayers[id1]?.first?.startAt ?? Date.distantPast
                             let time2 = groupedLayers[id2]?.first?.startAt ?? Date.distantPast
                             return time1 > time2
                         }
 
                         ForEach(sortedClusterIds, id: \.self) { clusterId in
-                            Section(header: 
+                            Section(header:
                                 HStack(spacing: 4) {
                                     Image(systemName: "mappin.and.ellipse")
                                         .font(.system(size: 12, weight: .bold))
@@ -130,6 +141,18 @@ struct MemoryPanelView: View {
                                         }
                                     )
                                     .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        if isMultiSelectMode {
+                                            if selectedVisitLayerIds.contains(layer.id) {
+                                                selectedVisitLayerIds.remove(layer.id)
+                                            } else {
+                                                selectedVisitLayerIds.insert(layer.id)
+                                            }
+                                        } else {
+                                            selectedDetailItem = .unhandled(layer)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -146,7 +169,6 @@ struct MemoryPanelView: View {
                         .frame(maxWidth: .infinity, minHeight: 200)
                         .listRowBackground(Color.clear)
                     } else {
-                        // 按 placeClusterId 分组展示
                         let groupedStories = Dictionary(grouping: visibleStories, by: { $0.placeClusterId })
                         let sortedClusterIds = Array(Set(visibleStories.map { $0.placeClusterId })).sorted { id1, id2 in
                             if id1 == viewModel.selectedClusterId { return true }
@@ -157,7 +179,7 @@ struct MemoryPanelView: View {
                         }
 
                         ForEach(sortedClusterIds, id: \.self) { clusterId in
-                            Section(header: 
+                            Section(header:
                                 HStack(spacing: 4) {
                                     Image(systemName: "mappin.and.ellipse")
                                         .font(.system(size: 12, weight: .bold))
@@ -170,6 +192,10 @@ struct MemoryPanelView: View {
                                 ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
                                     StoryNodeRowView(node: node)
                                         .padding(.vertical, 6)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            selectedDetailItem = .story(node)
+                                        }
                                 }
                             }
                         }
@@ -181,6 +207,9 @@ struct MemoryPanelView: View {
                 if newValue == .story {
                     exitMultiSelect()
                 }
+            }
+            .sheet(item: $selectedDetailItem) { item in
+                MemoryPhotoWallSheet(item: item, clusterNames: viewModel.clusterNames)
             }
             .safeAreaInset(edge: .bottom) {
                 if filterMode == .unhandled && isMultiSelectMode {
@@ -249,6 +278,298 @@ struct MemoryPanelView: View {
     }
 }
 
+private struct MemoryPhotoWallSheet: View {
+    enum Item {
+        case unhandled(VisitLayer)
+        case story(StoryNode)
+    }
+
+    let item: MemoryPanelView.DetailItem
+    let clusterNames: [UUID: String]
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var titleText: String = ""
+    @State private var editText: String = ""
+    @State private var photoLocalIdentifiers: [String] = []
+    @State private var isSaving: Bool = false
+    @State private var errorMessage: String?
+    @State private var selectedPhotoIndex: Int?
+
+    private let gridColumns: [GridItem] = [
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2)
+    ]
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(titleText)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundColor(.secondary)
+
+                            if let placeText = placeText {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "mappin.and.ellipse")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(placeText)
+                                        .font(.system(size: 14, weight: .bold))
+                                }
+                                .foregroundColor(.primary)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextEditor(text: $editText)
+                                .frame(minHeight: 110)
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color.secondary.opacity(0.08))
+                                )
+
+                            if let errorMessage {
+                                Text(errorMessage)
+                                    .font(.footnote)
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        LazyVGrid(columns: gridColumns, spacing: 2) {
+                            ForEach(Array(photoLocalIdentifiers.enumerated()), id: \.offset) { idx, id in
+                                ThumbnailView(localIdentifier: id, size: CGSize(width: 110, height: 110))
+                                    .clipped()
+                                    .onTapGesture {
+                                        selectedPhotoIndex = idx
+                                    }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
+                    }
+                }
+            }
+            .navigationTitle("照片墙")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("关闭") { dismiss() }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "保存中..." : "保存") {
+                        save()
+                    }
+                    .disabled(isSaving)
+                }
+            }
+        }
+        .task {
+            await load()
+        }
+        .fullScreenCover(item: Binding(get: {
+            if let idx = selectedPhotoIndex {
+                return PhotoPreviewItem(index: idx)
+            }
+            return nil
+        }, set: { _ in
+            selectedPhotoIndex = nil
+        })) { preview in
+            PhotoPreviewPager(localIdentifiers: photoLocalIdentifiers, startIndex: preview.index)
+        }
+    }
+
+    private var placeText: String? {
+        switch item {
+        case .unhandled(let layer):
+            return clusterNames[layer.placeClusterId]
+        case .story(let node):
+            return clusterNames[node.placeClusterId]
+        }
+    }
+
+    private func load() async {
+        do {
+            switch item {
+            case .unhandled(let layer):
+                editText = layer.userText ?? ""
+                titleText = dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
+                photoLocalIdentifiers = try await loadPhotosForVisitLayer(visitLayerId: layer.id)
+
+            case .story(let node):
+                editText = node.mainSummary ?? ""
+                let (minStart, maxEnd) = try await loadTimeRangeForStory(node)
+                if let minStart, let maxEnd {
+                    titleText = dateRangeText(startAt: minStart, endAt: maxEnd)
+                } else {
+                    titleText = ""
+                }
+                photoLocalIdentifiers = try await loadPhotosForStory(node)
+            }
+        } catch {
+            await MainActor.run {
+                errorMessage = String(describing: error)
+            }
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                try await DatabaseContainer.shared.writer.write { db in
+                    let now = Date()
+                    switch item {
+                    case .unhandled(let layer):
+                        guard var current = try VisitLayer.fetchOne(db, key: layer.id) else { return }
+                        current.userText = trimmed
+                        try current.update(db)
+
+                    case .story(let node):
+                        guard var current = try StoryNode.fetchOne(db, key: node.id) else { return }
+                        current.mainSummary = trimmed
+                        current.updatedAt = now
+                        try current.update(db)
+                    }
+                }
+
+                await MainActor.run {
+                    isSaving = false
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    isSaving = false
+                    errorMessage = String(describing: error)
+                }
+            }
+        }
+    }
+
+    private func loadPhotosForVisitLayer(visitLayerId: UUID) async throws -> [String] {
+        try await DatabaseContainer.shared.db.reader.read { db in
+            let links = try VisitLayerPhotoAsset
+                .filter(Column("visitLayerId") == visitLayerId)
+                .fetchAll(db)
+
+            if links.isEmpty { return [] }
+
+            let photoIds = Array(Set(links.map { $0.photoAssetId }))
+            let photos = try PhotoAsset
+                .filter(photoIds.contains(Column("id")))
+                .order(Column("creationDate").asc)
+                .fetchAll(db)
+
+            return photos.map { $0.localIdentifier }
+        }
+    }
+
+    private func loadPhotosForStory(_ node: StoryNode) async throws -> [String] {
+        let visitLayerIds = node.subVisitLayerIds
+        guard !visitLayerIds.isEmpty else { return [] }
+
+        return try await DatabaseContainer.shared.db.reader.read { db in
+            let links = try VisitLayerPhotoAsset
+                .filter(visitLayerIds.contains(Column("visitLayerId")))
+                .fetchAll(db)
+
+            if links.isEmpty { return [] }
+
+            let photoIds = Array(Set(links.map { $0.photoAssetId }))
+            let photos = try PhotoAsset
+                .filter(photoIds.contains(Column("id")))
+                .order(Column("creationDate").asc)
+                .fetchAll(db)
+
+            return photos.map { $0.localIdentifier }
+        }
+    }
+
+    private func loadTimeRangeForStory(_ node: StoryNode) async throws -> (Date?, Date?) {
+        let ids = node.subVisitLayerIds
+        guard !ids.isEmpty else { return (nil, nil) }
+
+        return try await DatabaseContainer.shared.db.reader.read { db in
+            let layers = try VisitLayer
+                .filter(ids.contains(Column("id")))
+                .fetchAll(db)
+
+            return (layers.map(\.startAt).min(), layers.map(\.endAt).max())
+        }
+    }
+
+    private func dateRangeText(startAt: Date, endAt: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
+        let start = formatter.string(from: startAt)
+
+        let calendar = Calendar.current
+        if calendar.isDate(startAt, inSameDayAs: endAt) {
+            formatter.dateFormat = "HH:mm"
+        }
+        let end = formatter.string(from: endAt)
+
+        return "\(start) - \(end)"
+    }
+
+    private struct PhotoPreviewItem: Identifiable {
+        let index: Int
+        var id: Int { index }
+    }
+}
+
+private struct PhotoPreviewPager: View {
+    let localIdentifiers: [String]
+    let startIndex: Int
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: Int
+
+    init(localIdentifiers: [String], startIndex: Int) {
+        self.localIdentifiers = localIdentifiers
+        self.startIndex = startIndex
+        _selection = State(initialValue: startIndex)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            TabView(selection: $selection) {
+                ForEach(Array(localIdentifiers.enumerated()), id: \.offset) { idx, id in
+                    VStack {
+                        Spacer()
+                        ThumbnailView(localIdentifier: id, size: CGSize(width: 340, height: 340))
+                            .scaledToFit()
+                        Spacer()
+                    }
+                    .tag(idx)
+                    .background(Color.black)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .always))
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .padding(16)
+            }
+        }
+        .background(Color.black)
+    }
+}
+
 private struct MergeVisitLayersSheet: View {
     let visitLayers: [VisitLayer]
 
@@ -296,9 +617,6 @@ private struct MergeVisitLayersSheet: View {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                     )
-                    // 避免每次输入都向父层回传，导致父视图（包含大 List）频繁刷新而卡顿。
-                    // 这里仅在确认时把 localSummaryText 写回 summaryText。
-
 
                 if let errorMessage {
                     Text(errorMessage)
@@ -336,13 +654,12 @@ private struct MergeVisitLayersSheet: View {
     }
 }
 
-
 @MainActor
 final class MemoryPanelViewModel: ObservableObject {
     @Published var visitLayers: [VisitLayer] = []
     @Published var storyNodes: [StoryNode] = []
     @Published var cityName: String?
-    @Published var clusterNames: [UUID: String] = [:] // 存储每个光点的地名
+    @Published var clusterNames: [UUID: String] = [:]
 
     var selectedClusterId: UUID? {
         didSet {
@@ -386,8 +703,7 @@ final class MemoryPanelViewModel: ObservableObject {
     private func observeData() {
         cancellables.removeAll()
         let clusterIds = clusters.map { $0.id }
-        
-        // 观察 VisitLayer
+
         ValueObservation
             .tracking { db in
                 try VisitLayer
@@ -403,7 +719,6 @@ final class MemoryPanelViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // 观察 StoryNode
         ValueObservation
             .tracking { db in
                 try StoryNode
@@ -423,16 +738,16 @@ final class MemoryPanelViewModel: ObservableObject {
             self.visitLayers = rawVisitLayers
             return
         }
-        
+
         self.visitLayers = rawVisitLayers.sorted { a, b in
             let aIsSelected = a.placeClusterId == selectedId
             let bIsSelected = b.placeClusterId == selectedId
-            
+
             if aIsSelected != bIsSelected {
-                return aIsSelected // 选中的排在前面
+                return aIsSelected
             }
-            
-            return a.startAt > b.startAt // 相同优先级按时间倒序
+
+            return a.startAt > b.startAt
         }
     }
 
@@ -563,8 +878,6 @@ private struct VisitLayerRowView: View {
     @State private var draftText: String = ""
     @State private var isSaving: Bool = false
 
-    private let columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 4), count: 4)
-
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             if isMultiSelectMode {
@@ -673,7 +986,6 @@ private struct VisitLayerRowView: View {
         Task {
             do {
                 try await SettleStoryNodeUseCase().run(visitLayerId: layer.id, text: draftText)
-                // 成功后由数据库观察者或父视图刷新，这里简单处理
                 await MainActor.run {
                     isSaving = false
                 }
@@ -691,14 +1003,13 @@ private struct VisitLayerRowView: View {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
         let start = formatter.string(from: layer.startAt)
-        
-        // 如果结束日期和开始日期是同一天，简化显示
+
         let calendar = Calendar.current
         if calendar.isDate(layer.startAt, inSameDayAs: layer.endAt) {
             formatter.dateFormat = "HH:mm"
         }
         let end = formatter.string(from: layer.endAt)
-        
+
         return "\(start) - \(end)"
     }
 }

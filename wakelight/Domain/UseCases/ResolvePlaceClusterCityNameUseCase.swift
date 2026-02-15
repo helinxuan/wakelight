@@ -84,10 +84,17 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         request.preferredLocale = Locale(identifier: "zh_CN")
         let items = try await request.mapItems
         guard let item = items.first else { return nil }
+
         let placemark = item.placemark
-        return formatDetailedName(district: placemark.subLocality, street: placemark.thoroughfare, name: placemark.name, city: placemark.locality)
+        return formatDetailedName(
+            district: placemark.subLocality,
+            street: placemark.thoroughfare,
+            name: placemark.name,
+            city: placemark.locality
+        )
     }
 
+    @available(iOS, deprecated: 26.0)
     private func reverseGeocodeDetailedNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
         let geocoder = CLGeocoder()
@@ -145,10 +152,13 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         request.preferredLocale = Locale(identifier: "zh_CN")
         let items = try await request.mapItems
         guard let item = items.first else { return nil }
-        let candidate = item.placemark.locality ?? item.placemark.administrativeArea
+
+        let placemark = item.placemark
+        let candidate = placemark.locality ?? placemark.administrativeArea
         return candidate?.replacingOccurrences(of: "市", with: "")
     }
 
+    @available(iOS, deprecated: 26.0)
     private func reverseGeocodeCityNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
         let geocoder = CLGeocoder()
