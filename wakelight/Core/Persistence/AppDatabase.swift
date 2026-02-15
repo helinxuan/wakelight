@@ -98,17 +98,15 @@ struct AppDatabase {
                 t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
-        }
-        
-        migrator.registerMigration("v2-visit-layer-photos") { db in
-            // 关联表：VisitLayer <-> PhotoAsset (多对多)
+
+            // 5.2.8 VisitLayerPhotoAsset (关联表)
             try db.create(table: "visitLayerPhotoAsset") { t in
                 t.column("visitLayerId", .text).notNull().references("visitLayer", onDelete: .cascade)
                 t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
                 t.primaryKey(["visitLayerId", "photoAssetId"])
             }
         }
-
+        
         return migrator
     }
 }
