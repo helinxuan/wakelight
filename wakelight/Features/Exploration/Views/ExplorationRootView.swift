@@ -122,7 +122,7 @@ struct ExplorationRootView: View {
                         )
 
                         // 始终保留 MemoryPanelView 以维持其内部多选状态，仅通过高度和透明度控制视觉隐藏
-                        MemoryPanelView(clusters: awakenQueue)
+                        MemoryPanelView(clusters: awakenQueue, selectedClusterId: selectedCluster?.id)
                             .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
                             .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
                             .clipped()

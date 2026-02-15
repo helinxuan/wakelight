@@ -6,6 +6,7 @@ import CoreLocation
 
 struct MemoryPanelView: View {
     let clusters: [PlaceCluster]
+    let selectedClusterId: UUID?
 
     @StateObject private var viewModel: MemoryPanelViewModel
 
@@ -53,9 +54,10 @@ struct MemoryPanelView: View {
     @State private var isMerging: Bool = false
     @State private var mergeErrorMessage: String?
 
-    init(clusters: [PlaceCluster]) {
+    init(clusters: [PlaceCluster], selectedClusterId: UUID? = nil) {
         self.clusters = clusters
-        _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(clusters: clusters))
+        self.selectedClusterId = selectedClusterId
+        _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(clusters: clusters, selectedClusterId: selectedClusterId))
     }
 
     var body: some View {
@@ -193,6 +195,9 @@ struct MemoryPanelView: View {
         .onChange(of: clusters.map(\.id)) { _, _ in
             viewModel.updateClusters(clusters)
         }
+        .onChange(of: selectedClusterId) { _, newValue in
+            viewModel.selectedClusterId = newValue
+        }
     }
 }
 
@@ -289,14 +294,22 @@ final class MemoryPanelViewModel: ObservableObject {
     @Published var visitLayers: [VisitLayer] = []
     @Published var storyNodes: [StoryNode] = []
     @Published var cityName: String?
+    
+    var selectedClusterId: UUID? {
+        didSet {
+            applySorting()
+        }
+    }
 
     private var clusters: [PlaceCluster]
     private var cancellables = Set<AnyCancellable>()
+    private var rawVisitLayers: [VisitLayer] = []
 
     private let resolveCityNameUseCase = ResolvePlaceClusterCityNameUseCase()
 
-    init(clusters: [PlaceCluster]) {
+    init(clusters: [PlaceCluster], selectedClusterId: UUID? = nil) {
         self.clusters = clusters
+        self.selectedClusterId = selectedClusterId
         observeData()
         resolveCityNameIfNeeded()
     }
@@ -321,7 +334,9 @@ final class MemoryPanelViewModel: ObservableObject {
             }
             .publisher(in: DatabaseContainer.shared.db.reader)
             .sink { _ in } receiveValue: { [weak self] layers in
-                self?.visitLayers = layers
+                guard let self = self else { return }
+                self.rawVisitLayers = layers
+                self.applySorting()
             }
             .store(in: &cancellables)
 
@@ -338,6 +353,24 @@ final class MemoryPanelViewModel: ObservableObject {
                 self?.storyNodes = nodes
             }
             .store(in: &cancellables)
+    }
+
+    private func applySorting() {
+        guard let selectedId = selectedClusterId else {
+            self.visitLayers = rawVisitLayers
+            return
+        }
+        
+        self.visitLayers = rawVisitLayers.sorted { a, b in
+            let aIsSelected = a.placeClusterId == selectedId
+            let bIsSelected = b.placeClusterId == selectedId
+            
+            if aIsSelected != bIsSelected {
+                return aIsSelected // 选中的排在前面
+            }
+            
+            return a.startAt > b.startAt // 相同优先级按时间倒序
+        }
     }
 
     private func resolveCityNameIfNeeded() {

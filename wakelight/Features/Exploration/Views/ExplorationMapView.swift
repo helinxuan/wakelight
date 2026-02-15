@@ -73,7 +73,7 @@ struct ExplorationMapView: UIViewRepresentable {
                         }
                     }
 
-                    // 2. 业务逻辑：仅当是新揭开的点时，才执行扩散雾、加列表、更新数据库
+                    // 2. 业务逻辑
                     if !isAlreadyInQueue {
                         Task { @MainActor in
                             parent.awakenQueue.append(hitCluster)
@@ -89,6 +89,13 @@ struct ExplorationMapView: UIViewRepresentable {
 
                             Task {
                                 await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
+                            }
+                        }
+                    } else {
+                        // 如果已经在队列中，滑动滑过时也要更新 selectedCluster 以触发面板置顶
+                        if parent.selectedCluster?.id != hitCluster.id {
+                            Task { @MainActor in
+                                parent.selectedCluster = hitCluster
                             }
                         }
                     }
