@@ -324,6 +324,7 @@ erDiagram
     double centerLatitude
     double centerLongitude
     string geohash
+    string cityName "optional, cached reverse-geocode"
     int photoCount
     int visitCount
     string fogState

@@ -35,6 +35,7 @@ struct AppDatabase {
                 t.column("centerLatitude", .double).notNull()
                 t.column("centerLongitude", .double).notNull()
                 t.column("geohash", .text).notNull().indexed()
+                t.column("cityName", .text)
                 t.column("photoCount", .integer).notNull().defaults(to: 0)
                 t.column("visitCount", .integer).notNull().defaults(to: 0)
                 t.column("fogState", .text).notNull().defaults(to: "locked")
@@ -82,6 +83,18 @@ struct AppDatabase {
                 t.column("isHalfRevealed", .boolean).notNull().defaults(to: false)
                 t.column("awakenedPointCount", .integer).notNull().defaults(to: 0)
                 t.column("lastAwakenedAt", .datetime)
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            // 5.2.7 StoryNode
+            try db.create(table: "storyNode") { t in
+                t.column("id", .text).primaryKey()
+                t.column("placeClusterId", .text).notNull().references("placeCluster", onDelete: .cascade)
+                t.column("mainTitle", .text)
+                t.column("mainSummary", .text)
+                t.column("coverPhotoId", .text).notNull()
+                t.column("subVisitLayerIdsJson", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
         }

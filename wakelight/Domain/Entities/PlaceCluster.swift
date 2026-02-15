@@ -14,6 +14,7 @@ struct PlaceCluster: Codable, FetchableRecord, PersistableRecord, Identifiable {
     var centerLatitude: Double
     var centerLongitude: Double
     var geohash: String
+    var cityName: String?
     var photoCount: Int
     var visitCount: Int
     var fogState: FogState
