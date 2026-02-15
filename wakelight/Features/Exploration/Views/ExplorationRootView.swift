@@ -99,9 +99,15 @@ struct ExplorationRootView: View {
                         .contentShape(Rectangle())
                         .background(Color(.systemBackground))
                         .task(id: awakenQueue.map(\.id)) {
-                            let cityName = await ResolvePlaceClusterCityNameUseCase().run(clusters: awakenQueue)
-                            await MainActor.run {
-                                self.panelCityName = cityName
+                            if let first = awakenQueue.first {
+                                let name = try? await ResolvePlaceClusterCityNameUseCase().resolveCityName(for: first)
+                                await MainActor.run {
+                                    self.panelCityName = name
+                                }
+                            } else {
+                                await MainActor.run {
+                                    self.panelCityName = nil
+                                }
                             }
                         }
                         .gesture(

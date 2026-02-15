@@ -36,6 +36,7 @@ struct AppDatabase {
                 t.column("centerLongitude", .double).notNull()
                 t.column("geohash", .text).notNull().indexed()
                 t.column("cityName", .text)
+                t.column("detailedAddress", .text)
                 t.column("photoCount", .integer).notNull().defaults(to: 0)
                 t.column("visitCount", .integer).notNull().defaults(to: 0)
                 t.column("fogState", .text).notNull().defaults(to: "locked")
@@ -107,7 +108,6 @@ struct AppDatabase {
                 t.primaryKey(["visitLayerId", "photoAssetId"])
             }
         }
-
 
         return migrator
     }

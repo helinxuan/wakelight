@@ -351,7 +351,7 @@ final class MemoryPanelViewModel: ObservableObject {
     private func resolveClusterNames() {
         for cluster in clusters {
             Task {
-                if let name = try? await resolveCityNameUseCase.run(cluster: cluster) {
+                if let name = try? await resolveCityNameUseCase.resolveDetailedAddress(for: cluster) {
                     await MainActor.run {
                         self.clusterNames[cluster.id] = name
                     }
@@ -414,9 +414,9 @@ final class MemoryPanelViewModel: ObservableObject {
     }
 
     private func resolveCityNameIfNeeded() {
-        guard cityName == nil else { return }
+        guard cityName == nil, let first = clusters.first else { return }
         Task {
-            let name = await resolveCityNameUseCase.run(clusters: clusters)
+            let name = try? await resolveCityNameUseCase.resolveCityName(for: first)
             await MainActor.run {
                 self.cityName = name
             }
