@@ -12,16 +12,45 @@ final class SettleStoryNodeUseCase {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        let now = Date()
+
         let clusterId: UUID = try await writer.write { db in
             guard var layer = try VisitLayer.fetchOne(db, key: visitLayerId) else {
                 throw SettleStoryNodeError.visitLayerNotFound
             }
 
+            // 1. 寻找封面图 (取该 Layer 关联的最新的照片)
+            let photoAssetIds = try VisitLayerPhotoAsset
+                .filter(Column("visitLayerId") == visitLayerId)
+                .fetchAll(db)
+                .map { $0.photoAssetId }
+
+            guard let coverPhotoId = try PhotoAsset
+                .filter(photoAssetIds.contains(Column("id")))
+                .order(Column("creationDate").desc)
+                .fetchOne(db)
+                .map({ $0.localIdentifier }) else {
+                throw SettleStoryNodeError.coverPhotoNotFound
+            }
+
+            // 2. 更新 VisitLayer 状态
             layer.userText = trimmed
             layer.isStoryNode = true
-            layer.settledAt = Date()
+            layer.settledAt = now
             try layer.update(db)
 
+            // 3. 创建对应的 StoryNode，确保它出现在“已成故事”列表中
+            let story = StoryNode(
+                placeClusterId: layer.placeClusterId,
+                mainSummary: trimmed,
+                coverPhotoId: coverPhotoId,
+                subVisitLayerIds: [layer.id],
+                createdAt: now,
+                updatedAt: now
+            )
+            try story.insert(db)
+
+            // 4. 更新集群状态
             guard var cluster = try PlaceCluster.fetchOne(db, key: layer.placeClusterId) else {
                 throw SettleStoryNodeError.placeClusterNotFound
             }
@@ -34,7 +63,6 @@ final class SettleStoryNodeUseCase {
             return layer.placeClusterId
         }
 
-        // 事件发出放在事务之后，避免订阅方读到未提交状态
         DomainEventBus.shared.emit(.storySettled(visitLayerId: visitLayerId, placeClusterId: clusterId))
     }
 }
@@ -42,4 +70,5 @@ final class SettleStoryNodeUseCase {
 enum SettleStoryNodeError: Error {
     case visitLayerNotFound
     case placeClusterNotFound
+    case coverPhotoNotFound
 }
