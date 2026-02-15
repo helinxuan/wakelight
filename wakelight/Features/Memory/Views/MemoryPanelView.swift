@@ -279,9 +279,11 @@ struct MemoryPanelView: View {
 }
 
 private struct MemoryPhotoWallSheet: View {
-    enum Item {
-        case unhandled(VisitLayer)
-        case story(StoryNode)
+    struct PhotoGroup: Identifiable {
+        let id: UUID
+        let title: String
+        let location: String?
+        let photoLocalIdentifiers: [String]
     }
 
     let item: MemoryPanelView.DetailItem
@@ -289,9 +291,10 @@ private struct MemoryPhotoWallSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    @State private var titleText: String = ""
+    @State private var summaryTitle: String = ""
     @State private var editText: String = ""
-    @State private var photoLocalIdentifiers: [String] = []
+    @State private var photoGroups: [PhotoGroup] = []
+    @State private var flattenedPhotos: [String] = []
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var selectedPhotoIndex: Int?
@@ -306,28 +309,15 @@ private struct MemoryPhotoWallSheet: View {
         NavigationView {
             VStack(spacing: 0) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(titleText)
+                    VStack(alignment: .leading, spacing: 20) {
+                        // Header / Editor Area
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(summaryTitle)
                                 .font(.subheadline.weight(.medium))
                                 .foregroundColor(.secondary)
-
-                            if let placeText = placeText {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "mappin.and.ellipse")
-                                        .font(.system(size: 12, weight: .bold))
-                                    Text(placeText)
-                                        .font(.system(size: 14, weight: .bold))
-                                }
-                                .foregroundColor(.primary)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-
-                        VStack(alignment: .leading, spacing: 8) {
+                            
                             TextEditor(text: $editText)
-                                .frame(minHeight: 110)
+                                .frame(minHeight: 100)
                                 .padding(10)
                                 .background(
                                     RoundedRectangle(cornerRadius: 12)
@@ -341,18 +331,35 @@ private struct MemoryPhotoWallSheet: View {
                             }
                         }
                         .padding(.horizontal, 16)
+                        .padding(.top, 16)
 
-                        LazyVGrid(columns: gridColumns, spacing: 2) {
-                            ForEach(Array(photoLocalIdentifiers.enumerated()), id: \.offset) { idx, id in
-                                ThumbnailView(localIdentifier: id, size: CGSize(width: 110, height: 110))
-                                    .clipped()
-                                    .onTapGesture {
-                                        selectedPhotoIndex = idx
+                        // Photo Groups
+                        ForEach(photoGroups) { group in
+                            VStack(alignment: .leading, spacing: 8) {
+                                // Group Header
+                                HStack(spacing: 6) {
+                                    Image(systemName: "mappin.and.ellipse")
+                                        .font(.system(size: 10, weight: .bold))
+                                    Text("\(group.location ?? "未知地点") · \(group.title)")
+                                        .font(.system(size: 13, weight: .bold))
+                                }
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 16)
+
+                                LazyVGrid(columns: gridColumns, spacing: 2) {
+                                    ForEach(group.photoLocalIdentifiers, id: \.self) { id in
+                                        ThumbnailView(localIdentifier: id, size: CGSize(width: 120, height: 120))
+                                            .clipped()
+                                            .onTapGesture {
+                                                if let globalIdx = flattenedPhotos.firstIndex(of: id) {
+                                                    selectedPhotoIndex = globalIdx
+                                                }
+                                            }
                                     }
+                                }
                             }
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 16)
+                        .padding(.bottom, 20)
                     }
                 }
             }
@@ -382,16 +389,7 @@ private struct MemoryPhotoWallSheet: View {
         }, set: { _ in
             selectedPhotoIndex = nil
         })) { preview in
-            PhotoPreviewPager(localIdentifiers: photoLocalIdentifiers, startIndex: preview.index)
-        }
-    }
-
-    private var placeText: String? {
-        switch item {
-        case .unhandled(let layer):
-            return clusterNames[layer.placeClusterId]
-        case .story(let node):
-            return clusterNames[node.placeClusterId]
+            PhotoPreviewPager(localIdentifiers: flattenedPhotos, startIndex: preview.index)
         }
     }
 
@@ -400,50 +398,89 @@ private struct MemoryPhotoWallSheet: View {
             switch item {
             case .unhandled(let layer):
                 editText = layer.userText ?? ""
-                titleText = dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
-                photoLocalIdentifiers = try await loadPhotosForVisitLayer(visitLayerId: layer.id)
+                summaryTitle = dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
+                let photos = try await loadPhotosForVisitLayer(visitLayerId: layer.id)
+                let group = PhotoGroup(
+                    id: layer.id,
+                    title: dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
+                    location: clusterNames[layer.placeClusterId],
+                    photoLocalIdentifiers: photos
+                )
+                photoGroups = [group]
+                flattenedPhotos = photos
 
             case .story(let node):
                 editText = node.mainSummary ?? ""
                 let (minStart, maxEnd) = try await loadTimeRangeForStory(node)
                 if let minStart, let maxEnd {
-                    titleText = dateRangeText(startAt: minStart, endAt: maxEnd)
-                } else {
-                    titleText = ""
+                    summaryTitle = dateRangeText(startAt: minStart, endAt: maxEnd)
                 }
-                photoLocalIdentifiers = try await loadPhotosForStory(node)
+
+                // Load all layers for grouping
+                let groups = try await loadGroupsForStory(node)
+                photoGroups = groups
+                flattenedPhotos = groups.flatMap { $0.photoLocalIdentifiers }
             }
         } catch {
-            await MainActor.run {
-                errorMessage = String(describing: error)
+            errorMessage = String(describing: error)
+        }
+    }
+
+    private func loadGroupsForStory(_ node: StoryNode) async throws -> [PhotoGroup] {
+        let visitLayerIds = node.subVisitLayerIds
+        guard !visitLayerIds.isEmpty else { return [] }
+
+        return try await DatabaseContainer.shared.db.reader.read { db in
+            let layers = try VisitLayer
+                .filter(visitLayerIds.contains(Column("id")))
+                .order(Column("startAt").asc)
+                .fetchAll(db)
+            
+            var groups: [PhotoGroup] = []
+            for layer in layers {
+                let links = try VisitLayerPhotoAsset
+                    .filter(Column("visitLayerId") == layer.id)
+                    .fetchAll(db)
+                
+                if links.isEmpty { continue }
+                
+                let photoIds = links.map { $0.photoAssetId }
+                let photos = try PhotoAsset
+                    .filter(photoIds.contains(Column("id")))
+                    .order(Column("creationDate").asc)
+                    .fetchAll(db)
+                
+                groups.append(PhotoGroup(
+                    id: layer.id,
+                    title: dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
+                    location: clusterNames[layer.placeClusterId],
+                    photoLocalIdentifiers: photos.map { $0.localIdentifier }
+                ))
             }
+            return groups
         }
     }
 
     private func save() {
         isSaving = true
-        errorMessage = nil
-
         Task {
             do {
                 let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-
                 try await DatabaseContainer.shared.writer.write { db in
-                    let now = Date()
                     switch item {
                     case .unhandled(let layer):
-                        guard var current = try VisitLayer.fetchOne(db, key: layer.id) else { return }
-                        current.userText = trimmed
-                        try current.update(db)
-
+                        if var current = try VisitLayer.fetchOne(db, key: layer.id) {
+                            current.userText = trimmed
+                            try current.update(db)
+                        }
                     case .story(let node):
-                        guard var current = try StoryNode.fetchOne(db, key: node.id) else { return }
-                        current.mainSummary = trimmed
-                        current.updatedAt = now
-                        try current.update(db)
+                        if var current = try StoryNode.fetchOne(db, key: node.id) {
+                            current.mainSummary = trimmed
+                            current.updatedAt = Date()
+                            try current.update(db)
+                        }
                     }
                 }
-
                 await MainActor.run {
                     isSaving = false
                     dismiss()
@@ -462,49 +499,19 @@ private struct MemoryPhotoWallSheet: View {
             let links = try VisitLayerPhotoAsset
                 .filter(Column("visitLayerId") == visitLayerId)
                 .fetchAll(db)
-
-            if links.isEmpty { return [] }
-
-            let photoIds = Array(Set(links.map { $0.photoAssetId }))
+            let photoIds = links.map { $0.photoAssetId }
             let photos = try PhotoAsset
                 .filter(photoIds.contains(Column("id")))
                 .order(Column("creationDate").asc)
                 .fetchAll(db)
-
-            return photos.map { $0.localIdentifier }
-        }
-    }
-
-    private func loadPhotosForStory(_ node: StoryNode) async throws -> [String] {
-        let visitLayerIds = node.subVisitLayerIds
-        guard !visitLayerIds.isEmpty else { return [] }
-
-        return try await DatabaseContainer.shared.db.reader.read { db in
-            let links = try VisitLayerPhotoAsset
-                .filter(visitLayerIds.contains(Column("visitLayerId")))
-                .fetchAll(db)
-
-            if links.isEmpty { return [] }
-
-            let photoIds = Array(Set(links.map { $0.photoAssetId }))
-            let photos = try PhotoAsset
-                .filter(photoIds.contains(Column("id")))
-                .order(Column("creationDate").asc)
-                .fetchAll(db)
-
             return photos.map { $0.localIdentifier }
         }
     }
 
     private func loadTimeRangeForStory(_ node: StoryNode) async throws -> (Date?, Date?) {
         let ids = node.subVisitLayerIds
-        guard !ids.isEmpty else { return (nil, nil) }
-
         return try await DatabaseContainer.shared.db.reader.read { db in
-            let layers = try VisitLayer
-                .filter(ids.contains(Column("id")))
-                .fetchAll(db)
-
+            let layers = try VisitLayer.filter(ids.contains(Column("id"))).fetchAll(db)
             return (layers.map(\.startAt).min(), layers.map(\.endAt).max())
         }
     }
@@ -514,14 +521,10 @@ private struct MemoryPhotoWallSheet: View {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
         let start = formatter.string(from: startAt)
-
-        let calendar = Calendar.current
-        if calendar.isDate(startAt, inSameDayAs: endAt) {
+        if Calendar.current.isDate(startAt, inSameDayAs: endAt) {
             formatter.dateFormat = "HH:mm"
         }
-        let end = formatter.string(from: endAt)
-
-        return "\(start) - \(end)"
+        return "\(start) - \(formatter.string(from: endAt))"
     }
 
     private struct PhotoPreviewItem: Identifiable {
