@@ -42,9 +42,9 @@ struct ExplorationMapView: UIViewRepresentable {
                 let point = mapView.convert(annotation.coordinate, toPointTo: mapView)
                 if hitRect.contains(point) {
                     let hitCluster = annotation.cluster
-                    if parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) { return }
+                    let isAlreadyInQueue = parent.awakenQueue.contains(where: { $0.id == hitCluster.id })
 
-                    // 渐强 haptic：连续命中越多，反馈越强（间隔太久则重置 streak）
+                    // 1. 视觉/触觉反馈：无论是否已在队列中，只要划过就触发反馈（保持手感）
                     let now = CACurrentMediaTime()
                     if now - lastHitTime > 0.8 {
                         hitStreakCount = 0
@@ -55,27 +55,30 @@ struct ExplorationMapView: UIViewRepresentable {
                     HapticPlayer.play(forCount: hitStreakCount)
                     SystemSoundPlayer.playTick()
 
-                    Task { @MainActor in
-                        parent.awakenQueue.append(hitCluster)
-                        parent.revealedClusterIds.insert(hitCluster.id)
+                    if let fogView = fogScreenView {
+                        let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
+                        StardustEmitter.emit(at: screenPoint, in: fogView)
+                    } else {
+                        StardustEmitter.emit(at: point, in: mapView)
+                    }
 
-                        if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
-                            view.isHalfRevealed = true
-                        }
+                    // 2. 业务逻辑：仅当是新揭开的点时，才执行扩散雾、加列表、更新数据库
+                    if !isAlreadyInQueue {
+                        Task { @MainActor in
+                            parent.awakenQueue.append(hitCluster)
+                            parent.revealedClusterIds.insert(hitCluster.id)
 
-                        // 通知屏幕层启动扩散动画
-                        fogScreenView?.triggerDiffusion(for: hitCluster.id)
-                        parent.selectedCluster = hitCluster
+                            if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                                view.isHalfRevealed = true
+                            }
 
-                        if let fogView = fogScreenView {
-                            let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
-                            StardustEmitter.emit(at: screenPoint, in: fogView)
-                        } else {
-                            StardustEmitter.emit(at: point, in: mapView)
-                        }
+                            // 通知屏幕层启动扩散动画
+                            fogScreenView?.triggerDiffusion(for: hitCluster.id)
+                            parent.selectedCluster = hitCluster
 
-                        Task {
-                            await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
+                            Task {
+                                await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
+                            }
                         }
                     }
                     return

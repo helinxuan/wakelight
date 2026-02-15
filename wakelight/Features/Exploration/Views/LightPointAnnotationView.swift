@@ -43,8 +43,6 @@ final class LightPointAnnotationView: MKAnnotationView {
         let color: UIColor?
         if isStoryPoint {
             color = UIColor(hex: style.highlightedColorHex)
-        } else if isHalfRevealed {
-            color = UIColor(hex: "FFD54A")
         } else {
             color = UIColor(hex: style.defaultColorHex)
         }
