@@ -72,7 +72,7 @@ struct ThumbnailView: View {
         .frame(width: size.width, height: size.height)
         .clipped()
         .cornerRadius(4)
-        .task {
+        .task(id: "\(localIdentifier)-\(Int(size.width))x\(Int(size.height))") {
             image = await PhotoThumbnailLoader.shared.loadThumbnail(for: localIdentifier, size: size)
         }
     }

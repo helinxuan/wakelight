@@ -40,6 +40,11 @@ struct MemoryPanelView: View {
 
     @State private var filterMode: FilterMode = .unhandled
 
+    private func exitMultiSelect() {
+        isMultiSelectMode = false
+        selectedVisitLayerIds.removeAll()
+    }
+
     @State private var isMultiSelectMode: Bool = false
     @State private var selectedVisitLayerIds: Set<UUID> = []
 
@@ -68,59 +73,69 @@ struct MemoryPanelView: View {
                 }
                 .listSectionSeparator(.hidden)
 
-                let visibleLayers = viewModel.visitLayers.filter { layer in
-                    switch filterMode {
-                    case .unhandled:
-                        return layer.isStoryNode == false
-                    case .story:
-                        return layer.isStoryNode == true
-                    }
-                }
+                switch filterMode {
+                case .unhandled:
+                    let visibleLayers = viewModel.visitLayers.filter { $0.isStoryNode == false }
 
-                if visibleLayers.isEmpty {
-                    VStack(spacing: 20) {
-                        Text(emptyStateText)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 200)
-                    .listRowBackground(Color.clear)
-                } else {
-                    ForEach(visibleLayers, id: \.id) { layer in
-                        VisitLayerRowView(
-                            layer: layer,
-                            isMultiSelectMode: isMultiSelectMode,
-                            isSelected: selectedVisitLayerIds.contains(layer.id),
-                            onToggleSelected: {
-                                if selectedVisitLayerIds.contains(layer.id) {
-                                    selectedVisitLayerIds.remove(layer.id)
-                                } else {
+                    if visibleLayers.isEmpty {
+                        VStack(spacing: 20) {
+                            Text(emptyStateText)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                        .listRowBackground(Color.clear)
+                    } else {
+                        ForEach(visibleLayers, id: \.id) { layer in
+                            VisitLayerRowView(
+                                layer: layer,
+                                isMultiSelectMode: isMultiSelectMode,
+                                isSelected: selectedVisitLayerIds.contains(layer.id),
+                                onToggleSelected: {
+                                    if selectedVisitLayerIds.contains(layer.id) {
+                                        selectedVisitLayerIds.remove(layer.id)
+                                    } else {
+                                        selectedVisitLayerIds.insert(layer.id)
+                                    }
+                                },
+                                onLongPressSelect: {
+                                    if !isMultiSelectMode {
+                                        isMultiSelectMode = true
+                                    }
                                     selectedVisitLayerIds.insert(layer.id)
                                 }
-                            },
-                            onLongPressSelect: {
-                                if !isMultiSelectMode {
-                                    isMultiSelectMode = true
-                                }
-                                selectedVisitLayerIds.insert(layer.id)
-                            }
-                        )
-                        .padding(.vertical, 6)
+                            )
+                            .padding(.vertical, 6)
+                        }
+                    }
+
+                case .story:
+                    let visibleStories = viewModel.storyNodes
+
+                    if visibleStories.isEmpty {
+                        VStack(spacing: 20) {
+                            Text(emptyStateText)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                        .listRowBackground(Color.clear)
+                    } else {
+                        ForEach(visibleStories, id: \.id) { node in
+                            StoryNodeRowView(node: node)
+                                .padding(.vertical, 6)
+                        }
                     }
                 }
             }
             .navigationTitle(panelTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("多选") {
-                        isMultiSelectMode = true
-                    }
-                    .opacity(isMultiSelectMode ? 0 : 1)
-                    .disabled(isMultiSelectMode)
+            .onChange(of: filterMode) { _, newValue in
+                if newValue == .story {
+                    exitMultiSelect()
                 }
             }
+            
             .safeAreaInset(edge: .bottom) {
-                if isMultiSelectMode {
+                if filterMode == .unhandled && isMultiSelectMode {
                     HStack(spacing: 12) {
                         Button("取消选择") {
                             selectedVisitLayerIds.removeAll()
@@ -251,6 +266,7 @@ private struct MergeVisitLayersSheet: View {
 @MainActor
 final class MemoryPanelViewModel: ObservableObject {
     @Published var visitLayers: [VisitLayer] = []
+    @Published var storyNodes: [StoryNode] = []
     @Published var cityName: String?
 
     private var clusters: [PlaceCluster]
@@ -260,39 +276,21 @@ final class MemoryPanelViewModel: ObservableObject {
 
     init(clusters: [PlaceCluster]) {
         self.clusters = clusters
-        observeVisitLayers()
+        observeData()
         resolveCityNameIfNeeded()
     }
 
     func updateClusters(_ newClusters: [PlaceCluster]) {
         self.clusters = newClusters
-        observeVisitLayers()
+        observeData()
         resolveCityNameIfNeeded()
     }
 
-    private func resolveCityNameIfNeeded() {
-        guard let first = clusters.first else {
-            cityName = nil
-            return
-        }
-
-        Task {
-            do {
-                let name = try await resolveCityNameUseCase.run(cluster: first)
-                await MainActor.run {
-                    self.cityName = name
-                }
-            } catch {
-                print("Failed to resolve city name: \(error)")
-            }
-        }
-    }
-
-    private func observeVisitLayers() {
+    private func observeData() {
         cancellables.removeAll()
-
         let clusterIds = clusters.map { $0.id }
         
+        // 观察 VisitLayer
         ValueObservation
             .tracking { db in
                 try VisitLayer
@@ -305,6 +303,105 @@ final class MemoryPanelViewModel: ObservableObject {
                 self?.visitLayers = layers
             }
             .store(in: &cancellables)
+
+        // 观察 StoryNode
+        ValueObservation
+            .tracking { db in
+                try StoryNode
+                    .filter(clusterIds.contains(Column("placeClusterId")))
+                    .order(Column("createdAt").desc)
+                    .fetchAll(db)
+            }
+            .publisher(in: DatabaseContainer.shared.db.reader)
+            .sink { _ in } receiveValue: { [weak self] nodes in
+                self?.storyNodes = nodes
+            }
+            .store(in: &cancellables)
+    }
+
+    private func resolveCityNameIfNeeded() {
+        guard cityName == nil else { return }
+        Task {
+            let name = await resolveCityNameUseCase.run(clusters: clusters)
+            await MainActor.run {
+                self.cityName = name
+            }
+        }
+    }
+}
+
+private struct StoryNodeRowView: View {
+    let node: StoryNode
+
+    @State private var timeRangeText: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let timeRangeText {
+                Text(timeRangeText)
+                    .font(.headline)
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 72, height: 72))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if let title = node.mainTitle, !title.isEmpty {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                    }
+
+                    if let summary = node.mainSummary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(3)
+                    } else {
+                        Text("(无摘要)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .task(id: node.id) {
+            await loadTimeRange()
+        }
+    }
+
+    private func loadTimeRange() async {
+        do {
+            let (minStart, maxEnd): (Date?, Date?) = try await DatabaseContainer.shared.db.reader.read { db in
+                let ids = node.subVisitLayerIds
+                guard !ids.isEmpty else { return (nil, nil) }
+
+                let layers = try VisitLayer
+                    .filter(ids.contains(Column("id")))
+                    .fetchAll(db)
+
+                return (layers.map(\.startAt).min(), layers.map(\.endAt).max())
+            }
+
+            guard let minStart, let maxEnd else { return }
+
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
+
+            let start = formatter.string(from: minStart)
+
+            let calendar = Calendar.current
+            if calendar.isDate(minStart, inSameDayAs: maxEnd) {
+                formatter.dateFormat = "HH:mm"
+            }
+            let end = formatter.string(from: maxEnd)
+
+            await MainActor.run {
+                self.timeRangeText = "\(start) - \(end)"
+            }
+        } catch {
+            // ignore
+        }
     }
 }
 
@@ -354,20 +451,7 @@ private struct VisitLayerRowView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 } else if !isMultiSelectMode {
-                    HStack(spacing: 8) {
-                        TextField("写一句...", text: $draftText)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                        Button(action: {
-                            save()
-                        }) {
-                            if isSaving {
-                                ProgressView()
-                            } else {
-                                Text("加入故事")
-                            }
-                        }
-                        .disabled(isSaving || draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
+                    InputAreaView(draftText: $draftText, isSaving: isSaving, onSave: save)
                 }
             }
         }
@@ -380,11 +464,34 @@ private struct VisitLayerRowView: View {
         .onLongPressGesture(minimumDuration: 0.35) {
             onLongPressSelect()
         }
+        .buttonStyle(.plain)
         .onAppear {
             draftText = layer.userText ?? ""
         }
         .task {
             await loadLocalIdentifiers()
+        }
+    }
+
+    private struct InputAreaView: View {
+        @Binding var draftText: String
+        let isSaving: Bool
+        let onSave: () -> Void
+
+        var body: some View {
+            HStack(spacing: 8) {
+                TextField("写一句...", text: $draftText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                Button(action: { onSave() }) {
+                    if isSaving {
+                        ProgressView()
+                    } else {
+                        Text("加入故事")
+                    }
+                }
+                .disabled(isSaving || draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
     }
 
