@@ -17,6 +17,8 @@ struct ExplorationMapView: UIViewRepresentable {
 
         private var hitStreakCount: Int = 0
         private var lastHitTime: TimeInterval = 0
+        private var lastFeedbackTime: TimeInterval = 0
+        private var lastHitClusterId: UUID?
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -44,22 +46,31 @@ struct ExplorationMapView: UIViewRepresentable {
                     let hitCluster = annotation.cluster
                     let isAlreadyInQueue = parent.awakenQueue.contains(where: { $0.id == hitCluster.id })
 
-                    // 1. 视觉/触觉反馈：无论是否已在队列中，只要划过就触发反馈（保持手感）
+                    // 1. 视觉/触觉反馈控制
                     let now = CACurrentMediaTime()
-                    if now - lastHitTime > 0.8 {
-                        hitStreakCount = 0
-                    }
-                    lastHitTime = now
-                    hitStreakCount += 1
+                    
+                    // 只有切换了 Cluster，或者在同一个 Cluster 上停留超过 0.1s 才再次触发反馈
+                    // 这样可以避免手指微颤导致的高频触发（rateLimit=32hz 问题）
+                    let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.1)
 
-                    HapticPlayer.play(forCount: hitStreakCount)
-                    SystemSoundPlayer.playTick()
+                    if shouldTriggerFeedback {
+                        if now - lastHitTime > 0.8 {
+                            hitStreakCount = 0
+                        }
+                        lastHitTime = now
+                        lastFeedbackTime = now
+                        lastHitClusterId = hitCluster.id
+                        hitStreakCount += 1
 
-                    if let fogView = fogScreenView {
-                        let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
-                        StardustEmitter.emit(at: screenPoint, in: fogView)
-                    } else {
-                        StardustEmitter.emit(at: point, in: mapView)
+                        HapticPlayer.play(forCount: hitStreakCount)
+                        SystemSoundPlayer.playTick()
+
+                        if let fogView = fogScreenView {
+                            let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
+                            StardustEmitter.emit(at: screenPoint, in: fogView)
+                        } else {
+                            StardustEmitter.emit(at: point, in: mapView)
+                        }
                     }
 
                     // 2. 业务逻辑：仅当是新揭开的点时，才执行扩散雾、加列表、更新数据库

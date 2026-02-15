@@ -206,6 +206,25 @@ private struct MergeVisitLayersSheet: View {
     let onConfirm: () -> Void
     let onCancel: () -> Void
 
+    @State private var localSummaryText: String
+
+    init(
+        visitLayers: [VisitLayer],
+        summaryText: Binding<String>,
+        isMerging: Binding<Bool>,
+        errorMessage: Binding<String?>,
+        onConfirm: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.visitLayers = visitLayers
+        self._summaryText = summaryText
+        self._isMerging = isMerging
+        self._errorMessage = errorMessage
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        self._localSummaryText = State(initialValue: summaryText.wrappedValue)
+    }
+
     var body: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: 12) {
@@ -218,12 +237,15 @@ private struct MergeVisitLayersSheet: View {
                         .foregroundColor(.secondary)
                 }
 
-                TextEditor(text: $summaryText)
+                TextEditor(text: $localSummaryText)
                     .frame(minHeight: 140)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                     )
+                    // 避免每次输入都向父层回传，导致父视图（包含大 List）频繁刷新而卡顿。
+                    // 这里仅在确认时把 localSummaryText 写回 summaryText。
+
 
                 if let errorMessage {
                     Text(errorMessage)
@@ -243,9 +265,10 @@ private struct MergeVisitLayersSheet: View {
 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(isMerging ? "合并中..." : "确认") {
+                        summaryText = localSummaryText
                         onConfirm()
                     }
-                    .disabled(isMerging || summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isMerging || localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
