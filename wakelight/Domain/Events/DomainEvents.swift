@@ -7,7 +7,8 @@ final class DomainEventBus {
     
     enum Event {
         /// 显影完成事件：用户完成写话/沉淀，该访次正式升级为故事节点
-        case storySettled(visitLayerId: UUID, placeClusterId: UUID)
+        /// placeClusterIds: 涉及到的地点（单点加入时只有 1 个；跨地点合并时会有多个）
+        case storySettled(visitLayerId: UUID, placeClusterIds: [UUID])
         /// 地点解锁事件
         case locationUnlocked(placeClusterId: UUID)
     }

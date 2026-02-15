@@ -63,7 +63,7 @@ final class SettleStoryNodeUseCase {
             return layer.placeClusterId
         }
 
-        DomainEventBus.shared.emit(.storySettled(visitLayerId: visitLayerId, placeClusterId: clusterId))
+        DomainEventBus.shared.emit(.storySettled(visitLayerId: visitLayerId, placeClusterIds: [clusterId]))
     }
 }
 

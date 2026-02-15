@@ -15,7 +15,7 @@ final class MergeVisitLayersUseCase {
 
         let now = Date()
 
-        let (storyId, placeClusterId, emittedVisitLayerId): (UUID, UUID, UUID) = try await writer.write { db in
+        let (storyId, placeClusterId, emittedVisitLayerId, allInvolvedClusterIds): (UUID, UUID, UUID, Set<UUID>) = try await writer.write { db in
             let layers = try VisitLayer
                 .filter(visitLayerIds.contains(Column("id")))
                 .fetchAll(db)
@@ -28,9 +28,9 @@ final class MergeVisitLayersUseCase {
                 throw MergeVisitLayersError.visitLayerNotFound
             }
 
-            guard layers.allSatisfy({ $0.placeClusterId == firstClusterId }) else {
-                throw MergeVisitLayersError.crossClusterMergeNotSupported
-            }
+            // 允许跨地点合并，选取包含 VisitLayer 数量最多的集群作为故事的主归属点
+            let clusterCounts = layers.reduce(into: [UUID: Int]()) { $0[$1.placeClusterId, default: 0] += 1 }
+            let primaryClusterId = clusterCounts.max(by: { $0.value < $1.value })?.key ?? firstClusterId
 
             let orderedLayers = layers.sorted(by: { $0.startAt < $1.startAt })
             let orderedLayerIds = orderedLayers.map { $0.id }
@@ -56,7 +56,7 @@ final class MergeVisitLayersUseCase {
             }
 
             let story = StoryNode(
-                placeClusterId: firstClusterId,
+                placeClusterId: primaryClusterId,
                 mainTitle: title,
                 mainSummary: trimmed,
                 coverPhotoId: coverPhotoId,
@@ -74,19 +74,23 @@ final class MergeVisitLayersUseCase {
                 try layer.update(db)
             }
 
-            if var cluster = try PlaceCluster.fetchOne(db, key: firstClusterId) {
-                if cluster.hasStory == false {
-                    cluster.hasStory = true
-                    try cluster.update(db)
+            // 更新所有涉及到的集群状态
+            let allInvolvedClusterIds = Set(layers.map { $0.placeClusterId })
+            for cid in allInvolvedClusterIds {
+                if var cluster = try PlaceCluster.fetchOne(db, key: cid) {
+                    if cluster.hasStory == false {
+                        cluster.hasStory = true
+                        try cluster.update(db)
+                    }
                 }
             }
 
             // Keep existing event semantics: emit a visitLayerId (not storyId)
             let emittedVisitLayerId = orderedLayers.first!.id
-            return (story.id, firstClusterId, emittedVisitLayerId)
+            return (story.id, primaryClusterId, emittedVisitLayerId, allInvolvedClusterIds)
         }
 
-        DomainEventBus.shared.emit(.storySettled(visitLayerId: emittedVisitLayerId, placeClusterId: placeClusterId))
+        DomainEventBus.shared.emit(.storySettled(visitLayerId: emittedVisitLayerId, placeClusterIds: Array(allInvolvedClusterIds)))
         return storyId
     }
 }

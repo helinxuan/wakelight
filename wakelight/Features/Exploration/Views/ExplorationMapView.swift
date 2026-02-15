@@ -190,22 +190,36 @@ struct ExplorationMapView: UIViewRepresentable {
         return container
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.parent = self
-        guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
-              let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
+        func updateUIView(_ uiView: UIView, context: Context) {
+            context.coordinator.parent = self
+            guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
+                  let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
 
-        mapView.isScrollEnabled = !isAwakenMode
-        
-        // 同步数据到迷雾视图
-        fogView.clusters = viewModel.clusters
-        fogView.revealedClusterIds = revealedClusterIds
-        fogView.setNeedsDisplay()
+            mapView.isScrollEnabled = !isAwakenMode
+            
+            // 同步数据到迷雾视图
+            fogView.clusters = viewModel.clusters
+            fogView.revealedClusterIds = revealedClusterIds
+            fogView.setNeedsDisplay()
 
-        if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
-            context.coordinator.applyAnnotations(to: mapView)
+            // 1. 检查数量变化
+            if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
+                context.coordinator.applyAnnotations(to: mapView)
+            } else {
+                // 2. 数量没变时，检查 hasStory 状态是否变化并同步颜色
+                for annotation in context.coordinator.currentAnnotations {
+                    if let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) {
+                        // 如果内存态变黄了，但 annotation view 还没刷，就手动刷一下
+                        if cluster.hasStory != annotation.cluster.hasStory {
+                            if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                                view.isStoryPoint = cluster.hasStory
+                                view.updateStyle()
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
 }
 
 /// 屏幕空间迷雾视图：直接在 UIView 上绘制，解决 MapKit Overlay 的拼接和刷新延迟问题

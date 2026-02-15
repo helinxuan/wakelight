@@ -3,6 +3,7 @@ import Combine
 import MapKit
 import GRDB
 
+
 final class ExploreViewModel: ObservableObject {
     @Published var clusters: [PlaceCluster] = []
     @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> localIdentifier
@@ -13,6 +14,7 @@ final class ExploreViewModel: ObservableObject {
     init(db: AppDatabase = DatabaseContainer.shared.db) {
         self.db = db
         observeClusters()
+        observeDomainEvents()
     }
 
     func loadHalfRevealedClusterIds() async -> Set<UUID> {
@@ -54,6 +56,28 @@ final class ExploreViewModel: ObservableObject {
         }
     }
     
+    private func observeDomainEvents() {
+        NotificationCenter.default.publisher(for: .wakelightDomainEvent)
+            .compactMap { $0.object as? DomainEventBus.Event }
+            .sink { [weak self] event in
+                guard let self else { return }
+                switch event {
+                case .storySettled(_, let placeClusterIds):
+                    // 立即更新内存态，确保地图光点同步变色（annotation view 会跟随 viewModel.clusters 更新）
+                    for placeClusterId in placeClusterIds {
+                        if let idx = self.clusters.firstIndex(where: { $0.id == placeClusterId }) {
+                            if self.clusters[idx].hasStory == false {
+                                self.clusters[idx].hasStory = true
+                            }
+                        }
+                    }
+                case .locationUnlocked:
+                    break
+                }
+            }
+            .store(in: &cancellables)
+    }
+
     private func observeClusters() {
         ValueObservation
             .tracking { db in

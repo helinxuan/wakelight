@@ -121,11 +121,11 @@ struct ExplorationRootView: View {
                                 }
                         )
 
-                        if panelHeight > minPanelHeight + 20 {
-                            MemoryPanelView(clusters: awakenQueue)
-                        } else {
-                            Spacer()
-                        }
+                        // 始终保留 MemoryPanelView 以维持其内部多选状态，仅通过高度和透明度控制视觉隐藏
+                        MemoryPanelView(clusters: awakenQueue)
+                            .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
+                            .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
+                            .clipped()
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: panelHeight)
