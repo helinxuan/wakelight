@@ -146,9 +146,32 @@ struct MemoryPanelView: View {
                         .frame(maxWidth: .infinity, minHeight: 200)
                         .listRowBackground(Color.clear)
                     } else {
-                        ForEach(visibleStories, id: \.id) { node in
-                            StoryNodeRowView(node: node)
-                                .padding(.vertical, 6)
+                        // 按 placeClusterId 分组展示
+                        let groupedStories = Dictionary(grouping: visibleStories, by: { $0.placeClusterId })
+                        let sortedClusterIds = Array(Set(visibleStories.map { $0.placeClusterId })).sorted { id1, id2 in
+                            if id1 == viewModel.selectedClusterId { return true }
+                            if id2 == viewModel.selectedClusterId { return false }
+                            let time1 = groupedStories[id1]?.first?.createdAt ?? Date.distantPast
+                            let time2 = groupedStories[id2]?.first?.createdAt ?? Date.distantPast
+                            return time1 > time2
+                        }
+
+                        ForEach(sortedClusterIds, id: \.self) { clusterId in
+                            Section(header: 
+                                HStack(spacing: 4) {
+                                    Image(systemName: "mappin.and.ellipse")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
+                                        .font(.system(size: 14, weight: .bold))
+                                }
+                                .foregroundColor(.primary)
+                                .padding(.vertical, 8)
+                            ) {
+                                ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
+                                    StoryNodeRowView(node: node)
+                                        .padding(.vertical, 6)
+                                }
+                            }
                         }
                     }
                 }
@@ -428,38 +451,74 @@ private struct StoryNodeRowView: View {
     let node: StoryNode
 
     @State private var timeRangeText: String?
+    @State private var coverLocalIdentifiers: [String] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             if let timeRangeText {
                 Text(timeRangeText)
-                    .font(.headline)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.secondary)
             }
 
-            HStack(alignment: .top, spacing: 10) {
-                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 72, height: 72))
+            if let title = node.mainTitle, !title.isEmpty {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.primary)
+            }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    if let title = node.mainTitle, !title.isEmpty {
-                        Text(title)
-                            .font(.subheadline.weight(.semibold))
-                    }
-
-                    if let summary = node.mainSummary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .lineLimit(3)
-                    } else {
-                        Text("(无摘要)")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+            if !coverLocalIdentifiers.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(coverLocalIdentifiers, id: \.self) { id in
+                            ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
                     }
                 }
+            } else {
+                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 80, height: 80))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            if let summary = node.mainSummary, !summary.isEmpty {
+                Text(summary)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
             }
         }
         .task(id: node.id) {
             await loadTimeRange()
+            await loadCoverLocalIdentifiers()
+        }
+    }
+
+    private func loadCoverLocalIdentifiers() async {
+        do {
+            let ids: [String] = try await DatabaseContainer.shared.db.reader.read { db in
+                let visitLayerIds = node.subVisitLayerIds
+                guard !visitLayerIds.isEmpty else { return [] }
+
+                let links = try VisitLayerPhotoAsset
+                    .filter(visitLayerIds.contains(Column("visitLayerId")))
+                    .fetchAll(db)
+
+                if links.isEmpty { return [] }
+
+                let photoIds = Array(Set(links.map { $0.photoAssetId }))
+                let photos = try PhotoAsset
+                    .filter(photoIds.contains(Column("id")))
+                    .fetchAll(db)
+
+                return photos.map { $0.localIdentifier }
+            }
+
+            await MainActor.run {
+                self.coverLocalIdentifiers = Array(ids.prefix(12))
+            }
+        } catch {
+            // ignore
         }
     }
 
