@@ -9,6 +9,10 @@ struct ExplorationRootView: View {
     @State private var revealedClusterIds: Set<UUID> = []
     @State private var isAwakenMode: Bool = false
     @State private var showBadges: Bool = false
+    @State private var panelHeight: CGFloat = 380
+    @State private var panelCityName: String? = nil
+    private let minPanelHeight: CGFloat = 120
+    private let defaultPanelHeight: CGFloat = 380
 
     var body: some View {
         ZStack {
@@ -75,15 +79,62 @@ struct ExplorationRootView: View {
                 }
 
                 if !awakenQueue.isEmpty, isAwakenMode {
-                    MemoryPanelView(clusters: awakenQueue)
+                    VStack(spacing: 0) {
+                        let headerHeight: CGFloat = 56
+
+                        VStack(spacing: 0) {
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.45))
+                                .frame(width: 36, height: 5)
+                                .padding(.top, 10)
+                                .padding(.bottom, 8)
+
+                            Text(panelCityName.map { "\($0)的回忆" } ?? (awakenQueue.count == 1 ? "地点记忆" : "\(awakenQueue.count) 个地点记忆"))
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                                .padding(.bottom, 10)
+                        }
                         .frame(maxWidth: .infinity)
-                        .frame(height: 380)
+                        .frame(height: headerHeight)
+                        .contentShape(Rectangle())
                         .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .shadow(color: Color.black.opacity(0.15), radius: 20, x: 0, y: -5)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 20)
-                        .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
+                        .task(id: awakenQueue.map(\.id)) {
+                            let cityName = await ResolvePlaceClusterCityNameUseCase().run(clusters: awakenQueue)
+                            await MainActor.run {
+                                self.panelCityName = cityName
+                            }
+                        }
+                        .gesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    let newHeight = panelHeight - value.translation.height
+                                    panelHeight = max(minPanelHeight, min(defaultPanelHeight + 40, newHeight))
+                                }
+                                .onEnded { _ in
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        if panelHeight < (defaultPanelHeight + minPanelHeight) / 2 {
+                                            panelHeight = minPanelHeight
+                                        } else {
+                                            panelHeight = defaultPanelHeight
+                                        }
+                                    }
+                                }
+                        )
+
+                        if panelHeight > minPanelHeight + 20 {
+                            MemoryPanelView(clusters: awakenQueue)
+                        } else {
+                            Spacer()
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: panelHeight)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.15), radius: 20, x: 0, y: -5)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 20)
+                    .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
                 }
             }
             .ignoresSafeArea(edges: .bottom)

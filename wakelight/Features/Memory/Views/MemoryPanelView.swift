@@ -59,7 +59,7 @@ struct MemoryPanelView: View {
     }
 
     var body: some View {
-        NavigationView {
+        VStack(spacing: 0) {
             List {
                 Section {
                     Picker("筛选", selection: $filterMode) {
@@ -126,14 +126,12 @@ struct MemoryPanelView: View {
                     }
                 }
             }
-            .navigationTitle(panelTitle)
-            .navigationBarTitleDisplayMode(.inline)
+            .listStyle(.plain)
             .onChange(of: filterMode) { _, newValue in
                 if newValue == .story {
                     exitMultiSelect()
                 }
             }
-            
             .safeAreaInset(edge: .bottom) {
                 if filterMode == .unhandled && isMultiSelectMode {
                     HStack(spacing: 12) {
