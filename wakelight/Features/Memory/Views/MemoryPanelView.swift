@@ -138,7 +138,8 @@ struct MemoryPanelView: View {
                                                 isMultiSelectMode = true
                                             }
                                             selectedVisitLayerIds.insert(layer.id)
-                                        }
+                                        },
+                                        locationName: viewModel.clusterNames[layer.placeClusterId]
                                     )
                                     .padding(.vertical, 6)
                                     .contentShape(Rectangle())
@@ -310,19 +311,29 @@ private struct MemoryPhotoWallSheet: View {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        // Header / Editor Area
                         VStack(alignment: .leading, spacing: 12) {
                             Text(summaryTitle)
                                 .font(.subheadline.weight(.medium))
                                 .foregroundColor(.secondary)
                             
-                            TextEditor(text: $editText)
-                                .frame(minHeight: 100)
-                                .padding(10)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .fill(Color.secondary.opacity(0.08))
-                                )
+                            HStack(alignment: .top, spacing: 8) {
+                                TextEditor(text: $editText)
+                                    .frame(minHeight: 100)
+                                    .padding(10)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(Color.secondary.opacity(0.08))
+                                    )
+                                
+                                Button(action: generateSmartText) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundColor(.blue)
+                                        .padding(10)
+                                        .background(Circle().fill(Color.blue.opacity(0.1)))
+                                }
+                                .padding(.top, 4)
+                            }
 
                             if let errorMessage {
                                 Text(errorMessage)
@@ -333,10 +344,8 @@ private struct MemoryPhotoWallSheet: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
 
-                        // Photo Groups
                         ForEach(photoGroups) { group in
                             VStack(alignment: .leading, spacing: 8) {
-                                // Group Header
                                 HStack(spacing: 6) {
                                     Image(systemName: "mappin.and.ellipse")
                                         .font(.system(size: 10, weight: .bold))
@@ -393,6 +402,34 @@ private struct MemoryPhotoWallSheet: View {
         }
     }
 
+    private func generateSmartText() {
+        let location = photoGroups.first?.location ?? "这里"
+        let count = flattenedPhotos.count
+        
+        var timePrefix = ""
+        if let firstGroup = photoGroups.first, let range = firstGroup.title.components(separatedBy: " ").last {
+            let hour = Int(range.prefix(2)) ?? 12
+            switch hour {
+            case 5...11: timePrefix = "清晨的"
+            case 12...14: timePrefix = "正午的"
+            case 15...18: timePrefix = "傍晚的"
+            case 19...23: timePrefix = "深夜的"
+            default: timePrefix = "这时候的"
+            }
+        }
+        
+        let templates = [
+            "\(timePrefix)\(location)，留下了 \(count) 个瞬间。",
+            "在这里度过了一段时光，捕捉到了 \(count) 张回忆。",
+            "\(location) 的这几个小时，都在这些照片里了。",
+            "又是充实的一天，在 \(location) 记录了 \(count) 个故事。"
+        ]
+        
+        withAnimation {
+            editText = templates.randomElement() ?? ""
+        }
+    }
+
     private func load() async {
         do {
             switch item {
@@ -415,8 +452,6 @@ private struct MemoryPhotoWallSheet: View {
                 if let minStart, let maxEnd {
                     summaryTitle = dateRangeText(startAt: minStart, endAt: maxEnd)
                 }
-
-                // Load all layers for grouping
                 let groups = try await loadGroupsForStory(node)
                 photoGroups = groups
                 flattenedPhotos = groups.flatMap { $0.photoLocalIdentifiers }
@@ -441,15 +476,12 @@ private struct MemoryPhotoWallSheet: View {
                 let links = try VisitLayerPhotoAsset
                     .filter(Column("visitLayerId") == layer.id)
                     .fetchAll(db)
-                
                 if links.isEmpty { continue }
-                
                 let photoIds = links.map { $0.photoAssetId }
                 let photos = try PhotoAsset
                     .filter(photoIds.contains(Column("id")))
                     .order(Column("creationDate").asc)
                     .fetchAll(db)
-                
                 groups.append(PhotoGroup(
                     id: layer.id,
                     title: dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
@@ -470,12 +502,12 @@ private struct MemoryPhotoWallSheet: View {
                     switch item {
                     case .unhandled(let layer):
                         if var current = try VisitLayer.fetchOne(db, key: layer.id) {
-                            current.userText = trimmed
+                            current.userText = trimmed.isEmpty ? nil : trimmed
                             try current.update(db)
                         }
                     case .story(let node):
                         if var current = try StoryNode.fetchOne(db, key: node.id) {
-                            current.mainSummary = trimmed
+                            current.mainSummary = trimmed.isEmpty ? nil : trimmed
                             current.updatedAt = Date()
                             try current.update(db)
                         }
@@ -575,24 +607,14 @@ private struct PhotoPreviewPager: View {
 
 private struct MergeVisitLayersSheet: View {
     let visitLayers: [VisitLayer]
-
     @Binding var summaryText: String
     @Binding var isMerging: Bool
     @Binding var errorMessage: String?
-
     let onConfirm: () -> Void
     let onCancel: () -> Void
-
     @State private var localSummaryText: String
 
-    init(
-        visitLayers: [VisitLayer],
-        summaryText: Binding<String>,
-        isMerging: Binding<Bool>,
-        errorMessage: Binding<String?>,
-        onConfirm: @escaping () -> Void,
-        onCancel: @escaping () -> Void
-    ) {
+    init(visitLayers: [VisitLayer], summaryText: Binding<String>, isMerging: Binding<Bool>, errorMessage: Binding<String?>, onConfirm: @escaping () -> Void, onCancel: @escaping () -> Void) {
         self.visitLayers = visitLayers
         self._summaryText = summaryText
         self._isMerging = isMerging
@@ -607,36 +629,22 @@ private struct MergeVisitLayersSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("将 \(visitLayers.count) 个记忆合并为 1 个故事")
                     .font(.headline)
-
                 if let rangeText = timeRangeText(visitLayers) {
-                    Text(rangeText)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    Text(rangeText).font(.subheadline).foregroundColor(.secondary)
                 }
-
                 TextEditor(text: $localSummaryText)
                     .frame(minHeight: 140)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-                    )
-
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
                 if let errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundColor(.red)
+                    Text(errorMessage).font(.footnote).foregroundColor(.red)
                 }
-
                 Spacer()
             }
             .padding(16)
             .navigationTitle("合并确认")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { onCancel() }
-                }
-
+                ToolbarItem(placement: .topBarLeading) { Button("取消") { onCancel() } }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(isMerging ? "合并中..." : "确认") {
                         summaryText = localSummaryText
@@ -663,17 +671,10 @@ final class MemoryPanelViewModel: ObservableObject {
     @Published var storyNodes: [StoryNode] = []
     @Published var cityName: String?
     @Published var clusterNames: [UUID: String] = [:]
-
-    var selectedClusterId: UUID? {
-        didSet {
-            applySorting()
-        }
-    }
-
+    var selectedClusterId: UUID? { didSet { applySorting() } }
     private var clusters: [PlaceCluster]
     private var cancellables = Set<AnyCancellable>()
     private var rawVisitLayers: [VisitLayer] = []
-
     private let resolveCityNameUseCase = ResolvePlaceClusterCityNameUseCase()
 
     init(clusters: [PlaceCluster], selectedClusterId: UUID? = nil) {
@@ -695,9 +696,7 @@ final class MemoryPanelViewModel: ObservableObject {
         for cluster in clusters {
             Task {
                 if let name = try? await resolveCityNameUseCase.resolveDetailedAddress(for: cluster) {
-                    await MainActor.run {
-                        self.clusterNames[cluster.id] = name
-                    }
+                    await MainActor.run { self.clusterNames[cluster.id] = name }
                 }
             }
         }
@@ -706,34 +705,17 @@ final class MemoryPanelViewModel: ObservableObject {
     private func observeData() {
         cancellables.removeAll()
         let clusterIds = clusters.map { $0.id }
-
-        ValueObservation
-            .tracking { db in
-                try VisitLayer
-                    .filter(clusterIds.contains(Column("placeClusterId")))
-                    .order(Column("startAt").desc)
-                    .fetchAll(db)
-            }
-            .publisher(in: DatabaseContainer.shared.db.reader)
-            .sink { _ in } receiveValue: { [weak self] layers in
-                guard let self = self else { return }
-                self.rawVisitLayers = layers
-                self.applySorting()
-            }
-            .store(in: &cancellables)
-
-        ValueObservation
-            .tracking { db in
-                try StoryNode
-                    .filter(clusterIds.contains(Column("placeClusterId")))
-                    .order(Column("createdAt").desc)
-                    .fetchAll(db)
-            }
-            .publisher(in: DatabaseContainer.shared.db.reader)
-            .sink { _ in } receiveValue: { [weak self] nodes in
-                self?.storyNodes = nodes
-            }
-            .store(in: &cancellables)
+        ValueObservation.tracking { db in
+            try VisitLayer.filter(clusterIds.contains(Column("placeClusterId"))).order(Column("startAt").desc).fetchAll(db)
+        }.publisher(in: DatabaseContainer.shared.db.reader).sink { _ in } receiveValue: { [weak self] layers in
+            self?.rawVisitLayers = layers
+            self?.applySorting()
+        }.store(in: &cancellables)
+        ValueObservation.tracking { db in
+            try StoryNode.filter(clusterIds.contains(Column("placeClusterId"))).order(Column("createdAt").desc).fetchAll(db)
+        }.publisher(in: DatabaseContainer.shared.db.reader).sink { _ in } receiveValue: { [weak self] nodes in
+            self?.storyNodes = nodes
+        }.store(in: &cancellables)
     }
 
     private func applySorting() {
@@ -741,15 +723,10 @@ final class MemoryPanelViewModel: ObservableObject {
             self.visitLayers = rawVisitLayers
             return
         }
-
         self.visitLayers = rawVisitLayers.sorted { a, b in
-            let aIsSelected = a.placeClusterId == selectedId
-            let bIsSelected = b.placeClusterId == selectedId
-
-            if aIsSelected != bIsSelected {
-                return aIsSelected
-            }
-
+            let aSel = a.placeClusterId == selectedId
+            let bSel = b.placeClusterId == selectedId
+            if aSel != bSel { return aSel }
             return a.startAt > b.startAt
         }
     }
@@ -758,46 +735,34 @@ final class MemoryPanelViewModel: ObservableObject {
         guard cityName == nil, let first = clusters.first else { return }
         Task {
             let name = try? await resolveCityNameUseCase.resolveCityName(for: first)
-            await MainActor.run {
-                self.cityName = name
-            }
+            await MainActor.run { self.cityName = name }
         }
     }
 }
 
 private struct StoryNodeRowView: View {
     let node: StoryNode
-
     @State private var timeRangeText: String?
     @State private var coverLocalIdentifiers: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let timeRangeText {
-                Text(timeRangeText)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundColor(.secondary)
+                Text(timeRangeText).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
             }
-
             if !coverLocalIdentifiers.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
                         ForEach(coverLocalIdentifiers, id: \.self) { id in
-                            ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                     }
                 }
             } else {
-                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 80, height: 80))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
             }
-
             if let summary = node.mainSummary, !summary.isEmpty {
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .lineLimit(3)
+                Text(summary).font(.subheadline).foregroundColor(.secondary).lineLimit(3)
             }
         }
         .task(id: node.id) {
@@ -811,27 +776,14 @@ private struct StoryNodeRowView: View {
             let ids: [String] = try await DatabaseContainer.shared.db.reader.read { db in
                 let visitLayerIds = node.subVisitLayerIds
                 guard !visitLayerIds.isEmpty else { return [] }
-
-                let links = try VisitLayerPhotoAsset
-                    .filter(visitLayerIds.contains(Column("visitLayerId")))
-                    .fetchAll(db)
-
+                let links = try VisitLayerPhotoAsset.filter(visitLayerIds.contains(Column("visitLayerId"))).fetchAll(db)
                 if links.isEmpty { return [] }
-
                 let photoIds = Array(Set(links.map { $0.photoAssetId }))
-                let photos = try PhotoAsset
-                    .filter(photoIds.contains(Column("id")))
-                    .fetchAll(db)
-
+                let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
                 return photos.map { $0.localIdentifier }
             }
-
-            await MainActor.run {
-                self.coverLocalIdentifiers = Array(ids.prefix(12))
-            }
-        } catch {
-            // ignore
-        }
+            await MainActor.run { self.coverLocalIdentifiers = Array(ids.prefix(12)) }
+        } catch {}
     }
 
     private func loadTimeRange() async {
@@ -839,34 +791,17 @@ private struct StoryNodeRowView: View {
             let (minStart, maxEnd): (Date?, Date?) = try await DatabaseContainer.shared.db.reader.read { db in
                 let ids = node.subVisitLayerIds
                 guard !ids.isEmpty else { return (nil, nil) }
-
-                let layers = try VisitLayer
-                    .filter(ids.contains(Column("id")))
-                    .fetchAll(db)
-
+                let layers = try VisitLayer.filter(ids.contains(Column("id"))).fetchAll(db)
                 return (layers.map(\.startAt).min(), layers.map(\.endAt).max())
             }
-
             guard let minStart, let maxEnd else { return }
-
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "zh_CN")
             formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
-
             let start = formatter.string(from: minStart)
-
-            let calendar = Calendar.current
-            if calendar.isDate(minStart, inSameDayAs: maxEnd) {
-                formatter.dateFormat = "HH:mm"
-            }
-            let end = formatter.string(from: maxEnd)
-
-            await MainActor.run {
-                self.timeRangeText = "\(start) - \(end)"
-            }
-        } catch {
-            // ignore
-        }
+            if Calendar.current.isDate(minStart, inSameDayAs: maxEnd) { formatter.dateFormat = "HH:mm" }
+            await MainActor.run { self.timeRangeText = "\(start) - \(formatter.string(from: maxEnd))" }
+        } catch {}
     }
 }
 
@@ -876,6 +811,7 @@ private struct VisitLayerRowView: View {
     let isSelected: Bool
     let onToggleSelected: () -> Void
     let onLongPressSelect: () -> Void
+    let locationName: String?
 
     @State private var localIdentifiers: [String] = []
     @State private var draftText: String = ""
@@ -885,75 +821,68 @@ private struct VisitLayerRowView: View {
         HStack(alignment: .top, spacing: 10) {
             if isMultiSelectMode {
                 Button(action: onToggleSelected) {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(isSelected ? .blue : .secondary)
-                        .padding(.top, 2)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle").font(.system(size: 22, weight: .semibold)).foregroundColor(isSelected ? .blue : .secondary).padding(.top, 2)
                 }
                 .buttonStyle(.plain)
             }
-
             VStack(alignment: .leading, spacing: 8) {
-                Text(dateRangeText(layer))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundColor(.secondary)
-
+                Text(dateRangeText(layer)).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
                 if !localIdentifiers.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
                             ForEach(localIdentifiers, id: \.self) { id in
-                                ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
                             }
                         }
                     }
                 }
-
                 if let text = layer.userText, !text.isEmpty {
-                    Text(text)
-                        .font(.subheadline)
-                        .foregroundColor(.primary)
+                    Text(text).font(.subheadline).foregroundColor(.primary)
                 } else if !isMultiSelectMode {
-                    InputAreaView(draftText: $draftText, isSaving: isSaving, onSave: save)
+                    InputAreaView(draftText: $draftText, isSaving: isSaving, onSave: save, onSmartFill: generateAIText)
                 }
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            if isMultiSelectMode {
-                onToggleSelected()
-            }
-        }
-        .onLongPressGesture(minimumDuration: 0.35) {
-            onLongPressSelect()
-        }
+        .onTapGesture { if isMultiSelectMode { onToggleSelected() } }
+        .onLongPressGesture(minimumDuration: 0.35) { onLongPressSelect() }
         .buttonStyle(.plain)
-        .onAppear {
-            draftText = layer.userText ?? ""
+        .onAppear { draftText = layer.userText ?? "" }
+        .task { await loadLocalIdentifiers() }
+    }
+
+    private func generateAIText() {
+        let loc = locationName ?? "这里"
+        let count = localIdentifiers.count
+        let hour = Calendar.current.component(.hour, from: layer.startAt)
+        var timePrefix = ""
+        switch hour {
+        case 5...11: timePrefix = "清晨的"
+        case 12...14: timePrefix = "正午的"
+        case 15...18: timePrefix = "傍晚的"
+        case 19...23: timePrefix = "深夜的"
+        default: timePrefix = "这时候的"
         }
-        .task {
-            await loadLocalIdentifiers()
-        }
+        let templates = ["\(timePrefix)\(loc)，留下了 \(count) 个瞬间。", "在这里捕捉到了 \(count) 张回忆。", "\(loc) 的这段时光都在这里了。"]
+        withAnimation { draftText = templates.randomElement() ?? "" }
     }
 
     private struct InputAreaView: View {
         @Binding var draftText: String
         let isSaving: Bool
         let onSave: () -> Void
+        let onSmartFill: () -> Void
 
         var body: some View {
             HStack(spacing: 8) {
-                TextField("写一句...", text: $draftText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-
-                Button(action: { onSave() }) {
-                    if isSaving {
-                        ProgressView()
-                    } else {
-                        Text("加入故事")
-                    }
+                TextField("写一句...", text: $draftText).textFieldStyle(RoundedBorderTextFieldStyle())
+                Button(action: onSmartFill) {
+                    Image(systemName: "sparkles").foregroundColor(.blue).padding(6).background(Circle().fill(Color.blue.opacity(0.1)))
                 }
-                .disabled(isSaving || draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button(action: onSave) {
+                    if isSaving { ProgressView() } else { Text("加入故事") }
+                }
+                .disabled(isSaving)
             }
         }
     }
@@ -961,43 +890,23 @@ private struct VisitLayerRowView: View {
     private func loadLocalIdentifiers() async {
         do {
             let ids: [String] = try await DatabaseContainer.shared.db.reader.read { db in
-                let links = try VisitLayerPhotoAsset
-                    .filter(Column("visitLayerId") == layer.id)
-                    .fetchAll(db)
-
+                let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
                 if links.isEmpty { return [] }
-
                 let photoIds = links.map { $0.photoAssetId }
-                let photos = try PhotoAsset
-                    .filter(photoIds.contains(Column("id")))
-                    .fetchAll(db)
-
+                let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
                 return photos.map { $0.localIdentifier }
             }
-
-            await MainActor.run {
-                self.localIdentifiers = ids
-            }
-        } catch {
-            print("Failed to load photos for layer: \(error)")
-        }
+            await MainActor.run { self.localIdentifiers = ids }
+        } catch {}
     }
 
     private func save() {
-        guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isSaving = true
         Task {
             do {
                 try await SettleStoryNodeUseCase().run(visitLayerId: layer.id, text: draftText)
-                await MainActor.run {
-                    isSaving = false
-                }
-            } catch {
-                print("Failed to save story: \(error)")
-                await MainActor.run {
-                    isSaving = false
-                }
-            }
+                await MainActor.run { isSaving = false }
+            } catch { await MainActor.run { isSaving = false } }
         }
     }
 
@@ -1006,13 +915,7 @@ private struct VisitLayerRowView: View {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
         let start = formatter.string(from: layer.startAt)
-
-        let calendar = Calendar.current
-        if calendar.isDate(layer.startAt, inSameDayAs: layer.endAt) {
-            formatter.dateFormat = "HH:mm"
-        }
-        let end = formatter.string(from: layer.endAt)
-
-        return "\(start) - \(end)"
+        if Calendar.current.isDate(layer.startAt, inSameDayAs: layer.endAt) { formatter.dateFormat = "HH:mm" }
+        return "\(start) - \(formatter.string(from: layer.endAt))"
     }
 }

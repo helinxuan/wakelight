@@ -10,8 +10,6 @@ final class SettleStoryNodeUseCase {
 
     func run(visitLayerId: UUID, text: String) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
         let now = Date()
 
         let clusterId: UUID = try await writer.write { db in
