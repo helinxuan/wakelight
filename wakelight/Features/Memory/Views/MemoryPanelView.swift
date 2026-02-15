@@ -87,26 +87,51 @@ struct MemoryPanelView: View {
                         .frame(maxWidth: .infinity, minHeight: 200)
                         .listRowBackground(Color.clear)
                     } else {
-                        ForEach(visibleLayers, id: \.id) { layer in
-                            VisitLayerRowView(
-                                layer: layer,
-                                isMultiSelectMode: isMultiSelectMode,
-                                isSelected: selectedVisitLayerIds.contains(layer.id),
-                                onToggleSelected: {
-                                    if selectedVisitLayerIds.contains(layer.id) {
-                                        selectedVisitLayerIds.remove(layer.id)
-                                    } else {
-                                        selectedVisitLayerIds.insert(layer.id)
-                                    }
-                                },
-                                onLongPressSelect: {
-                                    if !isMultiSelectMode {
-                                        isMultiSelectMode = true
-                                    }
-                                    selectedVisitLayerIds.insert(layer.id)
+                        // 按 placeClusterId 分组展示
+                        let groupedLayers = Dictionary(grouping: visibleLayers, by: { $0.placeClusterId })
+                        let sortedClusterIds = Array(Set(visibleLayers.map { $0.placeClusterId })).sorted { id1, id2 in
+                            // 如果是当前选中的点，排最前面
+                            if id1 == viewModel.selectedClusterId { return true }
+                            if id2 == viewModel.selectedClusterId { return false }
+                            // 否则按该组内最新的时间排
+                            let time1 = groupedLayers[id1]?.first?.startAt ?? Date.distantPast
+                            let time2 = groupedLayers[id2]?.first?.startAt ?? Date.distantPast
+                            return time1 > time2
+                        }
+
+                        ForEach(sortedClusterIds, id: \.self) { clusterId in
+                            Section(header: 
+                                HStack(spacing: 4) {
+                                    Image(systemName: "mappin.and.ellipse")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
+                                        .font(.system(size: 14, weight: .bold))
                                 }
-                            )
-                            .padding(.vertical, 6)
+                                .foregroundColor(.primary)
+                                .padding(.vertical, 8)
+                            ) {
+                                ForEach(groupedLayers[clusterId] ?? [], id: \.id) { layer in
+                                    VisitLayerRowView(
+                                        layer: layer,
+                                        isMultiSelectMode: isMultiSelectMode,
+                                        isSelected: selectedVisitLayerIds.contains(layer.id),
+                                        onToggleSelected: {
+                                            if selectedVisitLayerIds.contains(layer.id) {
+                                                selectedVisitLayerIds.remove(layer.id)
+                                            } else {
+                                                selectedVisitLayerIds.insert(layer.id)
+                                            }
+                                        },
+                                        onLongPressSelect: {
+                                            if !isMultiSelectMode {
+                                                isMultiSelectMode = true
+                                            }
+                                            selectedVisitLayerIds.insert(layer.id)
+                                        }
+                                    )
+                                    .padding(.vertical, 6)
+                                }
+                            }
                         }
                     }
 
@@ -294,7 +319,8 @@ final class MemoryPanelViewModel: ObservableObject {
     @Published var visitLayers: [VisitLayer] = []
     @Published var storyNodes: [StoryNode] = []
     @Published var cityName: String?
-    
+    @Published var clusterNames: [UUID: String] = [:] // 存储每个光点的地名
+
     var selectedClusterId: UUID? {
         didSet {
             applySorting()
@@ -312,12 +338,26 @@ final class MemoryPanelViewModel: ObservableObject {
         self.selectedClusterId = selectedClusterId
         observeData()
         resolveCityNameIfNeeded()
+        resolveClusterNames()
     }
 
     func updateClusters(_ newClusters: [PlaceCluster]) {
         self.clusters = newClusters
         observeData()
         resolveCityNameIfNeeded()
+        resolveClusterNames()
+    }
+
+    private func resolveClusterNames() {
+        for cluster in clusters {
+            Task {
+                if let name = try? await resolveCityNameUseCase.run(cluster: cluster) {
+                    await MainActor.run {
+                        self.clusterNames[cluster.id] = name
+                    }
+                }
+            }
+        }
     }
 
     private func observeData() {
@@ -486,16 +526,16 @@ private struct VisitLayerRowView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(dateRangeText(layer))
-                    .font(.headline)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.secondary)
 
                 if !localIdentifiers.isEmpty {
-                    let cellSpacing: CGFloat = 4
-                    let rowWidth = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.width ?? 375
-                    let cellSize = floor((rowWidth - 32 - cellSpacing * 3) / 4)
-
-                    LazyVGrid(columns: columns, spacing: cellSpacing) {
-                        ForEach(localIdentifiers.prefix(4), id: \.self) { id in
-                            ThumbnailView(localIdentifier: id, size: CGSize(width: cellSize, height: cellSize))
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(localIdentifiers, id: \.self) { id in
+                                ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
                         }
                     }
                 }
@@ -503,7 +543,7 @@ private struct VisitLayerRowView: View {
                 if let text = layer.userText, !text.isEmpty {
                     Text(text)
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 } else if !isMultiSelectMode {
                     InputAreaView(draftText: $draftText, isSaving: isSaving, onSave: save)
                 }

@@ -15,7 +15,7 @@ final class MergeVisitLayersUseCase {
 
         let now = Date()
 
-        let (storyId, placeClusterId, emittedVisitLayerId, allInvolvedClusterIds): (UUID, UUID, UUID, Set<UUID>) = try await writer.write { db in
+        let (storyId, _, emittedVisitLayerId, allInvolvedClusterIds): (UUID, UUID, UUID, Set<UUID>) = try await writer.write { db in
             let layers = try VisitLayer
                 .filter(visitLayerIds.contains(Column("id")))
                 .fetchAll(db)

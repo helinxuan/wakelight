@@ -4,7 +4,7 @@ import GRDB
 import MapKit
 
 /// 反向地理编码 PlaceCluster 的城市名，并写入数据库缓存。
-final class ResolvePlaceClusterCityNameUseCase {
+final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
     private let writer: DatabaseWriter
 
     private static let cityCache = NSCache<NSString, NSString>()
@@ -34,32 +34,85 @@ final class ResolvePlaceClusterCityNameUseCase {
     }
 
     func run(cluster: PlaceCluster) async throws -> String? {
-        if let existing = cluster.cityName, !existing.isEmpty {
-            return existing
-        }
-
-        let cacheKey = "\(cluster.centerLatitude.rounded(toPlaces: 3))_\(cluster.centerLongitude.rounded(toPlaces: 3))" as NSString
+        let cacheKey = "\(cluster.centerLatitude.rounded(toPlaces: 3))_\(cluster.centerLongitude.rounded(toPlaces: 3))_detailed" as NSString
         if let cached = Self.cityCache.object(forKey: cacheKey) {
             return cached as String
         }
 
         let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-        let cityName = try await reverseGeocodeCityName(location: location)
+        
+        let detailedName: String?
+        if #available(iOS 26.0, *) {
+            detailedName = try await reverseGeocodeDetailedNameUsingMapKit(location: location)
+        } else {
+            detailedName = try await reverseGeocodeDetailedNameUsingCoreLocation(location: location)
+        }
 
-        guard let cityName, !cityName.isEmpty else { return nil }
+        guard let result = detailedName, !result.isEmpty else {
+            return cluster.cityName
+        }
 
-        Self.cityCache.setObject(cityName as NSString, forKey: cacheKey)
+        Self.cityCache.setObject(result as NSString, forKey: cacheKey)
+        return result
+    }
 
-        _ = try await writer.write { db in
-            if var toUpdate = try PlaceCluster.fetchOne(db, key: cluster.id) {
-                if toUpdate.cityName == nil {
-                    toUpdate.cityName = cityName
-                    try toUpdate.update(db)
+    @available(iOS 26.0, *)
+    private func reverseGeocodeDetailedNameUsingMapKit(location: CLLocation) async throws -> String? {
+        guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
+        request.preferredLocale = Locale(identifier: "zh_CN")
+        let items = try await request.mapItems
+        guard let item = items.first else { return nil }
+        // MKMapItem doesn't have these properties directly, must use placemark even if it's deprecated
+        let placemark = item.placemark
+        return formatDetailedName(district: placemark.subLocality, street: placemark.thoroughfare, name: placemark.name, city: placemark.locality)
+    }
+
+    private func reverseGeocodeDetailedNameUsingCoreLocation(location: CLLocation) async throws -> String? {
+        #if canImport(CoreLocation) && !os(watchOS)
+        if #available(iOS 26.0, *) {
+            return nil
+        } else {
+            let geocoder = CLGeocoder()
+            return try await withCheckedThrowingContinuation { [weak self] continuation in
+                geocoder.reverseGeocodeLocation(location, preferredLocale: Locale(identifier: "zh_CN")) { placemarks, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    guard let placemark = placemarks?.first else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let name = self?.formatDetailedName(district: placemark.subLocality, street: placemark.thoroughfare, name: placemark.name, city: placemark.locality)
+                    continuation.resume(returning: name)
                 }
             }
         }
+        #else
+        return nil
+        #endif
+    }
 
-        return cityName
+    private func formatDetailedName(district: String?, street: String?, name: String?, city: String?) -> String? {
+        let districtName = district?.replacingOccurrences(of: "区", with: "") ?? ""
+        let streetName = street ?? ""
+        let poiName = name ?? ""
+        
+        var components: [String] = []
+        if !districtName.isEmpty {
+            components.append(districtName)
+        }
+        
+        // 优先显示具体地点名，如果具体名和街道名不重复
+        let detail = poiName.isEmpty ? streetName : poiName
+        if !detail.isEmpty && detail != districtName && detail != (city ?? "") {
+            components.append(detail)
+        }
+        
+        if components.isEmpty {
+            return city?.replacingOccurrences(of: "市", with: "")
+        }
+        return components.joined(separator: " · ")
     }
 
     private func reverseGeocodeCityName(location: CLLocation) async throws -> String? {
@@ -78,18 +131,18 @@ final class ResolvePlaceClusterCityNameUseCase {
         request.preferredLocale = Locale(identifier: "zh_CN")
 
         let items = try await request.mapItems
-        let placemark = items.first?.placemark
+        guard let item = items.first else { return nil }
+        let placemark = item.placemark
 
-        let candidate = placemark?.locality
-            ?? placemark?.administrativeArea
-            ?? placemark?.subAdministrativeArea
+        let candidate = placemark.locality
+            ?? placemark.administrativeArea
+            ?? placemark.subAdministrativeArea
 
         return candidate?.replacingOccurrences(of: "市", with: "")
     }
 
     private func reverseGeocodeCityNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
-        // 只有在 iOS 26 以下才使用这个逻辑，避免编译器在 iOS 26 target 下产生 deprecation 警告
         if #available(iOS 26.0, *) {
             return nil 
         } else {
