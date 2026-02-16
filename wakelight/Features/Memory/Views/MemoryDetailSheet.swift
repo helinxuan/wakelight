@@ -41,95 +41,93 @@ struct MemoryDetailSheet: View {
     ]
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(summaryTitle)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(summaryTitle)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.secondary)
+                        
+                        HStack(alignment: .top, spacing: 8) {
+                            TextEditor(text: $editText)
+                                .frame(minHeight: 100)
+                                .padding(10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color.secondary.opacity(0.08))
+                                )
                             
-                            HStack(alignment: .top, spacing: 8) {
-                                TextEditor(text: $editText)
-                                    .frame(minHeight: 100)
+                            Button(action: generateSmartText) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.blue)
                                     .padding(10)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(Color.secondary.opacity(0.08))
-                                    )
-                                
-                                Button(action: generateSmartText) {
-                                    Image(systemName: "sparkles")
-                                        .font(.system(size: 18, weight: .semibold))
-                                        .foregroundColor(.blue)
-                                        .padding(10)
-                                        .background(Circle().fill(Color.blue.opacity(0.1)))
-                                }
-                                .padding(.top, 4)
+                                    .background(Circle().fill(Color.blue.opacity(0.1)))
                             }
-
-                            if let errorMessage {
-                                Text(errorMessage)
-                                    .font(.footnote)
-                                    .foregroundColor(.red)
-                            }
+                            .padding(.top, 4)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 16)
 
-                        ForEach(photoGroups) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "mappin.and.ellipse")
-                                        .font(.system(size: 10, weight: .bold))
-                                    Text("\(group.location ?? "未知地点") · \(group.title)")
-                                        .font(.system(size: 13, weight: .bold))
-                                }
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 16)
-
-                                LazyVGrid(columns: gridColumns, spacing: 2) {
-                                    ForEach(group.photoLocalIdentifiers, id: \.self) { id in
-                                        ThumbnailView(localIdentifier: id, size: CGSize(width: 120, height: 120))
-                                            .clipped()
-                                            .onTapGesture {
-                                                if let globalIdx = flattenedPhotos.firstIndex(of: id) {
-                                                    selectedPhotoIndex = globalIdx
-                                                }
-                                            }
-                                    }
-                                }
-                            }
+                        if let errorMessage {
+                            Text(errorMessage)
+                                .font(.footnote)
+                                .foregroundColor(.red)
                         }
-                        .padding(.bottom, 20)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+
+                    ForEach(photoGroups) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "mappin.and.ellipse")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("\(group.location ?? "未知地点") · \(group.title)")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+
+                            LazyVGrid(columns: gridColumns, spacing: 2) {
+                                ForEach(group.photoLocalIdentifiers, id: \.self) { id in
+                                    ThumbnailView(localIdentifier: id, size: CGSize(width: 120, height: 120))
+                                        .clipped()
+                                        .onTapGesture {
+                                            if let globalIdx = flattenedPhotos.firstIndex(of: id) {
+                                                selectedPhotoIndex = globalIdx
+                                            }
+                                        }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.bottom, 20)
                 }
             }
-            .navigationTitle("照片墙")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
-                }
+        }
+        .navigationTitle("照片墙")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("关闭") { dismiss() }
+            }
 
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: save) {
-                        HStack(spacing: 4) {
-                            if isSaving {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Text("保存")
-                            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: save) {
+                    HStack(spacing: 4) {
+                        if isSaving {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("保存")
                         }
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.blue))
                     }
-                    .disabled(isSaving)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.blue))
                 }
+                .disabled(isSaving)
             }
         }
         .task {
@@ -178,19 +176,22 @@ struct MemoryDetailSheet: View {
     private func load() async {
         do {
             let currentItem = self.item
-            let names = self.clusterNames
             
             switch currentItem {
             case .unhandled(let layer):
                 let photos = try await loadPhotosForVisitLayer(visitLayerId: layer.id)
                 let title = Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
+                let location = try await DatabaseContainer.shared.db.reader.read { db in
+                    try PlaceCluster.fetchOne(db, key: layer.placeClusterId).map { $0.detailedAddress ?? $0.cityName ?? "未知地点" }
+                }
+                
                 await MainActor.run {
                     self.editText = layer.userText ?? ""
                     self.summaryTitle = title
                     let group = PhotoGroup(
                         id: layer.id,
                         title: title,
-                        location: names[layer.placeClusterId],
+                        location: location,
                         photoLocalIdentifiers: photos
                     )
                     self.photoGroups = [group]
@@ -218,7 +219,6 @@ struct MemoryDetailSheet: View {
 
     private func loadGroupsForStory(_ node: StoryNode) async throws -> [PhotoGroup] {
         let visitLayerIds = node.subVisitLayerIds
-        let names = self.clusterNames
         guard !visitLayerIds.isEmpty else { return [] }
 
         return try await DatabaseContainer.shared.db.reader.read { db in
@@ -229,6 +229,9 @@ struct MemoryDetailSheet: View {
             
             var groups: [PhotoGroup] = []
             for layer in layers {
+                let cluster = try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
+                let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "未知地点"
+                
                 let links = try VisitLayerPhotoAsset
                     .filter(Column("visitLayerId") == layer.id)
                     .fetchAll(db)
@@ -241,7 +244,7 @@ struct MemoryDetailSheet: View {
                 groups.append(PhotoGroup(
                     id: layer.id,
                     title: Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
-                    location: names[layer.placeClusterId],
+                    location: locationName,
                     photoLocalIdentifiers: photos.map { $0.localIdentifier }
                 ))
             }
