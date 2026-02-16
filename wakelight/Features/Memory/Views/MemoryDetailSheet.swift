@@ -105,31 +105,26 @@ struct MemoryDetailSheet: View {
                 }
             }
         }
-        .navigationTitle("照片墙")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("关闭") { dismiss() }
-            }
+            .navigationTitle("照片墙")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("关闭") { dismiss() }
+                }
 
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: save) {
-                    HStack(spacing: 4) {
-                        if isSaving {
-                            ProgressView().controlSize(.small)
-                        } else {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: save) {
+                        HStack(spacing: 4) {
+                            if isSaving {
+                                ProgressView().controlSize(.small)
+                            }
                             Text("保存")
+                                .fontWeight(.bold)
                         }
                     }
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.blue))
+                    .disabled(isSaving)
                 }
-                .disabled(isSaving)
             }
-        }
         .task {
             await load()
         }

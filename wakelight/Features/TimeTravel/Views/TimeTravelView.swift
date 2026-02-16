@@ -92,7 +92,9 @@ struct TimeTravelView: View {
             }
         }
         .sheet(item: $selectedDetailItem) { item in
-            MemoryDetailSheet(item: item, clusterNames: [:])
+            NavigationStack {
+                MemoryDetailSheet(item: item, clusterNames: [:])
+            }
         }
     }
 }
