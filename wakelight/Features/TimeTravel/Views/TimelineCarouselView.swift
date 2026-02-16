@@ -3,6 +3,7 @@ import SwiftUI
 struct TimelineCarouselView: View {
     let nodes: [TimeRouteNode]
     @Binding var selectedIndex: Int
+    let onShowDetail: (TimeRouteNode) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -11,9 +12,15 @@ struct TimelineCarouselView: View {
                     ForEach(Array(nodes.enumerated()), id: \.offset) { index, node in
                         TimelineCardView(node: node, isSelected: index == selectedIndex)
                             .id(index)
+                            .contentShape(Rectangle())
                             .onTapGesture {
-                                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                    selectedIndex = index
+                                print("DEBUG: TimelineCarouselView - tapped index=\(index) selected=\(index == selectedIndex) nodeId=\(node.id)")
+                                if index == selectedIndex {
+                                    onShowDetail(node)
+                                } else {
+                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                        selectedIndex = index
+                                    }
                                 }
                             }
                     }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TimeTravelView: View {
     @StateObject private var viewModel = TimeTravelViewModel()
+    @State private var selectedDetailItem: MemoryDetailItem?
 
     var body: some View {
         ZStack {
@@ -9,7 +10,6 @@ struct TimeTravelView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top Control Bar
                 HStack(spacing: 12) {
                     Button {
                         withAnimation(.spring()) {
@@ -40,7 +40,6 @@ struct TimeTravelView: View {
 
                 Spacer()
 
-                // Bottom Carousel
                 if viewModel.nodes.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "sparkles.rectangle.stack")
@@ -56,10 +55,20 @@ struct TimeTravelView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .padding(.bottom, 40)
                 } else {
-                    TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex)
-                        .padding(.bottom, 20)
+                    TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex) { node in
+                        print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) hasVisitLayer=\(node.visitLayer != nil)")
+                        if let layer = node.visitLayer {
+                            selectedDetailItem = .unhandled(layer)
+                        } else {
+                            print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
+                        }
+                    }
+                    .padding(.bottom, 20)
                 }
             }
+        }
+        .sheet(item: $selectedDetailItem) { item in
+            MemoryDetailSheet(item: item, clusterNames: [:])
         }
     }
 }

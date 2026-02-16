@@ -10,44 +10,61 @@ struct GenerateTimeRouteUseCase {
 
     func run() async throws -> [TimeRouteNode] {
         try await db.read { db in
-            // 1. 获取所有 StoryNode，并按创建时间或子访次的最早时间升序排列
             let storyNodes = try StoryNode
                 .order(Column("createdAt").asc)
                 .fetchAll(db)
 
-            // 2. 将 StoryNode 映射为 TimeRouteNode
             var nodes: [TimeRouteNode] = []
-            
+
             for (index, story) in storyNodes.enumerated() {
-                // 获取该故事关联的第一个集群信息
                 let cluster = try PlaceCluster
                     .filter(Column("id") == story.placeClusterId)
                     .fetchOne(db)
-                
-                // 获取地址信息
+
                 let locationName = cluster?.detailedAddress ?? cluster?.cityName
+
+                // 尝试加载记录的 VisitLayer
+                let storyLayerIds = story.subVisitLayerIds
+                var layers: [VisitLayer] = []
                 
-                // 获取该故事下所有访次的时间范围
-                let layers = try VisitLayer
-                    .filter(story.subVisitLayerIds.contains(Column("id")))
-                    .order(Column("startAt").asc)
-                    .fetchAll(db)
-                
-                let firstLayer = layers.first
-                let lastLayer = layers.last
-                
-                let dateDisplay: String?
-                if let start = firstLayer?.startAt, let end = lastLayer?.endAt {
-                    dateDisplay = self.formatDateRange(start: start, end: end)
-                } else {
-                    dateDisplay = nil
+                if !storyLayerIds.isEmpty {
+                    // 优先按记录的 ID 加载
+                    layers = try VisitLayer.fetchAll(db, keys: storyLayerIds)
                 }
                 
+                // 【核心兜底逻辑】如果按 ID 加载不到任何内容，说明数据断链了
+                if layers.isEmpty {
+                    print("DEBUG: DATA_LINK_BROKEN - Story \(story.id) recorded IDs not found. Attempting to recover via placeClusterId...")
+                    // 自动找回该地点下的所有故事关联记忆
+                    layers = try VisitLayer
+                        .filter(Column("placeClusterId") == story.placeClusterId)
+                        .filter(Column("isStoryNode") == true)
+                        .order(Column("startAt").asc)
+                        .fetchAll(db)
+                    
+                    if layers.isEmpty {
+                        // 如果还是没有，找回该地点下任何记忆（最后的倔强）
+                        layers = try VisitLayer
+                            .filter(Column("placeClusterId") == story.placeClusterId)
+                            .order(Column("startAt").asc)
+                            .fetchAll(db)
+                    }
+                }
+                
+                let firstLayer = layers.sorted(by: { $0.startAt < $1.startAt }).first
+                
+                // 打印最终结果，方便调试
+                if let matched = firstLayer {
+                    print("DEBUG: TimeRouteNode Generated - storyId=\(story.id) visitLayerId=\(matched.id) recovered=\(storyLayerIds.contains(matched.id) == false)")
+                } else {
+                    print("DEBUG: FATAL - No VisitLayer found for story \(story.id) even after recovery attempts.")
+                }
+
                 let node = TimeRouteNode(
                     id: UUID(),
-                    visitLayerId: story.subVisitLayerIds.first ?? UUID(),
+                    visitLayerId: firstLayer?.id ?? (storyLayerIds.first ?? UUID()),
                     sortOrder: index,
-                    displayTitle: dateDisplay,
+                    displayTitle: firstLayer != nil ? self.formatDateRange(start: firstLayer!.startAt, end: firstLayer!.endAt) : "未知时间",
                     displaySummary: story.mainSummary,
                     displayLocation: locationName,
                     coverPhotoIdentifier: story.coverPhotoId,
@@ -56,6 +73,7 @@ struct GenerateTimeRouteUseCase {
                 )
                 nodes.append(node)
             }
+
             return nodes
         }
     }
@@ -63,7 +81,7 @@ struct GenerateTimeRouteUseCase {
     private func formatDateRange(start: Date, end: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        
+
         if Calendar.current.isDate(start, inSameDayAs: end) {
             formatter.dateFormat = "yyyy年MM月dd日"
             return formatter.string(from: start)
