@@ -258,9 +258,6 @@ struct MemoryPanelView: View {
                 }
             }
             .listStyle(.plain)
-            .onTapGesture {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-            }
             .onChange(of: filterMode) { _, newValue in
                 if newValue == .story {
                     exitMultiSelect()

@@ -8,49 +8,68 @@ struct TimeTravelView: View {
             TimeTravelMapView(nodes: viewModel.nodes, selectedIndex: viewModel.selectedIndex)
                 .ignoresSafeArea()
 
-            VStack {
+            VStack(spacing: 0) {
+                // Top Control Bar
                 HStack(spacing: 12) {
                     Button {
                         Task { await viewModel.reload() }
                     } label: {
-                        Label("Reload", systemImage: "arrow.clockwise")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(Color.black.opacity(0.65))
-                            .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.primary)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
                     }
 
                     Button {
-                        if viewModel.isPlaying {
-                            viewModel.pause()
-                        } else {
-                            viewModel.play()
+                        withAnimation(.spring()) {
+                            if viewModel.isPlaying {
+                                viewModel.pause()
+                            } else {
+                                viewModel.play()
+                            }
                         }
                     } label: {
-                        Label(viewModel.isPlaying ? "Pause" : "Play", systemImage: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(viewModel.isPlaying ? Color.orange : Color.blue)
-                            .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        HStack(spacing: 8) {
+                            Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                            Text(viewModel.isPlaying ? "暂停" : "播放")
+                        }
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .frame(height: 44)
+                        .background(viewModel.isPlaying ? Color.orange : Color.blue)
+                        .clipShape(Capsule())
+                        .shadow(color: (viewModel.isPlaying ? Color.orange : Color.blue).opacity(0.3), radius: 8, y: 4)
                     }
 
                     Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
 
                 Spacer()
 
+                // Bottom Carousel
                 if viewModel.nodes.isEmpty {
-                    Text("No Story Nodes yet")
-                        .padding(12)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .padding(.bottom, 10)
+                    VStack(spacing: 12) {
+                        Image(systemName: "sparkles.rectangle.stack")
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary)
+                        Text("开启时光旅行，回顾精彩故事")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .padding(.bottom, 40)
                 } else {
                     TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex)
+                        .padding(.bottom, 20)
                 }
             }
         }

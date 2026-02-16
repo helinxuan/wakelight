@@ -10,38 +10,33 @@ struct GenerateTimeRouteUseCase {
 
     func run() async throws -> [TimeRouteNode] {
         try await db.read { db in
-            // 1. 获取所有标记为 StoryNode 的 VisitLayer，并按时间升序排列
-            let visitLayers = try VisitLayer
-                .filter(Column("isStoryNode") == true)
-                .order(Column("startAt").asc)
+            // 1. 获取所有 StoryNode，并按创建时间或子访次的最早时间升序排列
+            let storyNodes = try StoryNode
+                .order(Column("createdAt").asc)
                 .fetchAll(db)
 
-            // 2. 将 VisitLayer 映射为 TimeRouteNode，并填充关联数据
+            // 2. 将 StoryNode 映射为 TimeRouteNode
             var nodes: [TimeRouteNode] = []
-            for (index, layer) in visitLayers.enumerated() {
+            for (index, story) in storyNodes.enumerated() {
+                // 获取该故事关联的第一个集群信息
                 let cluster = try PlaceCluster
-                    .filter(Column("id") == layer.placeClusterId)
+                    .filter(Column("id") == story.placeClusterId)
                     .fetchOne(db)
                 
-                // 获取封面图：该访次内最新的一张照片
-                let sql = """
-                    SELECT p.localIdentifier 
-                    FROM photoAsset p
-                    JOIN visitLayerPhotoAsset vlp ON vlp.photoAssetId = p.id
-                    WHERE vlp.visitLayerId = ?
-                    ORDER BY p.creationDate DESC
-                    LIMIT 1
-                """
-                let coverId = try String.fetchOne(db, sql: sql, arguments: [layer.id])
+                // 获取该故事下所有访次的最早时间
+                let firstLayer = try VisitLayer
+                    .filter(story.subVisitLayerIds.contains(Column("id")))
+                    .order(Column("startAt").asc)
+                    .fetchOne(db)
                 
                 let node = TimeRouteNode(
                     id: UUID(),
-                    visitLayerId: layer.id,
+                    visitLayerId: story.subVisitLayerIds.first ?? UUID(), // 保持兼容
                     sortOrder: index,
-                    displayTitle: self.formatDateRange(layer),
-                    displaySummary: layer.userText,
-                    coverPhotoIdentifier: coverId,
-                    visitLayer: layer,
+                    displayTitle: firstLayer.map { self.formatDate(from: $0.startAt) } ?? "精彩时刻",
+                    displaySummary: story.mainSummary,
+                    coverPhotoIdentifier: story.coverPhotoId,
+                    visitLayer: firstLayer, // 取第一个访次作为代表
                     placeCluster: cluster
                 )
                 nodes.append(node)
@@ -50,10 +45,10 @@ struct GenerateTimeRouteUseCase {
         }
     }
 
-    private func formatDateRange(_ layer: VisitLayer) -> String {
+    private func formatDate(from date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter.string(from: layer.startAt)
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年MM月dd日"
+        return formatter.string(from: date)
     }
 }
