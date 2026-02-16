@@ -139,6 +139,9 @@ struct MemoryPanelView: View {
                     .listRowBackground(Color.clear)
                 }
                 .listSectionSeparator(.hidden)
+                .onTapGesture {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
 
                 switch filterMode {
                 case .unhandled:
@@ -748,6 +751,12 @@ private struct MergeVisitLayersSheet: View {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
         return "\(formatter.string(from: minStart)) - \(formatter.string(from: maxEnd))"
+    }
+}
+
+extension View {
+    func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 

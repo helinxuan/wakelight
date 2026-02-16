@@ -141,6 +141,9 @@ struct ExplorationRootView: View {
             .ignoresSafeArea(edges: .bottom)
         }
         .animation(.easeInOut(duration: 0.22), value: awakenQueue.map(\.id))
+        .onTapGesture {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
         .sheet(isPresented: $showBadges) {
             BadgeWallView()
         }
