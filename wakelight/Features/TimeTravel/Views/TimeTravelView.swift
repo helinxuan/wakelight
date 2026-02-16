@@ -12,18 +12,6 @@ struct TimeTravelView: View {
                 // Top Control Bar
                 HStack(spacing: 12) {
                     Button {
-                        Task { await viewModel.reload() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.primary)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                            .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
-                    }
-
-                    Button {
                         withAnimation(.spring()) {
                             if viewModel.isPlaying {
                                 viewModel.pause()

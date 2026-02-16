@@ -17,26 +17,41 @@ struct GenerateTimeRouteUseCase {
 
             // 2. 将 StoryNode 映射为 TimeRouteNode
             var nodes: [TimeRouteNode] = []
+            
             for (index, story) in storyNodes.enumerated() {
                 // 获取该故事关联的第一个集群信息
                 let cluster = try PlaceCluster
                     .filter(Column("id") == story.placeClusterId)
                     .fetchOne(db)
                 
-                // 获取该故事下所有访次的最早时间
-                let firstLayer = try VisitLayer
+                // 获取地址信息
+                let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "记忆节点"
+                
+                // 获取该故事下所有访次的时间范围
+                let layers = try VisitLayer
                     .filter(story.subVisitLayerIds.contains(Column("id")))
                     .order(Column("startAt").asc)
-                    .fetchOne(db)
+                    .fetchAll(db)
+                
+                let firstLayer = layers.first
+                let lastLayer = layers.last
+                
+                let dateDisplay: String
+                if let start = firstLayer?.startAt, let end = lastLayer?.endAt {
+                    dateDisplay = self.formatDateRange(start: start, end: end)
+                } else {
+                    dateDisplay = "精彩时刻"
+                }
                 
                 let node = TimeRouteNode(
                     id: UUID(),
-                    visitLayerId: story.subVisitLayerIds.first ?? UUID(), // 保持兼容
+                    visitLayerId: story.subVisitLayerIds.first ?? UUID(),
                     sortOrder: index,
-                    displayTitle: firstLayer.map { self.formatDate(from: $0.startAt) } ?? "精彩时刻",
+                    displayTitle: dateDisplay,
                     displaySummary: story.mainSummary,
+                    displayLocation: locationName,
                     coverPhotoIdentifier: story.coverPhotoId,
-                    visitLayer: firstLayer, // 取第一个访次作为代表
+                    visitLayer: firstLayer,
                     placeCluster: cluster
                 )
                 nodes.append(node)
@@ -45,10 +60,20 @@ struct GenerateTimeRouteUseCase {
         }
     }
 
-    private func formatDate(from date: Date) -> String {
+    private func formatDateRange(start: Date, end: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy年MM月dd日"
-        return formatter.string(from: date)
+        
+        if Calendar.current.isDate(start, inSameDayAs: end) {
+            formatter.dateFormat = "yyyy年MM月dd日"
+            return formatter.string(from: start)
+        } else {
+            formatter.dateFormat = "MM月dd日"
+            let startStr = formatter.string(from: start)
+            let endStr = formatter.string(from: end)
+            formatter.dateFormat = "yyyy年"
+            let yearStr = formatter.string(from: start)
+            return "\(yearStr)\(startStr) - \(endStr)"
+        }
     }
 }

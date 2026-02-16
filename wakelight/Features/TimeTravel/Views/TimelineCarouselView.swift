@@ -84,13 +84,13 @@ private struct TimelineCardView: View {
                         .italic()
                 }
                 
-                if let location = node.placeCluster?.id {
-                    // 可以在这里通过 locationName 展示地点名，由于目前 node 里没有直接存，暂用 displayTitle 的辅助逻辑
+                if let location = node.displayLocation {
                     HStack(spacing: 4) {
                         Image(systemName: "mappin.and.ellipse")
                             .font(.system(size: 10))
-                        Text("记忆节点")
+                        Text(location)
                             .font(.system(size: 11))
+                            .lineLimit(1)
                     }
                     .foregroundColor(.blue.opacity(0.8))
                     .padding(.top, 2)

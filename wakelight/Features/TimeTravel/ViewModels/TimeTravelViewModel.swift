@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MapKit
+import GRDB
 
 @MainActor
 final class TimeTravelViewModel: ObservableObject {
@@ -9,19 +10,41 @@ final class TimeTravelViewModel: ObservableObject {
     @Published var isPlaying: Bool = false
 
     private var playTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
-        Task {
-            await reload()
+        observeStoryNodes()
+    }
+
+    private func observeStoryNodes() {
+        // 监听 StoryNode 表的变化，一旦有新故事产生或被修改，自动重新加载
+        ValueObservation.tracking { db in
+            try StoryNode.fetchAll(db)
         }
+        .publisher(in: DatabaseContainer.shared.db.reader)
+        .sink { completion in
+            if case .failure(let error) = completion {
+                print("Observation failed: \(error)")
+            }
+        } receiveValue: { [weak self] _ in
+            Task { @MainActor in
+                await self?.reload()
+            }
+        }
+        .store(in: &cancellables)
     }
 
     func reload() async {
         do {
             let newNodes = try await GenerateTimeRouteUseCase().run()
-            nodes = newNodes
-            if selectedIndex >= nodes.count {
-                selectedIndex = max(0, nodes.count - 1)
+            // 如果节点数量发生变化，才重置选择索引
+            if newNodes.count != nodes.count {
+                nodes = newNodes
+                if selectedIndex >= nodes.count {
+                    selectedIndex = max(0, nodes.count - 1)
+                }
+            } else {
+                nodes = newNodes
             }
         } catch {
             print("Failed to load time route: \(error)")
