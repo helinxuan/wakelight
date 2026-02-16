@@ -7,14 +7,17 @@ final class PhotoThumbnailLoader {
     static let shared = PhotoThumbnailLoader()
     
     private let imageManager = PHImageManager.default()
-    private let cache = NSCache<NSString, UIImage>()
+    private let thumbnailCache = NSCache<NSString, UIImage>()
+    private let fullImageCache = NSCache<NSString, UIImage>()
     
     private init() {
-        cache.countLimit = 200 // 缓存最近的 200 张缩略图
+        thumbnailCache.countLimit = 200 // 缓存最近的 200 张缩略图
+        fullImageCache.countLimit = 20 // 缓存大图，避免内存溢出
     }
     
     func loadThumbnail(for localIdentifier: String, size: CGSize) async -> UIImage? {
-        if let cached = cache.object(forKey: localIdentifier as NSString) {
+        let cacheKey = "thumb-\(localIdentifier)-\(Int(size.width))x\(Int(size.height))" as NSString
+        if let cached = thumbnailCache.object(forKey: cacheKey) {
             return cached
         }
         
@@ -42,7 +45,41 @@ final class PhotoThumbnailLoader {
                 resumed = true
 
                 if let image = image {
-                    self?.cache.setObject(image, forKey: localIdentifier as NSString)
+                    self?.thumbnailCache.setObject(image, forKey: cacheKey)
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+    
+    func loadFullImage(for localIdentifier: String) async -> UIImage? {
+        let cacheKey = "full-\(localIdentifier)" as NSString
+        if let cached = fullImageCache.object(forKey: cacheKey) {
+            return cached
+        }
+        
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+        
+        return await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .none
+            options.isNetworkAccessAllowed = true
+
+            imageManager.requestImage(
+                for: asset,
+                targetSize: PHImageManagerMaximumSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { [weak self] image, info in
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if isDegraded { return }
+
+                if let image = image {
+                    self?.fullImageCache.setObject(image, forKey: cacheKey)
                     continuation.resume(returning: image)
                 } else {
                     continuation.resume(returning: nil)
@@ -74,6 +111,41 @@ struct ThumbnailView: View {
         .cornerRadius(4)
         .task(id: "\(localIdentifier)-\(Int(size.width))x\(Int(size.height))") {
             image = await PhotoThumbnailLoader.shared.loadThumbnail(for: localIdentifier, size: size)
+        }
+    }
+}
+
+struct FullImageView: View {
+    let localIdentifier: String
+
+    @State private var image: UIImage?
+    @State private var isLoading = true
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let image = image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                } else if isLoading {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                } else {
+                    Color.clear
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            }
+        }
+        .task(id: localIdentifier) {
+            isLoading = true
+            image = await PhotoThumbnailLoader.shared.loadThumbnail(for: localIdentifier, size: CGSize(width: 800, height: 800))
+            if let fullRes = await PhotoThumbnailLoader.shared.loadFullImage(for: localIdentifier) {
+                image = fullRes
+            }
+            isLoading = false
         }
     }
 }

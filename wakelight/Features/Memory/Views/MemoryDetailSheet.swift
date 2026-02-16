@@ -334,28 +334,98 @@ private struct PhotoPreviewPager: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
             TabView(selection: $selection) {
                 ForEach(Array(localIdentifiers.enumerated()), id: \.offset) { idx, id in
-                    VStack {
-                        Spacer()
-                        ThumbnailView(localIdentifier: id, size: CGSize(width: 340, height: 340))
-                            .scaledToFit()
-                        Spacer()
+                    ZoomableScrollView {
+                        FullImageView(localIdentifier: id)
                     }
                     .tag(idx)
-                    .background(Color.black)
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .always))
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .ignoresSafeArea()
 
-            Button(action: { dismiss() }) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.white.opacity(0.9))
-                    .padding(16)
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(.white.opacity(0.8))
+                            .padding()
+                            .contentShape(Rectangle())
+                    }
+                }
+                Spacer()
             }
+            .padding(.top, 50)
+            .zIndex(1)
         }
-        .background(Color.black)
+    }
+}
+
+private struct ZoomableScrollView<Content: View>: UIViewRepresentable {
+    private var content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.maximumZoomScale = 4
+        scrollView.minimumZoomScale = 1
+        scrollView.bouncesZoom = true
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+
+        let hostedView = context.coordinator.hostingController.view!
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        hostedView.backgroundColor = .clear
+        scrollView.addSubview(hostedView)
+
+        NSLayoutConstraint.activate([
+            hostedView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: scrollView.frameLayoutGuide.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: scrollView.frameLayoutGuide.bottomAnchor)
+        ])
+
+        return scrollView
+    }
+
+    func updateUIView(_ uiView: UIScrollView, context: Context) {
+        context.coordinator.hostingController.rootView = content
+        // 确保首次进入时为 1.0（适应屏幕的 Fit 由 SwiftUI 内容决定），避免“初始放大”
+        if !context.coordinator.didSetInitialZoom {
+            context.coordinator.didSetInitialZoom = true
+            uiView.setZoomScale(1.0, animated: false)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(hostingController: UIHostingController(rootView: content))
+    }
+
+    class Coordinator: NSObject, UIScrollViewDelegate {
+        var hostingController: UIHostingController<Content>
+        var didSetInitialZoom: Bool = false
+
+        init(hostingController: UIHostingController<Content>) {
+            self.hostingController = hostingController
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            return hostingController.view
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            // 不要强行改 view.center，否则会造成缩小后“回弹/被拉回去”的观感
+        }
     }
 }
