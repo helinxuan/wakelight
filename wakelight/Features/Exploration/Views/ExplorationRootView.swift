@@ -88,14 +88,9 @@ struct ExplorationRootView: View {
                                 .frame(width: 36, height: 5)
                                 .padding(.top, 10)
                                 .padding(.bottom, 8)
-
-                            Text(panelCityName.map { "\($0)的回忆" } ?? (awakenQueue.count == 1 ? "地点记忆" : "\(awakenQueue.count) 个地点记忆"))
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                                .padding(.bottom, 10)
                         }
                         .frame(maxWidth: .infinity)
-                        .frame(height: headerHeight)
+                        .frame(height: 24)
                         .contentShape(Rectangle())
                         .background(Color(.systemBackground))
                         .task(id: awakenQueue.map(\.id)) {

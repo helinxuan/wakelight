@@ -76,6 +76,57 @@ struct MemoryPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Unified Single-line Toolbar
+            HStack(alignment: .center) {
+                if isMultiSelectMode {
+                    Button("取消") {
+                        withAnimation {
+                            exitMultiSelect()
+                        }
+                    }
+                    .font(.system(size: 15))
+                    .frame(width: 60, alignment: .leading)
+                } else {
+                    Spacer().frame(width: 60)
+                }
+
+                Spacer()
+
+                Text(panelTitle)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Spacer()
+
+                if filterMode == .unhandled {
+                    if isMultiSelectMode {
+                        Button(action: {
+                            mergeDraftSummary = ""
+                            isPresentingMergeSheet = true
+                        }) {
+                            Text(selectedVisitLayerIds.count < 2 ? "合并" : "合并 (\(selectedVisitLayerIds.count))")
+                                .fontWeight(.bold)
+                                .foregroundColor(selectedVisitLayerIds.count < 2 ? .secondary : .blue)
+                        }
+                        .disabled(selectedVisitLayerIds.count < 2)
+                        .frame(width: 60, alignment: .trailing)
+                    } else {
+                        Button("多选") {
+                            withAnimation {
+                                isMultiSelectMode = true
+                            }
+                        }
+                        .font(.system(size: 15))
+                        .frame(width: 60, alignment: .trailing)
+                    }
+                } else {
+                    Spacer().frame(width: 60)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color(.systemBackground))
+
             List {
                 Section {
                     Picker("筛选", selection: $filterMode) {
@@ -204,6 +255,9 @@ struct MemoryPanelView: View {
                 }
             }
             .listStyle(.plain)
+            .onTapGesture {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
             .onChange(of: filterMode) { _, newValue in
                 if newValue == .story {
                     exitMultiSelect()
@@ -211,28 +265,6 @@ struct MemoryPanelView: View {
             }
             .sheet(item: $selectedDetailItem) { item in
                 MemoryPhotoWallSheet(item: item, clusterNames: viewModel.clusterNames)
-            }
-            .safeAreaInset(edge: .bottom) {
-                if filterMode == .unhandled && isMultiSelectMode {
-                    HStack(spacing: 12) {
-                        Button("取消选择") {
-                            selectedVisitLayerIds.removeAll()
-                        }
-                        .buttonStyle(.bordered)
-
-                        Spacer()
-
-                        Button("合并为 1 个故事 (\(selectedVisitLayerIds.count))") {
-                            mergeDraftSummary = ""
-                            isPresentingMergeSheet = true
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(selectedVisitLayerIds.count < 2)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial)
-                }
             }
         }
         .background(Color(.systemBackground))
@@ -380,8 +412,19 @@ private struct MemoryPhotoWallSheet: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(isSaving ? "保存中..." : "保存") {
-                        save()
+                    Button(action: save) {
+                        HStack(spacing: 4) {
+                            if isSaving {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("保存")
+                            }
+                        }
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.blue))
                     }
                     .disabled(isSaving)
                 }
@@ -626,31 +669,74 @@ private struct MergeVisitLayersSheet: View {
 
     var body: some View {
         NavigationView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("将 \(visitLayers.count) 个记忆合并为 1 个故事")
-                    .font(.headline)
-                if let rangeText = timeRangeText(visitLayers) {
-                    Text(rangeText).font(.subheadline).foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("将 \(visitLayers.count) 个记忆合并为故事")
+                        .font(.title3.weight(.bold))
+                    if let rangeText = timeRangeText(visitLayers) {
+                        Text(rangeText)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
                 }
-                TextEditor(text: $localSummaryText)
-                    .frame(minHeight: 140)
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+                .padding(.top, 10)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("故事摘要")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 4)
+
+                    TextEditor(text: $localSummaryText)
+                        .frame(minHeight: 120)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(Color.secondary.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                        )
+                }
+
                 if let errorMessage {
-                    Text(errorMessage).font(.footnote).foregroundColor(.red)
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                        .padding(.horizontal, 4)
                 }
+
                 Spacer()
+
+                Button(action: {
+                    summaryText = localSummaryText
+                    onConfirm()
+                }) {
+                    HStack {
+                        if isMerging {
+                            ProgressView().controlSize(.small).tint(.white)
+                        } else {
+                            Text("确认合并")
+                        }
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        Capsule()
+                            .fill(localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isMerging ? Color.blue.opacity(0.5) : Color.blue)
+                    )
+                }
+                .disabled(isMerging || localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .padding(.bottom, 10)
             }
-            .padding(16)
-            .navigationTitle("合并确认")
+            .padding(24)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("取消") { onCancel() } }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(isMerging ? "合并中..." : "确认") {
-                        summaryText = localSummaryText
-                        onConfirm()
-                    }
-                    .disabled(isMerging || localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { onCancel() }
                 }
             }
         }
@@ -874,16 +960,48 @@ private struct VisitLayerRowView: View {
         let onSmartFill: () -> Void
 
         var body: some View {
-            HStack(spacing: 8) {
-                TextField("写一句...", text: $draftText).textFieldStyle(RoundedBorderTextFieldStyle())
-                Button(action: onSmartFill) {
-                    Image(systemName: "sparkles").foregroundColor(.blue).padding(6).background(Circle().fill(Color.blue.opacity(0.1)))
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    TextField("记录此刻的想法...", text: $draftText, axis: .vertical)
+                        .lineLimit(1...5)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color.secondary.opacity(0.1))
+                        )
+                    
+                    Button(action: onSmartFill) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.blue)
+                            .padding(8)
+                            .background(Circle().fill(Color.blue.opacity(0.1)))
+                    }
                 }
+                
                 Button(action: onSave) {
-                    if isSaving { ProgressView() } else { Text("加入故事") }
+                    HStack(spacing: 4) {
+                        if isSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "plus.circle.fill")
+                            Text("加入故事")
+                        }
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(draftText.isEmpty ? Color.gray.opacity(0.5) : Color.blue)
+                    )
                 }
-                .disabled(isSaving)
+                .disabled(isSaving || draftText.isEmpty)
             }
+            .padding(4)
         }
     }
 
