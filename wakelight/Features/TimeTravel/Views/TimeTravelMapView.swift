@@ -128,10 +128,10 @@ final class TimeTravelNodeAnnotation: NSObject, MKAnnotation {
     }
 
     var title: String? {
-        node.displayTitle ?? "Story"
+        node.displaySummary ?? node.displayLocation
     }
 
     var subtitle: String? {
-        node.displaySummary
+        nil
     }
 }

@@ -25,7 +25,7 @@ struct GenerateTimeRouteUseCase {
                     .fetchOne(db)
                 
                 // 获取地址信息
-                let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "记忆节点"
+                let locationName = cluster?.detailedAddress ?? cluster?.cityName
                 
                 // 获取该故事下所有访次的时间范围
                 let layers = try VisitLayer
@@ -36,11 +36,11 @@ struct GenerateTimeRouteUseCase {
                 let firstLayer = layers.first
                 let lastLayer = layers.last
                 
-                let dateDisplay: String
+                let dateDisplay: String?
                 if let start = firstLayer?.startAt, let end = lastLayer?.endAt {
                     dateDisplay = self.formatDateRange(start: start, end: end)
                 } else {
-                    dateDisplay = "精彩时刻"
+                    dateDisplay = nil
                 }
                 
                 let node = TimeRouteNode(
