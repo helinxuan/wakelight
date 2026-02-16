@@ -56,17 +56,30 @@ struct AppDatabase {
                 t.column("voiceNotePath", .text)
                 t.column("settledAt", .datetime)
             }
+
+            // 5.2.4 StoryNode (必须在 timeRouteNode 之前创建，因为有外键引用)
+            try db.create(table: "storyNode") { t in
+                t.column("id", .text).primaryKey()
+                t.column("placeClusterId", .text).notNull().references("placeCluster", onDelete: .cascade)
+                t.column("mainTitle", .text)
+                t.column("mainSummary", .text)
+                t.column("coverPhotoId", .text).notNull()
+                t.column("subVisitLayerIdsJson", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
             
-            // 5.2.4 TimeRouteNode (时光模式节点)
+            // 5.2.5 TimeRouteNode (时光模式节点)
             try db.create(table: "timeRouteNode") { t in
                 t.column("id", .text).primaryKey()
                 t.column("visitLayerId", .text).notNull().references("visitLayer", onDelete: .cascade)
+                t.column("storyId", .text).references("storyNode", onDelete: .cascade)
                 t.column("sortOrder", .integer).notNull()
                 t.column("displayTitle", .text)
                 t.column("displaySummary", .text)
             }
             
-            // 5.2.5 AchievementProgress
+            // 5.2.6 AchievementProgress
             try db.create(table: "achievementProgress") { t in
                 t.column("id", .text).primaryKey()
                 t.column("achievementId", .text).notNull().unique()
@@ -76,7 +89,7 @@ struct AppDatabase {
                 t.column("updatedAt", .datetime).notNull()
             }
 
-            // 5.2.6 AwakenState
+            // 5.2.7 AwakenState
             try db.create(table: "awakenState") { t in
                 t.column("id", .text).primaryKey()
                 t.column("placeClusterId", .text).notNull().unique().references("placeCluster", onDelete: .cascade)
@@ -84,18 +97,6 @@ struct AppDatabase {
                 t.column("isHalfRevealed", .boolean).notNull().defaults(to: false)
                 t.column("awakenedPointCount", .integer).notNull().defaults(to: 0)
                 t.column("lastAwakenedAt", .datetime)
-                t.column("updatedAt", .datetime).notNull()
-            }
-
-            // 5.2.7 StoryNode
-            try db.create(table: "storyNode") { t in
-                t.column("id", .text).primaryKey()
-                t.column("placeClusterId", .text).notNull().references("placeCluster", onDelete: .cascade)
-                t.column("mainTitle", .text)
-                t.column("mainSummary", .text)
-                t.column("coverPhotoId", .text).notNull()
-                t.column("subVisitLayerIdsJson", .text).notNull()
-                t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import GRDB
 
 struct TimeTravelView: View {
     @StateObject private var viewModel = TimeTravelViewModel()
@@ -56,8 +57,31 @@ struct TimeTravelView: View {
                     .padding(.bottom, 40)
                 } else {
                     TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex) { node in
-                        print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) hasVisitLayer=\(node.visitLayer != nil)")
-                        if let layer = node.visitLayer {
+                        print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
+                        if let storyId = node.storyId {
+                            Task {
+                                do {
+                                    let story = try await DatabaseContainer.shared.db.reader.read { db in
+                                        try StoryNode.fetchOne(db, key: storyId)
+                                    }
+                                    if let story {
+                                        await MainActor.run {
+                                            selectedDetailItem = .story(story)
+                                        }
+                                    } else if let layer = node.visitLayer {
+                                        await MainActor.run {
+                                            selectedDetailItem = .unhandled(layer)
+                                        }
+                                    }
+                                } catch {
+                                    if let layer = node.visitLayer {
+                                        await MainActor.run {
+                                            selectedDetailItem = .unhandled(layer)
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let layer = node.visitLayer {
                             selectedDetailItem = .unhandled(layer)
                         } else {
                             print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")

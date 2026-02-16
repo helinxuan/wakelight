@@ -10,71 +10,78 @@ struct GenerateTimeRouteUseCase {
 
     func run() async throws -> [TimeRouteNode] {
         try await db.read { db in
-            let storyNodes = try StoryNode
-                .order(Column("createdAt").asc)
-                .fetchAll(db)
+            // 1. 加载所有 StoryNode
+            let storyNodes = try StoryNode.fetchAll(db)
 
-            var nodes: [TimeRouteNode] = []
+            var nodesWithStartTime: [(node: TimeRouteNode, startTime: Date)] = []
 
-            for (index, story) in storyNodes.enumerated() {
-                let cluster = try PlaceCluster
-                    .filter(Column("id") == story.placeClusterId)
-                    .fetchOne(db)
+            for story in storyNodes {
+                // 2. 加载该 Story 关联的所有 VisitLayer
+                let storyLayerIds = story.subVisitLayerIds
+                guard !storyLayerIds.isEmpty else { continue }
+                
+                let layers = try VisitLayer.fetchAll(db, keys: storyLayerIds)
+                
+                // 诊断日志：帮助排查日期缺失问题
+                #if DEBUG
+                print("DEBUG: StoryNode Diagnostic - id=\(story.id) summary=\(story.mainSummary ?? "nil")")
+                print("  Expected Layer IDs (\(storyLayerIds.count)): \(storyLayerIds)")
+                print("  Found Layers in DB (\(layers.count)): \(layers.map { "\($0.id) (\($0.startAt))" })")
+                if layers.count != storyLayerIds.count {
+                    let missingIds = Set(storyLayerIds).subtracting(Set(layers.map { $0.id }))
+                    print("  !!! MISSING IDs: \(missingIds)")
+                }
+                #endif
+
+                guard !layers.isEmpty else { continue }
+                
+                // 3. 确定时间范围
+                let sortedLayers = layers.sorted(by: { $0.startAt < $1.startAt })
+                let firstLayer = sortedLayers.first!
+                let lastLayer = sortedLayers.last!
+                
+                // 4. 确定锚点 Layer（用户选最新：startAt 最晚）
+                let anchorLayer = lastLayer
+                
+                // 5. 加载位置信息：优先从锚点 Layer 获取，解决“未知地点”问题
+                let cluster = try PlaceCluster.fetchOne(db, key: anchorLayer.placeClusterId) ?? PlaceCluster.fetchOne(db, key: story.placeClusterId)
+                
+                #if DEBUG
+                if cluster == nil {
+                    print("  !!! CLUSTER NOT FOUND for storyId=\(story.id) clusterId=\(anchorLayer.placeClusterId)")
+                } else {
+                    print("  Cluster Found: \(cluster?.detailedAddress ?? cluster?.cityName ?? "Unknown Name")")
+                }
+                #endif
 
                 let locationName = cluster?.detailedAddress ?? cluster?.cityName
 
-                // 尝试加载记录的 VisitLayer
-                let storyLayerIds = story.subVisitLayerIds
-                var layers: [VisitLayer] = []
-                
-                if !storyLayerIds.isEmpty {
-                    // 优先按记录的 ID 加载
-                    layers = try VisitLayer.fetchAll(db, keys: storyLayerIds)
-                }
-                
-                // 【核心兜底逻辑】如果按 ID 加载不到任何内容，说明数据断链了
-                if layers.isEmpty {
-                    print("DEBUG: DATA_LINK_BROKEN - Story \(story.id) recorded IDs not found. Attempting to recover via placeClusterId...")
-                    // 自动找回该地点下的所有故事关联记忆
-                    layers = try VisitLayer
-                        .filter(Column("placeClusterId") == story.placeClusterId)
-                        .filter(Column("isStoryNode") == true)
-                        .order(Column("startAt").asc)
-                        .fetchAll(db)
-                    
-                    if layers.isEmpty {
-                        // 如果还是没有，找回该地点下任何记忆（最后的倔强）
-                        layers = try VisitLayer
-                            .filter(Column("placeClusterId") == story.placeClusterId)
-                            .order(Column("startAt").asc)
-                            .fetchAll(db)
-                    }
-                }
-                
-                let firstLayer = layers.sorted(by: { $0.startAt < $1.startAt }).first
-                
-                // 打印最终结果，方便调试
-                if let matched = firstLayer {
-                    print("DEBUG: TimeRouteNode Generated - storyId=\(story.id) visitLayerId=\(matched.id) recovered=\(storyLayerIds.contains(matched.id) == false)")
-                } else {
-                    print("DEBUG: FATAL - No VisitLayer found for story \(story.id) even after recovery attempts.")
-                }
-
                 let node = TimeRouteNode(
                     id: UUID(),
-                    visitLayerId: firstLayer?.id ?? (storyLayerIds.first ?? UUID()),
-                    sortOrder: index,
-                    displayTitle: firstLayer != nil ? self.formatDateRange(start: firstLayer!.startAt, end: firstLayer!.endAt) : "未知时间",
+                    visitLayerId: anchorLayer.id,
+                    storyId: story.id,
+                    sortOrder: 0,
+                    displayTitle: self.formatDateRange(start: firstLayer.startAt, end: lastLayer.endAt),
                     displaySummary: story.mainSummary,
                     displayLocation: locationName,
                     coverPhotoIdentifier: story.coverPhotoId,
-                    visitLayer: firstLayer,
+                    visitLayer: anchorLayer,
                     placeCluster: cluster
                 )
-                nodes.append(node)
+                nodesWithStartTime.append((node, firstLayer.startAt))
             }
 
-            return nodes
+            // 6. 按“故事最早开始时间”全局排序（最早的在前面）
+            let sortedNodes = nodesWithStartTime.sorted { $0.startTime < $1.startTime }
+            
+            var finalNodes: [TimeRouteNode] = []
+            for i in sortedNodes.indices {
+                var node = sortedNodes[i].node
+                node.sortOrder = i
+                finalNodes.append(node)
+            }
+
+            return finalNodes
         }
     }
 
