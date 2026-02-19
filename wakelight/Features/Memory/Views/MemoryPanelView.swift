@@ -5,10 +5,18 @@ import UIKit
 import CoreLocation
 
 struct MemoryPanelView: View {
+    private struct PreviewItem: Identifiable {
+        let index: Int
+        var id: Int { index }
+    }
+
     let clusters: [PlaceCluster]
     let selectedClusterId: UUID?
 
     @StateObject private var viewModel: MemoryPanelViewModel
+
+    @State private var previewLocatorKeys: [String] = []
+    @State private var previewStartIndex: Int? = nil
 
     private var panelTitle: String {
         if let cityName = viewModel.cityName {
@@ -181,7 +189,11 @@ struct MemoryPanelView: View {
                                             }
                                             selectedVisitLayerIds.insert(layer.id)
                                         },
-                                        locationName: viewModel.clusterNames[layer.placeClusterId]
+                                        locationName: viewModel.clusterNames[layer.placeClusterId],
+                                        onPreview: { keys, index in
+                                            previewLocatorKeys = keys
+                                            previewStartIndex = index
+                                        }
                                     )
                                     .padding(.vertical, 6)
                                     .contentShape(Rectangle())
@@ -233,7 +245,10 @@ struct MemoryPanelView: View {
                                 .padding(.vertical, 8)
                             ) {
                                 ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
-                                    StoryNodeRowView(node: node)
+                                    StoryNodeRowView(node: node, onPreview: { keys, index in
+                                        previewLocatorKeys = keys
+                                        previewStartIndex = index
+                                    })
                                         .padding(.vertical, 6)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
@@ -254,6 +269,20 @@ struct MemoryPanelView: View {
             .sheet(item: $selectedDetailItem) { item in
                 MemoryDetailSheet(item: item, clusterNames: viewModel.clusterNames)
             }
+            .fullScreenCover(item: Binding(get: {
+                if let idx = previewStartIndex {
+                    return PreviewItem(index: idx)
+                }
+                return nil
+            }, set: { _ in
+                previewStartIndex = nil
+            })) { preview in
+                PhotoPreviewPager(locatorKeys: previewLocatorKeys, startIndex: preview.index)
+            }
+            
+            // Helper type for fullScreenCover(item:)
+            
+
         }
         .background(Color(.systemBackground))
         .sheet(isPresented: $isPresentingMergeSheet) {
@@ -485,6 +514,7 @@ final class MemoryPanelViewModel: ObservableObject {
 
 private struct StoryNodeRowView: View {
     let node: StoryNode
+    let onPreview: ([String], Int) -> Void
     @State private var timeRangeText: String?
     @State private var coverLocatorKeys: [String] = []
 
@@ -496,13 +526,21 @@ private struct StoryNodeRowView: View {
             if !coverLocatorKeys.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
-                        ForEach(coverLocatorKeys, id: \.self) { key in
-                            ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                        ForEach(Array(coverLocatorKeys.enumerated()), id: \.element) { idx, key in
+                            ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .onTapGesture {
+                                    onPreview(coverLocatorKeys, idx)
+                                }
                         }
                     }
                 }
             } else {
-                ThumbnailView(locatorKey: node.coverPhotoId, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                ThumbnailView(locatorKey: node.coverPhotoId, size: CGSize(width: 80, height: 80))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .onTapGesture {
+                        onPreview([node.coverPhotoId], 0)
+                    }
             }
             if let summary = node.mainSummary, !summary.isEmpty {
                 Text(summary).font(.subheadline).foregroundColor(.secondary).lineLimit(3)
@@ -555,6 +593,7 @@ private struct VisitLayerRowView: View {
     let onToggleSelected: () -> Void
     let onLongPressSelect: () -> Void
     let locationName: String?
+    let onPreview: ([String], Int) -> Void
 
     @State private var locatorKeys: [String] = []
     @State private var draftText: String = ""
@@ -573,8 +612,12 @@ private struct VisitLayerRowView: View {
                 if !locatorKeys.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
-                            ForEach(locatorKeys, id: \.self) { key in
-                                ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                            ForEach(Array(locatorKeys.enumerated()), id: \.element) { idx, key in
+                                ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .onTapGesture {
+                                        onPreview(locatorKeys, idx)
+                                    }
                             }
                         }
                     }
