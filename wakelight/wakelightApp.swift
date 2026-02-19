@@ -14,6 +14,7 @@ struct wakelightApp: App {
             ContentView()
                 .onAppear {
                     _ = AchievementService.shared
+                    WebDAVBootstrap.shared.bootstrap()
                 }
         }
     }
