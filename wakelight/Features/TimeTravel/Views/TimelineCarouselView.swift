@@ -46,7 +46,7 @@ private struct TimelineCardView: View {
             // Photo Area
             ZStack(alignment: .bottomLeading) {
                 if let cover = node.coverPhotoIdentifier {
-                    ThumbnailView(localIdentifier: cover, size: CGSize(width: 260, height: 160))
+                    ThumbnailView(locatorKey: cover, size: CGSize(width: 260, height: 160))
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 260, height: 160)
                         .clipped()

@@ -1,6 +1,5 @@
 import UIKit
 import MapKit
-import Photos
 
 final class StoryAnnotationView: MKAnnotationView {
     private let imageView: UIImageView = {
@@ -13,48 +12,51 @@ final class StoryAnnotationView: MKAnnotationView {
         iv.backgroundColor = .systemGray6
         return iv
     }()
-    
+
+    private var currentTask: Task<Void, Never>?
+
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         setupUI()
     }
-    
+
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-    
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        currentTask?.cancel()
+        currentTask = nil
+        imageView.image = nil
+    }
+
     private func setupUI() {
         frame = CGRect(x: 0, y: 0, width: 64, height: 64)
         addSubview(imageView)
         imageView.frame = bounds
-        
+
         // 添加阴影
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = 0.3
         layer.shadowOffset = CGSize(width: 0, height: 2)
         layer.shadowRadius = 4
     }
-    
-    func configure(with localIdentifier: String?) {
-        guard let localId = localIdentifier else {
-            imageView.image = nil
+
+    /// 统一使用 MediaLocator.stableKey（例如 library://xxx 或 webdav://profileId/remotePath）
+    func configure(with locatorKey: String?) {
+        currentTask?.cancel()
+        imageView.image = nil
+
+        guard let locatorKey, !locatorKey.isEmpty else {
             return
         }
-        
-        // 简单直接使用 PHImageManager 加载，后续可接入 PhotoThumbnailLoader 缓存
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
-        if let asset = assets.firstObject {
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .opportunistic
-            options.isNetworkAccessAllowed = true
-            
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: 128, height: 128),
-                contentMode: .aspectFill,
-                options: options
-            ) { [weak self] image, _ in
-                self?.imageView.image = image
+
+        currentTask = Task { [weak self] in
+            let img = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: 128, height: 128))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.imageView.image = img
             }
         }
     }

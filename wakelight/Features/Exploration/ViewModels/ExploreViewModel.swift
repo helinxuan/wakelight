@@ -6,11 +6,11 @@ import GRDB
 
 final class ExploreViewModel: ObservableObject {
     @Published var clusters: [PlaceCluster] = []
-    @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> localIdentifier
-    
+    @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> locatorKey
+
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
-    
+
     init(db: AppDatabase = DatabaseContainer.shared.db) {
         self.db = db
         observeClusters()
@@ -55,7 +55,7 @@ final class ExploreViewModel: ObservableObject {
             print("Failed to upsert awakenState: \(error)")
         }
     }
-    
+
     private func observeDomainEvents() {
         NotificationCenter.default.publisher(for: .wakelightDomainEvent)
             .compactMap { $0.object as? DomainEventBus.Event }
@@ -83,11 +83,11 @@ final class ExploreViewModel: ObservableObject {
             .tracking { db in
                 let clusters = try PlaceCluster.fetchAll(db)
                 var thumbnails: [UUID: String] = [:]
-                
+
                 for cluster in clusters where cluster.hasStory {
                     // 优化：取最新沉淀的 Story (settledAt DESC) 的第一张图
                     let sql = """
-                        SELECT p.localIdentifier 
+                        SELECT p.id
                         FROM photoAsset p
                         JOIN visitLayerPhotoAsset vlp ON vlp.photoAssetId = p.id
                         JOIN visitLayer vl ON vl.id = vlp.visitLayerId
@@ -95,8 +95,11 @@ final class ExploreViewModel: ObservableObject {
                         ORDER BY vl.settledAt DESC
                         LIMIT 1
                     """
-                    if let localId = try String.fetchOne(db, sql: sql, arguments: [cluster.id]) {
-                        thumbnails[cluster.id] = localId
+                    if let photoAssetId = try UUID.fetchOne(db, sql: sql, arguments: [cluster.id]) {
+                        let locators = try PhotoAsset.fetchLocators(db: db, ids: [photoAssetId])
+                        if let key = locators.first?.locatorKey {
+                            thumbnails[cluster.id] = key
+                        }
                     }
                 }
                 return (clusters, thumbnails)
@@ -112,7 +115,7 @@ final class ExploreViewModel: ObservableObject {
             }
             .store(in: &cancellables)
     }
-    
+
     func importPhotos() {
         print("[Import] importPhotos() called (WebDAV Mode)")
         Task {
@@ -149,13 +152,13 @@ final class ExploreViewModel: ObservableObject {
 final class ClusterAnnotation: NSObject, MKAnnotation {
     let cluster: PlaceCluster
     let coordinate: CLLocationCoordinate2D
-    
+
     init(cluster: PlaceCluster) {
         self.cluster = cluster
         self.coordinate = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
         super.init()
     }
-    
+
     var title: String? {
         "\(cluster.photoCount) Photos"
     }

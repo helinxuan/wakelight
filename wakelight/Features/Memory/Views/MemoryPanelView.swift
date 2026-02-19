@@ -486,23 +486,23 @@ final class MemoryPanelViewModel: ObservableObject {
 private struct StoryNodeRowView: View {
     let node: StoryNode
     @State private var timeRangeText: String?
-    @State private var coverLocalIdentifiers: [String] = []
+    @State private var coverLocatorKeys: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let timeRangeText {
                 Text(timeRangeText).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
             }
-            if !coverLocalIdentifiers.isEmpty {
+            if !coverLocatorKeys.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
-                        ForEach(coverLocalIdentifiers, id: \.self) { id in
-                            ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                        ForEach(coverLocatorKeys, id: \.self) { key in
+                            ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                     }
                 }
             } else {
-                ThumbnailView(localIdentifier: node.coverPhotoId, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                ThumbnailView(locatorKey: node.coverPhotoId, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
             }
             if let summary = node.mainSummary, !summary.isEmpty {
                 Text(summary).font(.subheadline).foregroundColor(.secondary).lineLimit(3)
@@ -510,22 +510,22 @@ private struct StoryNodeRowView: View {
         }
         .task(id: node.id) {
             await loadTimeRange()
-            await loadCoverLocalIdentifiers()
+            await loadCoverLocatorKeys()
         }
     }
 
-    private func loadCoverLocalIdentifiers() async {
+    private func loadCoverLocatorKeys() async {
         do {
-            let ids: [String] = try await DatabaseContainer.shared.db.reader.read { db in
+            let keys: [String] = try await DatabaseContainer.shared.db.reader.read { db in
                 let visitLayerIds = node.subVisitLayerIds
                 guard !visitLayerIds.isEmpty else { return [] }
                 let links = try VisitLayerPhotoAsset.filter(visitLayerIds.contains(Column("visitLayerId"))).fetchAll(db)
                 if links.isEmpty { return [] }
                 let photoIds = Array(Set(links.map { $0.photoAssetId }))
-                let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
-                return photos.compactMap { $0.localIdentifier }
+                let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+                return locators.map { $0.locatorKey }
             }
-            await MainActor.run { self.coverLocalIdentifiers = Array(ids.prefix(12)) }
+            await MainActor.run { self.coverLocatorKeys = Array(keys.prefix(12)) }
         } catch {}
     }
 
@@ -556,7 +556,7 @@ private struct VisitLayerRowView: View {
     let onLongPressSelect: () -> Void
     let locationName: String?
 
-    @State private var localIdentifiers: [String] = []
+    @State private var locatorKeys: [String] = []
     @State private var draftText: String = ""
     @State private var isSaving: Bool = false
 
@@ -570,11 +570,11 @@ private struct VisitLayerRowView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text(dateRangeText(layer)).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
-                if !localIdentifiers.isEmpty {
+                if !locatorKeys.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
-                            ForEach(localIdentifiers, id: \.self) { id in
-                                ThumbnailView(localIdentifier: id, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
+                            ForEach(locatorKeys, id: \.self) { key in
+                                ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80)).clipShape(RoundedRectangle(cornerRadius: 6))
                             }
                         }
                     }
@@ -591,12 +591,12 @@ private struct VisitLayerRowView: View {
         .onLongPressGesture(minimumDuration: 0.35) { onLongPressSelect() }
         .buttonStyle(.plain)
         .onAppear { draftText = layer.userText ?? "" }
-        .task { await loadLocalIdentifiers() }
+        .task { await loadLocatorKeys() }
     }
 
     private func generateAIText() {
         let loc = locationName ?? "这里"
-        let count = localIdentifiers.count
+        let count = locatorKeys.count
         let hour = Calendar.current.component(.hour, from: layer.startAt)
         var timePrefix = ""
         switch hour {
@@ -662,16 +662,17 @@ private struct VisitLayerRowView: View {
         }
     }
 
-    private func loadLocalIdentifiers() async {
+    private func loadLocatorKeys() async {
         do {
-            let ids: [String] = try await DatabaseContainer.shared.db.reader.read { db in
+            let keys: [String] = try await DatabaseContainer.shared.db.reader.read { db in
                 let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
                 if links.isEmpty { return [] }
                 let photoIds = links.map { $0.photoAssetId }
-                let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
-                return photos.compactMap { $0.localIdentifier }
+                let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+                let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+                return photoIds.compactMap { locatorById[$0] }
             }
-            await MainActor.run { self.localIdentifiers = ids }
+            await MainActor.run { self.locatorKeys = keys }
         } catch {}
     }
 

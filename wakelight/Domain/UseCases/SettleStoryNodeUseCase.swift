@@ -23,11 +23,16 @@ final class SettleStoryNodeUseCase {
                 .fetchAll(db)
                 .map { $0.photoAssetId }
 
-            guard let coverPhotoId = try PhotoAsset
+            guard let coverPhotoAssetId = try PhotoAsset
                 .filter(photoAssetIds.contains(Column("id")))
                 .order(Column("creationDate").desc)
                 .fetchOne(db)?
-                .localIdentifier else {
+                .id else {
+                throw SettleStoryNodeError.coverPhotoNotFound
+            }
+
+            let coverLocators = try PhotoAsset.fetchLocators(db: db, ids: [coverPhotoAssetId])
+            guard let coverPhotoId = coverLocators.first?.locatorKey else {
                 throw SettleStoryNodeError.coverPhotoNotFound
             }
 
@@ -57,7 +62,7 @@ final class SettleStoryNodeUseCase {
                 cluster.hasStory = true
                 try cluster.update(db)
             }
-            
+
             return layer.placeClusterId
         }
 

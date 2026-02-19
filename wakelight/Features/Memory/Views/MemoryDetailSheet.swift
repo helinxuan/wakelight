@@ -18,7 +18,7 @@ struct MemoryDetailSheet: View {
         let id: UUID
         let title: String
         let location: String?
-        let photoLocalIdentifiers: [String]
+        let photoLocatorKeys: [String]
     }
 
     let item: MemoryDetailItem
@@ -29,7 +29,7 @@ struct MemoryDetailSheet: View {
     @State private var summaryTitle: String = ""
     @State private var editText: String = ""
     @State private var photoGroups: [PhotoGroup] = []
-    @State private var flattenedPhotos: [String] = []
+    @State private var flattenedLocatorKeys: [String] = []
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var selectedPhotoIndex: Int?
@@ -48,7 +48,7 @@ struct MemoryDetailSheet: View {
                         Text(summaryTitle)
                             .font(.subheadline.weight(.medium))
                             .foregroundColor(.secondary)
-                        
+
                         HStack(alignment: .top, spacing: 8) {
                             TextEditor(text: $editText)
                                 .frame(minHeight: 100)
@@ -57,7 +57,7 @@ struct MemoryDetailSheet: View {
                                     RoundedRectangle(cornerRadius: 12)
                                         .fill(Color.secondary.opacity(0.08))
                                 )
-                            
+
                             Button(action: generateSmartText) {
                                 Image(systemName: "sparkles")
                                     .font(.system(size: 18, weight: .semibold))
@@ -89,11 +89,11 @@ struct MemoryDetailSheet: View {
                             .padding(.horizontal, 16)
 
                             LazyVGrid(columns: gridColumns, spacing: 2) {
-                                ForEach(group.photoLocalIdentifiers, id: \.self) { id in
-                                    ThumbnailView(localIdentifier: id, size: CGSize(width: 120, height: 120))
+                                ForEach(group.photoLocatorKeys, id: \.self) { key in
+                                    ThumbnailView(locatorKey: key, size: CGSize(width: 120, height: 120))
                                         .clipped()
                                         .onTapGesture {
-                                            if let globalIdx = flattenedPhotos.firstIndex(of: id) {
+                                            if let globalIdx = flattenedLocatorKeys.firstIndex(of: key) {
                                                 selectedPhotoIndex = globalIdx
                                             }
                                         }
@@ -105,26 +105,26 @@ struct MemoryDetailSheet: View {
                 }
             }
         }
-            .navigationTitle("照片墙")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("关闭") { dismiss() }
-                }
-
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: save) {
-                        HStack(spacing: 4) {
-                            if isSaving {
-                                ProgressView().controlSize(.small)
-                            }
-                            Text("保存")
-                                .fontWeight(.bold)
-                        }
-                    }
-                    .disabled(isSaving)
-                }
+        .navigationTitle("照片墙")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("关闭") { dismiss() }
             }
+
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: save) {
+                    HStack(spacing: 4) {
+                        if isSaving {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text("保存")
+                            .fontWeight(.bold)
+                    }
+                }
+                .disabled(isSaving)
+            }
+        }
         .task {
             await load()
         }
@@ -136,14 +136,14 @@ struct MemoryDetailSheet: View {
         }, set: { _ in
             selectedPhotoIndex = nil
         })) { preview in
-            PhotoPreviewPager(localIdentifiers: flattenedPhotos, startIndex: preview.index)
+            PhotoPreviewPager(locatorKeys: flattenedLocatorKeys, startIndex: preview.index)
         }
     }
 
     private func generateSmartText() {
         let location = photoGroups.first?.location ?? "这里"
-        let count = flattenedPhotos.count
-        
+        let count = flattenedLocatorKeys.count
+
         var timePrefix = ""
         if let firstGroup = photoGroups.first, let range = firstGroup.title.components(separatedBy: " ").last {
             let hour = Int(range.prefix(2)) ?? 12
@@ -155,14 +155,14 @@ struct MemoryDetailSheet: View {
             default: timePrefix = "这时候的"
             }
         }
-        
+
         let templates = [
             "\(timePrefix)\(location)，留下了 \(count) 个瞬间。",
             "在这里度过了一段时光，捕捉到了 \(count) 张回忆。",
             "\(location) 的这几个小时，都在这些照片里了。",
             "又是充实的一天，在 \(location) 记录了 \(count) 个故事。"
         ]
-        
+
         withAnimation {
             editText = templates.randomElement() ?? ""
         }
@@ -171,15 +171,16 @@ struct MemoryDetailSheet: View {
     private func load() async {
         do {
             let currentItem = self.item
-            
+
             switch currentItem {
             case .unhandled(let layer):
-                let photos = try await loadPhotosForVisitLayer(visitLayerId: layer.id)
+                let locatorKeys = try await loadLocatorsForVisitLayer(visitLayerId: layer.id)
                 let title = Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
                 let location = try await DatabaseContainer.shared.db.reader.read { db in
-                    try PlaceCluster.fetchOne(db, key: layer.placeClusterId).map { $0.detailedAddress ?? $0.cityName ?? "未知地点" }
+                    try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
+                        .map { $0.detailedAddress ?? $0.cityName ?? "未知地点" }
                 }
-                
+
                 await MainActor.run {
                     self.editText = layer.userText ?? ""
                     self.summaryTitle = title
@@ -187,10 +188,10 @@ struct MemoryDetailSheet: View {
                         id: layer.id,
                         title: title,
                         location: location,
-                        photoLocalIdentifiers: photos
+                        photoLocatorKeys: locatorKeys
                     )
                     self.photoGroups = [group]
-                    self.flattenedPhotos = photos
+                    self.flattenedLocatorKeys = locatorKeys
                 }
 
             case .story(let node):
@@ -202,7 +203,7 @@ struct MemoryDetailSheet: View {
                         self.summaryTitle = Self.dateRangeText(startAt: minStart, endAt: maxEnd)
                     }
                     self.photoGroups = groups
-                    self.flattenedPhotos = groups.flatMap { $0.photoLocalIdentifiers }
+                    self.flattenedLocatorKeys = groups.flatMap { $0.photoLocatorKeys }
                 }
             }
         } catch {
@@ -221,26 +222,32 @@ struct MemoryDetailSheet: View {
                 .filter(visitLayerIds.contains(Column("id")))
                 .order(Column("startAt").asc)
                 .fetchAll(db)
-            
+
             var groups: [PhotoGroup] = []
             for layer in layers {
                 let cluster = try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
                 let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "未知地点"
-                
+
                 let links = try VisitLayerPhotoAsset
                     .filter(Column("visitLayerId") == layer.id)
                     .fetchAll(db)
                 if links.isEmpty { continue }
+
                 let photoIds = links.map { $0.photoAssetId }
                 let photos = try PhotoAsset
                     .filter(photoIds.contains(Column("id")))
                     .order(Column("creationDate").asc)
                     .fetchAll(db)
+
+                let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+                let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+                let locatorKeys = photos.compactMap { locatorById[$0.id] }
+
                 groups.append(PhotoGroup(
                     id: layer.id,
                     title: Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
                     location: locationName,
-                    photoLocalIdentifiers: photos.compactMap { $0.localIdentifier }
+                    photoLocatorKeys: locatorKeys
                 ))
             }
             return groups
@@ -281,17 +288,15 @@ struct MemoryDetailSheet: View {
         }
     }
 
-    private func loadPhotosForVisitLayer(visitLayerId: UUID) async throws -> [String] {
+    private func loadLocatorsForVisitLayer(visitLayerId: UUID) async throws -> [String] {
         try await DatabaseContainer.shared.db.reader.read { db in
             let links = try VisitLayerPhotoAsset
                 .filter(Column("visitLayerId") == visitLayerId)
                 .fetchAll(db)
             let photoIds = links.map { $0.photoAssetId }
-            let photos = try PhotoAsset
-                .filter(photoIds.contains(Column("id")))
-                .order(Column("creationDate").asc)
-                .fetchAll(db)
-            return photos.compactMap { $0.localIdentifier }
+            let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+            return photoIds.compactMap { locatorById[$0] }
         }
     }
 
@@ -322,14 +327,14 @@ struct MemoryDetailSheet: View {
 }
 
 private struct PhotoPreviewPager: View {
-    let localIdentifiers: [String]
+    let locatorKeys: [String]
     let startIndex: Int
 
     @Environment(\.dismiss) private var dismiss
     @State private var selection: Int
 
-    init(localIdentifiers: [String], startIndex: Int) {
-        self.localIdentifiers = localIdentifiers
+    init(locatorKeys: [String], startIndex: Int) {
+        self.locatorKeys = locatorKeys
         self.startIndex = startIndex
         _selection = State(initialValue: startIndex)
     }
@@ -337,11 +342,11 @@ private struct PhotoPreviewPager: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            
+
             TabView(selection: $selection) {
-                ForEach(Array(localIdentifiers.enumerated()), id: \.offset) { idx, id in
+                ForEach(Array(locatorKeys.enumerated()), id: \.offset) { idx, key in
                     ZoomableScrollView {
-                        FullImageView(localIdentifier: id)
+                        FullImageView(locatorKey: key)
                     }
                     .tag(idx)
                 }
@@ -422,7 +427,7 @@ private struct ZoomableScrollView<Content: View>: UIViewRepresentable {
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            return hostingController.view
+            hostingController.view
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
