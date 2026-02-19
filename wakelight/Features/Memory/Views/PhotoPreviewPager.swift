@@ -96,10 +96,16 @@ private struct ZoomableScrollView<Content: View>: UIViewRepresentable {
         scrollView.addSubview(hostedView)
 
         NSLayoutConstraint.activate([
-            hostedView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-            hostedView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
-            hostedView.topAnchor.constraint(equalTo: scrollView.frameLayoutGuide.topAnchor),
-            hostedView.bottomAnchor.constraint(equalTo: scrollView.frameLayoutGuide.bottomAnchor)
+            hostedView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+
+            // Match content size to the scroll view bounds at minimum so that:
+            // - when zoomScale == 1, the image is fit-to-screen and centered by SwiftUI layout
+            // - when zoomed in, the contentLayoutGuide drives contentSize allowing panning
+            hostedView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            hostedView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
         ])
 
         return scrollView
