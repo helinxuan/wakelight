@@ -26,8 +26,8 @@ final class SettleStoryNodeUseCase {
             guard let coverPhotoId = try PhotoAsset
                 .filter(photoAssetIds.contains(Column("id")))
                 .order(Column("creationDate").desc)
-                .fetchOne(db)
-                .map({ $0.localIdentifier }) else {
+                .fetchOne(db)?
+                .localIdentifier else {
                 throw SettleStoryNodeError.coverPhotoNotFound
             }
 

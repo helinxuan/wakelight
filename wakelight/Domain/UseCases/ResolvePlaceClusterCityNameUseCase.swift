@@ -85,13 +85,10 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         let items = try await request.mapItems
         guard let item = items.first else { return nil }
 
-        let placemark = item.placemark
-        return formatDetailedName(
-            district: placemark.subLocality,
-            street: placemark.thoroughfare,
-            name: placemark.name,
-            city: placemark.locality
-        )
+        // iOS 26+: MKAddressRepresentations is a collection of representations.
+        // We can access it as an array if it conforms to Collection, or use address properties if available.
+        // Since MKAddress does not have localizedAddress, we use the name or other properties from MKMapItem.
+        return item.name ?? item.placemark.name
     }
 
     @available(iOS, deprecated: 26.0)
@@ -153,6 +150,9 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         let items = try await request.mapItems
         guard let item = items.first else { return nil }
 
+        // iOS 26 MapKit address model handling.
+        // Use the placemark as a fallback since it's the most reliable way to get structured data
+        // even if it's deprecated in favor of new APIs that might not be fully exposed yet.
         let placemark = item.placemark
         let candidate = placemark.locality ?? placemark.administrativeArea
         return candidate?.replacingOccurrences(of: "市", with: "")

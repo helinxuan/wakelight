@@ -114,13 +114,22 @@ final class ExploreViewModel: ObservableObject {
     }
     
     func importPhotos() {
+        print("[Import] importPhotos() called (WebDAV Mode)")
         Task {
             do {
-                _ = try await ImportPhotosUseCase().run()
+                print("[Import] ImportWebDAVPhotosUseCase.run() start")
+                let count = try await ImportWebDAVPhotosUseCase().run()
+                print("[Import] ImportWebDAVPhotosUseCase.run() done, imported: \(count)")
+
+                print("[Import] GeneratePlaceClustersUseCase.run() start")
                 _ = try await GeneratePlaceClustersUseCase().run()
+                print("[Import] GeneratePlaceClustersUseCase.run() done")
+
+                print("[Import] GenerateVisitLayersUseCase.run() start")
                 _ = try await GenerateVisitLayersUseCase().run()
+                print("[Import] GenerateVisitLayersUseCase.run() done")
             } catch {
-                print("Failed to import photos: \(error)")
+                print("[Import] Failed to import WebDAV photos: \(error)")
             }
         }
     }

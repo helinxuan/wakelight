@@ -48,8 +48,8 @@ final class MergeVisitLayersUseCase {
             let coverPhotoId = try PhotoAsset
                 .filter(photoAssetIds.contains(Column("id")))
                 .order(Column("creationDate").desc)
-                .fetchOne(db)
-                .map { $0.localIdentifier }
+                .fetchOne(db)?
+                .localIdentifier
 
             guard let coverPhotoId else {
                 throw MergeVisitLayersError.coverPhotoNotFound

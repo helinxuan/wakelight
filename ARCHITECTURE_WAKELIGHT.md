@@ -240,13 +240,26 @@ Wakelight/
 ### 5.2.1 `PhotoAsset`
 
 - `id: UUID` (PK)
-- `localIdentifier: String`（PHAsset id，唯一索引）
+- `localIdentifier: String`（PHAsset id 或 `webdav://...` URI，唯一索引）
 - `creationDate: Date`
 - `latitude: Double?`, `longitude: Double?`
 - `thumbnailPath: String?`
 - `importedAt: Date`
 
-### 5.2.2 `PlaceCluster`（地图主足迹）
+### 5.2.2 `RemoteMediaAsset`（WebDAV 专用，建议）
+
+- `id: UUID` (PK)
+- `profileId: String`（区分不同 WebDAV 配置/账号）
+- `remotePath: String`（相对路径）
+- `etag: String?`
+- `lastModified: Date?`
+- `size: Int?`
+- `photoAssetId: UUID`（FK -> `PhotoAsset.id`）
+- `indexedAt: Date`
+
+> **索引建议**：`unique(profileId, remotePath, etag)` 或 `unique(profileId, remotePath, lastModified, size)`。
+
+### 5.2.3 `PlaceCluster`（地图主足迹）
 
 - `id: UUID` (PK)
 - `centerLatitude: Double`, `centerLongitude: Double`
@@ -363,19 +376,22 @@ erDiagram
 
 # 6. 核心业务流程（Mermaid）
 
-## 6.1 照片导入 → 聚类 → 访次分层
+## 6.1 多源媒体索引 → 聚类 → 访次分层
 
 ```mermaid
 flowchart TD
-  A[读取 PHAsset 增量列表] --> B[过滤无定位/无时间数据]
-  B --> C[写入/更新 CDPhotoAsset]
-  C --> D[按 geohash 分桶]
-  D --> E[桶内半径聚类/DBSCAN]
-  E --> F[生成/更新 CDPlaceCluster]
-  F --> G[同 cluster 内按时间切 VisitLayer]
-  G --> H[写入 CDVisitLayer 及关系]
-  H --> I[更新 photoCount/visitCount/lastVisitedAt]
-  I --> J[触发地图刷新 + 领域事件]
+  A[选择 MediaSource: Photos / WebDAV / File] --> B[列举候选 MediaLocator 列表]
+  B --> C[解析/读取: MediaResolver + MediaReader]
+  C --> D[提取元数据: EXIF/时间/GPS]
+  D --> E[写入/更新 PhotoAsset]
+  E --> F[WebDAV: upsert RemoteMediaAsset 版本指纹]
+  F --> G[按 geohash 分桶]
+  G --> H[桶内半径聚类/DBSCAN]
+  H --> I[生成/更新 PlaceCluster]
+  I --> J[同 cluster 内按时间切 VisitLayer]
+  J --> K[写入 VisitLayer 及关系]
+  K --> L[更新 photoCount/visitCount/lastVisitedAt]
+  L --> M[触发地图刷新 + 领域事件]
 ```
 
 ## 6.2 显影（Story Node）状态机
@@ -416,7 +432,56 @@ stateDiagram-v2
   - 更新关联的 `VisitLayer.isStoryNode = true` 及其显影属性。
   - 更新 `PlaceCluster.hasStory = true` 触发地图显影。
   - emit `StorySettled(storyId, placeId)` 领域事件。
-## 6.3 时光模式节点生成（MVP）
+## 6.3 WebDAV 远程媒体源（轻量索引 + 按需缩略图缓存）
+
+> 目标：把 WebDAV 当“本地文件源”来用。除了路径/鉴权/网络适配外，上层（索引、EXIF、缩略图、UI 展示、聚类）尽量复用同一套逻辑，避免在各处写 `if webdav`。
+
+### 6.3.1 统一定位符：`MediaLocator`
+
+把每个媒体对象抽象成定位符（而不是直接在业务层传 `webdav://...` 字符串）：
+
+- 本地相册：`library://<PHAssetLocalIdentifier>`
+- 本地文件：`file:///...`
+- WebDAV：`webdav://<profileId>/<remotePath>`（**不**把 host/port/username 塞进 identifier）
+
+上层 UseCase/聚类/时间线只关心 `MediaLocator`，不关心来源细节。
+
+### 6.3.2 统一读取：`MediaReader` / `MediaResource`
+
+让 EXIF 提取、downsample、缩略图生成都走同一条“给我 Data / 给我 `CGImageSource`”路径：
+
+- `MediaReader.open(locator) -> bytes / InputStream`
+- 本地 file：直接 `FileHandle` / `CGImageSourceCreateWithURL`
+- WebDAV：通过 `URLSession` 下载到内存或临时文件，再用 `CGImageSourceCreateWithData/URL`
+
+约束：
+- 缩略图与 EXIF 提取逻辑**不得**直接依赖 Photos/WebDAV SDK；只依赖 `MediaReader`。
+
+### 6.3.3 统一缓存：`MediaCache`
+
+- 缩略图缓存：`Caches/thumbnails/<hash>.jpg`
+- （可选）预览图缓存：`Caches/previews/<hash>.jpg`
+- 原图不长期缓存（除非后续明确要离线看原图）
+
+UI 展示策略：
+- 有 `thumbnailPath`：直接从本地 `file://` 读
+- 无 `thumbnailPath`：通过 `MediaReader` 从源端 downsample 即时生成，写回 `MediaCache` 并回填 `thumbnailPath`
+
+### 6.3.4 WebDAV 轻量索引（路径 B）的范围
+
+做什么：
+- 递归列目录（`Depth: 1` + 递归）拿到文件列表
+- 对每个图片文件获取稳定“版本指纹”（`etag` 优先，否则 `lastModified + size`）
+- 若本地不存在该版本元数据：
+  - 下载该图片（或后续优化为部分下载）
+  - 用 ImageIO 提取 EXIF（时间、GPS）
+  - 写入本地 DB（`PhotoAsset`）与远程映射表（见 5.2.x）
+
+不做什么：
+- 不把原图保存到本地（避免爆存储/隐私/重复）
+- 不要求“先导入才能看图”：缩略图可按需生成并缓存
+
+## 6.4 时光模式节点生成（MVP）
 
 ```mermaid
 flowchart LR

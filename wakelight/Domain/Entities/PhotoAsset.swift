@@ -5,7 +5,7 @@ struct PhotoAsset: Codable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "photoAsset"
 
     var id: UUID
-    var localIdentifier: String
+    var localIdentifier: String?
     var creationDate: Date?
     var latitude: Double?
     var longitude: Double?

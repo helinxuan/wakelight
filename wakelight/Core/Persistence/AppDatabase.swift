@@ -21,7 +21,7 @@ struct AppDatabase {
             // 5.2.1 PhotoAsset
             try db.create(table: "photoAsset") { t in
                 t.column("id", .text).primaryKey()
-                t.column("localIdentifier", .text).notNull().unique()
+                t.column("localIdentifier", .text).unique()
                 t.column("creationDate", .datetime)
                 t.column("latitude", .double)
                 t.column("longitude", .double)
@@ -106,6 +106,34 @@ struct AppDatabase {
                 t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
                 t.primaryKey(["visitLayerId", "photoAssetId"])
             }
+
+            // WebDAVProfile
+            try db.create(table: "webdavProfile") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("baseURLString", .text).notNull()
+                t.column("username", .text).notNull()
+                t.column("passwordKey", .text).notNull()
+                t.column("rootPath", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            // RemoteMediaAsset
+            try db.create(table: "remoteMediaAsset") { t in
+                t.column("id", .text).primaryKey()
+                t.column("profileId", .text).notNull().references("webdavProfile", onDelete: .cascade)
+                t.column("remotePath", .text).notNull()
+                t.column("etag", .text)
+                t.column("lastModified", .datetime)
+                t.column("size", .integer)
+                t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
+                t.column("indexedAt", .datetime).notNull()
+                t.uniqueKey(["profileId", "remotePath", "etag"])
+            }
+
+            try db.create(index: "idx_remoteMediaAsset_profile_path", on: "remoteMediaAsset", columns: ["profileId", "remotePath"])
+            try db.create(index: "idx_remoteMediaAsset_photoAssetId", on: "remoteMediaAsset", columns: ["photoAssetId"])
         }
         
         return migrator

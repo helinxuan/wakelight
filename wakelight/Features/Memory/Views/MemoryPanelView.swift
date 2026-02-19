@@ -523,7 +523,7 @@ private struct StoryNodeRowView: View {
                 if links.isEmpty { return [] }
                 let photoIds = Array(Set(links.map { $0.photoAssetId }))
                 let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
-                return photos.map { $0.localIdentifier }
+                return photos.compactMap { $0.localIdentifier }
             }
             await MainActor.run { self.coverLocalIdentifiers = Array(ids.prefix(12)) }
         } catch {}
@@ -669,7 +669,7 @@ private struct VisitLayerRowView: View {
                 if links.isEmpty { return [] }
                 let photoIds = links.map { $0.photoAssetId }
                 let photos = try PhotoAsset.filter(photoIds.contains(Column("id"))).fetchAll(db)
-                return photos.map { $0.localIdentifier }
+                return photos.compactMap { $0.localIdentifier }
             }
             await MainActor.run { self.localIdentifiers = ids }
         } catch {}

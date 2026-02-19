@@ -240,7 +240,7 @@ struct MemoryDetailSheet: View {
                     id: layer.id,
                     title: Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
                     location: locationName,
-                    photoLocalIdentifiers: photos.map { $0.localIdentifier }
+                    photoLocalIdentifiers: photos.compactMap { $0.localIdentifier }
                 ))
             }
             return groups
@@ -291,7 +291,7 @@ struct MemoryDetailSheet: View {
                 .filter(photoIds.contains(Column("id")))
                 .order(Column("creationDate").asc)
                 .fetchAll(db)
-            return photos.map { $0.localIdentifier }
+            return photos.compactMap { $0.localIdentifier }
         }
     }
 
@@ -303,6 +303,7 @@ struct MemoryDetailSheet: View {
         }
     }
 
+    @MainActor
     private static func dateRangeText(startAt: Date, endAt: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")

@@ -66,6 +66,7 @@ struct ExplorationRootView: View {
                         }
 
                         Button(action: {
+                            print("[Import] Import Photos button tapped")
                             viewModel.importPhotos()
                         }) {
                             Label("Import Photos", systemImage: "photo.on.rectangle")
@@ -75,7 +76,9 @@ struct ExplorationRootView: View {
                                 .cornerRadius(10)
                         }
                     }
-                    .padding()
+                    .padding(.horizontal)
+                    .padding(.top)
+                    .padding(.bottom, 90)
                 }
 
                 if !awakenQueue.isEmpty, isAwakenMode {

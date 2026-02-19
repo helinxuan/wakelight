@@ -7,8 +7,6 @@
 
 import SwiftUI
 
-import SwiftUI
-
 struct ContentView: View {
     var body: some View {
         TabView {
@@ -20,6 +18,11 @@ struct ContentView: View {
             TimeTravelView()
                 .tabItem {
                     Label("Time Travel", systemImage: "clock.arrow.circlepath")
+                }
+
+            SettingsRootView()
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
                 }
         }
     }
