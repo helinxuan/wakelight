@@ -217,13 +217,17 @@ struct MemoryDetailSheet: View {
         let visitLayerIds = node.subVisitLayerIds
         guard !visitLayerIds.isEmpty else { return [] }
 
-        return try await DatabaseContainer.shared.db.reader.read { db in
+        // 注意：GRDB 的 reader.read 需要同步闭包，不能在里面 await。
+        // 所以这里先同步读出需要的数据，再在闭包外生成 title（用 MainActor 格式化）。
+        let layersData: [(layer: VisitLayer, locationName: String, locatorKeys: [String])] = try await DatabaseContainer.shared.db.reader.read { db in
             let layers = try VisitLayer
                 .filter(visitLayerIds.contains(Column("id")))
                 .order(Column("startAt").asc)
                 .fetchAll(db)
 
-            var groups: [PhotoGroup] = []
+            var result: [(VisitLayer, String, [String])] = []
+            result.reserveCapacity(layers.count)
+
             for layer in layers {
                 let cluster = try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
                 let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "未知地点"
@@ -243,15 +247,29 @@ struct MemoryDetailSheet: View {
                 let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
                 let locatorKeys = photos.compactMap { locatorById[$0.id] }
 
-                groups.append(PhotoGroup(
-                    id: layer.id,
-                    title: Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt),
-                    location: locationName,
-                    photoLocatorKeys: locatorKeys
-                ))
+                result.append((layer, locationName, locatorKeys))
             }
-            return groups
+
+            return result
         }
+
+        var groups: [PhotoGroup] = []
+        groups.reserveCapacity(layersData.count)
+
+        for (layer, locationName, locatorKeys) in layersData {
+            let title = await MainActor.run {
+                Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
+            }
+
+            groups.append(PhotoGroup(
+                id: layer.id,
+                title: title,
+                location: locationName,
+                photoLocatorKeys: locatorKeys
+            ))
+        }
+
+        return groups
     }
 
     private func save() {

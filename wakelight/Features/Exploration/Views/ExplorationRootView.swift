@@ -83,7 +83,7 @@ struct ExplorationRootView: View {
 
                 if !awakenQueue.isEmpty, isAwakenMode {
                     VStack(spacing: 0) {
-                        let headerHeight: CGFloat = 56
+                        let _ = 56 as CGFloat
 
                         VStack(spacing: 0) {
                             Capsule()

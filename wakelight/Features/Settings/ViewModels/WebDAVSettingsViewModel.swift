@@ -14,9 +14,33 @@ final class WebDAVSettingsViewModel: ObservableObject {
 
     private let repo: WebDAVProfileRepository
     private let keychain = KeychainStore.shared
+    private var existingProfile: WebDAVProfile?
 
     init(repo: WebDAVProfileRepository) {
         self.repo = repo
+        Task {
+            await loadExistingProfile()
+        }
+    }
+
+    func loadExistingProfile() async {
+        do {
+            if let profile = try await repo.fetchLatestProfile() {
+                self.existingProfile = profile
+                self.baseURL = profile.baseURLString
+                self.username = profile.username
+                self.rootPath = profile.rootPath ?? ""
+                if let savedPassword = try? keychain.getString(forKey: profile.passwordKey) {
+                    self.password = savedPassword
+                }
+                // 如果有现成配置，默认设为可以保存（或者让用户重新测试）
+                // 这里为了安全，建议用户还是测试一下，或者我们自动静默测试一下
+                // 但为了能让用户看到“已保存”的状态，我们可以先设为 true
+                self.isSuccess = true 
+            }
+        } catch {
+            print("[WebDAV] 加载现有配置失败: \(error)")
+        }
     }
 
     func testConnection() async {
@@ -68,19 +92,22 @@ final class WebDAVSettingsViewModel: ObservableObject {
         isSaving = true
 
         do {
-            let profileId = UUID()
-            print("[WebDAV] 生成 Profile ID: \(profileId)")
-            let passwordKey = "webdav.profile.\(profileId.uuidString).password"
+            // 如果之前保存过配置，就更新同一个 profile，而不是每次都生成新的。
+            // 这样进入设置页时 fetchLatestProfile 才能稳定回填同一份配置。
+            let profileId = existingProfile?.id ?? UUID()
+            print("[WebDAV] 使用 Profile ID: \(profileId)")
+            let passwordKey = existingProfile?.passwordKey ?? "webdav.profile.\(profileId.uuidString).password"
 
+            let now = Date()
             let profile = WebDAVProfile(
                 id: profileId,
-                name: "WebDAV Server",
+                name: existingProfile?.name ?? "WebDAV Server",
                 baseURLString: baseURL,
                 username: username,
                 passwordKey: passwordKey,
                 rootPath: WebDAVPath.normalizeDirectory(rootPath),
-                createdAt: Date(),
-                updatedAt: Date()
+                createdAt: existingProfile?.createdAt ?? now,
+                updatedAt: now
             )
 
             print("[WebDAV] 正在写入 Keychain...")
@@ -88,6 +115,7 @@ final class WebDAVSettingsViewModel: ObservableObject {
             
             print("[WebDAV] 正在写入数据库...")
             try await repo.upsert(profile: profile)
+            self.existingProfile = profile // 更新本地缓存
 
             testResult = "保存成功！"
             print("[WebDAV] 保存流程全部完成")
