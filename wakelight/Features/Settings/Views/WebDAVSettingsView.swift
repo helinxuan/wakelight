@@ -22,8 +22,11 @@ struct WebDAVSettingsView: View {
                                 credentials: .init(username: viewModel.username, password: viewModel.password)
                             )
                         },
-                        onSelect: { path in
-                            viewModel.rootPath = WebDAVPath.normalizeDirectory(path)
+                        onSelect: { paths in
+                            // 这里暂时只取第一个作为根目录，后续你可以改为保存多目录配置
+                            if let first = paths.first {
+                                viewModel.rootPath = WebDAVPath.normalizeDirectory(first)
+                            }
                         }
                     )
                 } label: {

@@ -1,9 +1,56 @@
 import SwiftUI
 
+private struct FolderRow: View {
+    let name: String
+    let normalizedPath: String
+    let isSelected: Bool
+    let onEnter: () -> Void
+    let onToggleSelect: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // 左侧：点按进入目录
+            HStack(spacing: 12) {
+                Image(systemName: "folder")
+                Text(name)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onEnter)
+
+            // 右侧：点圈直接选择/取消（扩大可点击区域）
+            Button {
+                onToggleSelect(normalizedPath)
+            } label: {
+                Group {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.tint)
+                    } else {
+                        Image(systemName: "circle")
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.title3)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        // 仍然保留长按切换，符合相册那种手感
+        .onLongPressGesture { onToggleSelect(normalizedPath) }
+    }
+}
+
 struct WebDAVFolderPickerView: View {
     @Environment(\.dismiss) var dismiss
     @ObservedObject var viewModel: WebDAVFolderPickerViewModel
-    let onSelect: (String) -> Void
+    @State private var selectedPaths: Set<String> = []
+    /// 返回选中的所有目录（normalized path）
+    let onSelect: ([String]) -> Void
 
     var body: some View {
         List {
@@ -14,6 +61,26 @@ struct WebDAVFolderPickerView: View {
                     Text(displayPath(viewModel.currentPath))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+            }
+
+            if !selectedPaths.isEmpty {
+                Section("已选择 (\(selectedPaths.count))") {
+                    ForEach(Array(selectedPaths).sorted(), id: \.self) { path in
+                        HStack {
+                            Text(path.isEmpty ? "/" : "/" + path)
+                                .font(.caption)
+                                .lineLimit(1)
+                            Spacer()
+                            Button {
+                                selectedPaths.remove(path)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                 }
             }
 
@@ -31,22 +98,25 @@ struct WebDAVFolderPickerView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(viewModel.folders) { folder in
-                        Button {
-                            viewModel.goInto(folder)
-                            Task { await viewModel.load() }
-                        } label: {
-                            HStack {
-                                Image(systemName: "folder")
-                                Text(folder.name)
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(.tertiary)
+                        let normalizedPath = WebDAVPath.normalizeDirectory(folder.path)
+                        let isSelected = selectedPaths.contains(normalizedPath)
+
+                        FolderRow(
+                            name: folder.name,
+                            normalizedPath: normalizedPath,
+                            isSelected: isSelected,
+                            onEnter: {
+                                viewModel.goInto(folder)
+                                Task { await viewModel.load() }
+                            },
+                            onToggleSelect: { path in
+                                toggleSelection(for: path)
                             }
-                        }
+                        )
                     }
                 }
             } header: {
-                Text("子文件夹")
+                Text("子文件夹（点按进入，点右侧圆圈/长按多选）")
             }
         }
         .navigationTitle("选择文件夹")
@@ -60,9 +130,11 @@ struct WebDAVFolderPickerView: View {
             }
 
             ToolbarItem(placement: .topBarTrailing) {
-                Button("选择") {
-                    onSelect(WebDAVPath.normalizeDirectory(viewModel.currentPath))
+                Button("完成") {
+                    onSelect(Array(selectedPaths).sorted())
+                    dismiss()
                 }
+                .disabled(selectedPaths.isEmpty)
             }
         }
         .task(id: viewModel.currentPath) {
@@ -73,5 +145,13 @@ struct WebDAVFolderPickerView: View {
     private func displayPath(_ normalized: String) -> String {
         let p = WebDAVPath.normalizeDirectory(normalized)
         return p.isEmpty ? "/" : "/" + p
+    }
+
+    private func toggleSelection(for path: String) {
+        if selectedPaths.contains(path) {
+            selectedPaths.remove(path)
+        } else {
+            selectedPaths.insert(path)
+        }
     }
 }
