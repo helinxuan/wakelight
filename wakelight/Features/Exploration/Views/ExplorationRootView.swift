@@ -6,7 +6,7 @@ struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
     @State private var selectedCluster: PlaceCluster?
     @State private var awakenQueue: [PlaceCluster] = []
-    @State private var revealedClusterIds: Set<UUID> = []
+    @State private var revealedClusterIds: Set<UUID> = [] // session-only: 半显影（白点）
     @State private var isAwakenMode: Bool = false
     @State private var showBadges: Bool = false
     @State private var panelHeight: CGFloat = 380
@@ -24,10 +24,6 @@ struct ExplorationRootView: View {
                 revealedClusterIds: $revealedClusterIds
             )
             .ignoresSafeArea()
-            .task {
-                let ids = await viewModel.loadHalfRevealedClusterIds()
-                revealedClusterIds = ids
-            }
 
             if isAwakenMode {
                 VStack {
@@ -36,6 +32,7 @@ struct ExplorationRootView: View {
                         Button(action: {
                             selectedCluster = nil
                             awakenQueue.removeAll()
+                            revealedClusterIds.removeAll() // 退出即清空白点（恢复灰点）
                             isAwakenMode = false
                         }) {
                             Image(systemName: "xmark.circle.fill")
@@ -149,6 +146,15 @@ struct ExplorationRootView: View {
         }
         .sheet(isPresented: $showBadges) {
             BadgeWallView()
+        }
+        .onChange(of: isAwakenMode) { _, newValue in
+            // 只要离开唤醒模式，就彻底复位本次 Session 状态（白点 + 面板 + 选中项）
+            guard newValue == false else { return }
+            selectedCluster = nil
+            awakenQueue.removeAll()
+            revealedClusterIds.removeAll()
+            panelCityName = nil
+            panelHeight = defaultPanelHeight
         }
     }
 }

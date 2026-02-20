@@ -40,32 +40,48 @@ final class LightPointAnnotationView: MKAnnotationView {
     
     func updateStyle() {
         let style = AppConfig.default.lightPointStyle
-        let color: UIColor?
+        
+        let color: UIColor
+        let size: CGFloat
+        let glowRadius: CGFloat
+        let glowOpacity: Float
+
         if isStoryPoint {
-            color = UIColor(hex: style.highlightedColorHex)
+            // 状态 3: 完全解锁 (Story) -> 金黄色，强光晕
+            color = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)
+            size = style.highlightedSize
+            glowRadius = CGFloat(style.glowIntensity * 12)
+            glowOpacity = Float(style.glowIntensity)
+        } else if isHalfRevealed {
+            // 状态 2: 半解锁 (Half-Revealed) -> 纯白色，中等呼吸光晕
+            color = .white
+            size = style.defaultSize * 1.2
+            glowRadius = CGFloat(style.glowIntensity * 8)
+            glowOpacity = Float(style.glowIntensity)
         } else {
-            color = UIColor(hex: style.defaultColorHex)
+            // 状态 1: 未解锁 (Locked) -> 灰色/暗淡，弱光晕
+            color = .lightGray
+            size = style.defaultSize
+            glowRadius = CGFloat(style.glowIntensity * 4)
+            glowOpacity = 0.3
         }
 
-        let size = isStoryPoint ? style.highlightedSize : style.defaultSize
-        
         // 增加点击区域
         let tapSize = max(size * 3, 44.0)
         self.frame = CGRect(x: 0, y: 0, width: tapSize, height: tapSize)
-        self.centerOffset = CGPoint(x: 0, y: 0)
         
         let pointOrigin = (tapSize - size) / 2
         coreLayer.frame = CGRect(x: pointOrigin, y: pointOrigin, width: size, height: size)
         coreLayer.cornerRadius = size / 2
-        coreLayer.backgroundColor = color?.cgColor
+        coreLayer.backgroundColor = color.cgColor
         
         glowLayer.frame = coreLayer.frame
         glowLayer.cornerRadius = coreLayer.cornerRadius
-        glowLayer.backgroundColor = color?.cgColor
-        glowLayer.shadowColor = color?.cgColor
+        glowLayer.backgroundColor = color.cgColor
+        glowLayer.shadowColor = color.cgColor
         glowLayer.shadowOffset = .zero
-        glowLayer.shadowRadius = CGFloat(style.glowIntensity * 10)
-        glowLayer.shadowOpacity = Float(style.glowIntensity)
+        glowLayer.shadowRadius = glowRadius
+        glowLayer.shadowOpacity = glowOpacity
     }
     
     private func startBreathingAnimation() {

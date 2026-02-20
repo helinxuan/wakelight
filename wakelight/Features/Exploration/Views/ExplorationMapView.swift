@@ -80,16 +80,16 @@ struct ExplorationMapView: UIViewRepresentable {
                             parent.revealedClusterIds.insert(hitCluster.id)
 
                             if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                                view.isStoryPoint = hitCluster.hasStory
                                 view.isHalfRevealed = true
+                                view.updateStyle()
                             }
 
                             // 通知屏幕层启动扩散动画
                             fogScreenView?.triggerDiffusion(for: hitCluster.id)
                             parent.selectedCluster = hitCluster
 
-                            Task {
-                                await parent.viewModel.markClusterHalfRevealed(placeClusterId: hitCluster.id)
-                            }
+                            // Session-only 半显影：不落库
                         }
                     } else {
                         // 如果已经在队列中，滑动滑过时也要更新 selectedCluster 以触发面板置顶
@@ -127,13 +127,19 @@ struct ExplorationMapView: UIViewRepresentable {
             view.annotation = annotation
             view.canShowCallout = false
             view.isStoryPoint = cluster.hasStory
+            view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id) && parent.isAwakenMode
             view.updateStyle()
             return view
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-            // 地图每一帧变动都让屏幕迷雾重绘，屏幕空间渲染极快且无缝
-            fogScreenView?.setNeedsDisplay()
+            // 跟手：交互中只做轻量更新（只更新 glow 的 position/bounds），禁止重建 path / setNeedsDisplay
+            fogScreenView?.updateIfNeeded(interactionPhase: true)
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            // 地图交互结束后再做一次完整可见集重算 + 回收
+            fogScreenView?.updateIfNeeded(interactionPhase: false)
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
@@ -210,141 +216,296 @@ struct ExplorationMapView: UIViewRepresentable {
             // 同步数据到迷雾视图
             fogView.clusters = viewModel.clusters
             fogView.revealedClusterIds = revealedClusterIds
-            fogView.setNeedsDisplay()
+            fogView.updateIfNeeded(interactionPhase: false)
 
             // 1. 检查数量变化
             if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
                 context.coordinator.applyAnnotations(to: mapView)
-            } else {
-                // 2. 数量没变时，检查 hasStory 状态是否变化并同步颜色
-                for annotation in context.coordinator.currentAnnotations {
-                    if let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) {
-                        // 如果内存态变黄了，但 annotation view 还没刷，就手动刷一下
-                        if cluster.hasStory != annotation.cluster.hasStory {
-                            if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
-                                view.isStoryPoint = cluster.hasStory
-                                view.updateStyle()
-                            }
-                        }
-                    }
+            }
+
+            // 2. 每次 update 都强制同步可见点状态（解决 MKAnnotationView 复用导致的残留样式）
+            //    这样在退出唤醒模式后，白点会立刻恢复为灰点。
+            for annotation in context.coordinator.currentAnnotations {
+                guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
+                guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
+
+                let shouldHalfReveal = isAwakenMode && revealedClusterIds.contains(cluster.id)
+
+                if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
+                    view.isStoryPoint = cluster.hasStory
+                    view.isHalfRevealed = shouldHalfReveal
+                    view.updateStyle()
                 }
             }
         }
 }
 
-/// 屏幕空间迷雾视图：直接在 UIView 上绘制，解决 MapKit Overlay 的拼接和刷新延迟问题
+/// 迷雾遮罩（GPU 合成）：用 `CAShapeLayer` 作为 mask，通过 even-odd 规则在黑色遮罩上“挖洞”。
+///
+/// 设计目标：
+/// - 禁止 `draw(_:)` / `CGGradient` / `blendMode(.destinationOut)` 这类 CPU 像素级绘制路径
+/// - 只在交互结束（regionDidChange）或数据变更时更新 mask（节流）
+/// - 使用 PNG 纹理叠加实现柔边光晕（Glow），解决硬边圈圈感
 final class FogScreenView: UIView {
     weak var mapView: MKMapView?
-    var clusters: [PlaceCluster] = []
-    var revealedClusterIds: Set<UUID> = []
+
+    var clusters: [PlaceCluster] = [] {
+        didSet { needsFullUpdate = true }
+    }
+
+    var revealedClusterIds: Set<UUID> = [] {
+        didSet { needsFullUpdate = true }
+    }
+
+    // MARK: - Tunables (per ARCHITECTURE_WAKELIGHT.md 7.1)
+
+    /// 硬上限：屏幕内同时可见的 glow layer 数量
+    private let maxVisibleGlowLayers: Int = 180
+
+    /// 全屏静态迷雾不透明度
+    private let fogAlpha: CGFloat = 0.65
+
+    /// Glow 纹理 alpha（视觉上是“照亮变薄”，不是挖洞）
+    private let glowOpacity: Float = 0.36
     
-    // 扩散动画状态
+    /// 解锁后的金黄色 (对齐 ARCHITECTURE_WAKELIGHT.md)
+    private let storyGlowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
+
+    /// 交互结束后完整更新时的可见范围缓冲（减少边缘 pop）
+    private let visiblePadding: CGFloat = 140
+
+    /// 根据缩放计算 glow 尺寸的基准（可看作文档里 B 参数的工程落点）
+    private let baseGlowSize: CGFloat = 120
+
+    // MARK: - Animation state (optional diffusion)
+
     private var animatingClusterId: UUID?
     private var animationStartTime: TimeInterval?
     private var displayLink: CADisplayLink?
-    
-    private let fogAlpha: CGFloat = 0.65
-    private let baseHoleRadius: CGFloat = 15
-    private let revealedHoleRadius: CGFloat = 65
     private let animationDuration: TimeInterval = 0.6
+
+    // MARK: - Layers
+
+    /// 静态迷雾：1 个半透明 CALayer，不做 mask、不重绘
+    private let overlayLayer = CALayer()
+
+    /// Glow 容器层：内部放若干个 contents=PNG 的 CALayer，由 GPU 合成
+    private let glowContainerLayer = CALayer()
+
+    /// 复用池：active + idle
+    private var activeGlowLayers: [UUID: CALayer] = [:]
+    private var idleGlowLayers: [CALayer] = []
+
+    private let glowImage = UIImage(named: "FogHoleSoft")?.cgImage
+    private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
+
+    private var needsFullUpdate: Bool = true
 
     init(mapView: MKMapView) {
         self.mapView = mapView
         super.init(frame: .zero)
-        self.backgroundColor = .clear
-        self.isOpaque = false
+
+        isUserInteractionEnabled = false
+        isOpaque = false
+        backgroundColor = .clear
+
+        overlayLayer.backgroundColor = UIColor.black.withAlphaComponent(fogAlpha).cgColor
+        layer.addSublayer(overlayLayer)
+
+        layer.addSublayer(glowContainerLayer)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        overlayLayer.frame = bounds
+        glowContainerLayer.frame = bounds
+        needsFullUpdate = true
+        updateIfNeeded(interactionPhase: false)
+    }
+
+    /// 外部入口：
+    /// - interactionPhase=true：跟手期，只更新 position/bounds（禁止 rebuild path / setNeedsDisplay）
+    /// - interactionPhase=false：交互结束，重算可见集 + 回收
+    func updateIfNeeded(interactionPhase: Bool) {
+        if interactionPhase {
+            updateActiveGlowLayerGeometryOnly()
+            return
+        }
+
+        guard needsFullUpdate else {
+            // 即使不需要 full update，也要确保 animating 的 frame 更新
+            updateActiveGlowLayerGeometryOnly()
+            return
+        }
+
+        needsFullUpdate = false
+        updateVisibleSetAndRecycle()
+    }
+
     func triggerDiffusion(for clusterId: UUID) {
         animatingClusterId = clusterId
         animationStartTime = CACurrentMediaTime()
+        needsFullUpdate = true
         startDisplayLink()
     }
 
     private func startDisplayLink() {
         displayLink?.invalidate()
-        displayLink = CADisplayLink(target: self, selector: #selector(onDisplayLink))
-        displayLink?.add(to: .main, forMode: .common)
+        let link = CADisplayLink(target: self, selector: #selector(onDisplayLink))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
     }
 
     @objc private func onDisplayLink() {
-        setNeedsDisplay()
+        // 动画期间不做 full rebuild，只做轻量几何更新 + opacity 变化
+        updateActiveGlowLayerGeometryOnly()
+
+        if let start = animationStartTime {
+            let elapsed = CACurrentMediaTime() - start
+            if elapsed >= animationDuration {
+                animatingClusterId = nil
+                animationStartTime = nil
+                displayLink?.invalidate()
+                displayLink = nil
+                needsFullUpdate = true
+            }
+        }
     }
 
-    override func draw(_ rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext(), let mapView = mapView else { return }
-        
-        // 1. 填充背景迷雾
-        context.setFillColor(UIColor.black.withAlphaComponent(fogAlpha).cgColor)
-        context.fill(rect)
+    // MARK: - Core update
 
-        context.saveGState()
-        context.setBlendMode(.destinationOut)
-        
-        let currentTime = CACurrentMediaTime()
-        var hasActiveAnimation = false
+    private func updateVisibleSetAndRecycle() {
+        guard let mapView else { return }
+        let rect = bounds
+        guard rect.width > 0, rect.height > 0 else { return }
 
-        // 优化缩放曲线：
-        // span 越小（越近），factor 接近 1.0
-        // span 越大（越远），factor 迅速下降，但在极远距离保持一个可见的最小值
-        let span = Double(mapView.region.span.longitudeDelta)
-        // 连续函数：当 span=0 时为 1.0，当 span=180 (全球) 时约为 0.25
-        let zoomFactor = CGFloat(1.0 / (1.0 + pow(span / 20.0, 0.8)))
-        
-        // 限制收缩下限，确保世界级别下洞口变小但不消失（最小约 20pt）
-        let minRadius: CGFloat = 14.0
-        let currentBaseRadius = max(6.0, baseHoleRadius * zoomFactor)
-        let currentRevealedRadius = max(minRadius, revealedHoleRadius * zoomFactor)
+        let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
 
-        for cluster in clusters {
-            let coord = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-            let screenPoint = mapView.convert(coord, toPointTo: self)
+        // 1) 先筛选屏幕内 & revealed/animating
+        var candidates: [(id: UUID, screenPoint: CGPoint, dist2: CGFloat)] = []
+        candidates.reserveCapacity(256)
+
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+
+        for c in clusters {
+            // 三段状态对应的迷雾光晕显示逻辑：
+            // - locked: 无光晕
+            // - half-revealed (session): 显示白色光晕 (FogHoleSoft)
+            // - fully revealed (story): 显示黄色光晕 (FogHoleSoftYellow)
+            let isHalfRevealed = revealedClusterIds.contains(c.id)
+            let isFullyRevealed = c.hasStory
+            let isAnimating = c.id == animatingClusterId
             
-            // 剔除屏幕外的点（留出 100pt 缓冲）
-            guard rect.insetBy(dx: -100, dy: -100).contains(screenPoint) else { continue }
+            guard isHalfRevealed || isFullyRevealed || isAnimating else { continue }
 
-            var radius: CGFloat = currentBaseRadius
-            var opacity: CGFloat = 1.0
-            var isSpecial = false
+            let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
+            let p = mapView.convert(coord, toPointTo: self)
+            guard visibleRect.contains(p) else { continue }
 
-            if cluster.id == animatingClusterId, let start = animationStartTime {
-                let elapsed = currentTime - start
-                let progress = min(1.0, elapsed / animationDuration)
-                let easeOut = 1 - pow(1 - progress, 3)
-                
-                radius = currentBaseRadius + (currentRevealedRadius - currentBaseRadius) * CGFloat(easeOut)
-                opacity = CGFloat(easeOut)
-                isSpecial = true
-                if progress < 1.0 { hasActiveAnimation = true }
-            } else if revealedClusterIds.contains(cluster.id) {
-                radius = currentRevealedRadius
-                isSpecial = true
+            let dx = p.x - center.x
+            let dy = p.y - center.y
+            candidates.append((c.id, p, dx * dx + dy * dy))
+        }
+
+        // 2) 硬上限：取最近的 maxVisibleGlowLayers 个（靠屏幕中心）
+        if candidates.count > maxVisibleGlowLayers {
+            candidates.sort { $0.dist2 < $1.dist2 }
+            candidates = Array(candidates.prefix(maxVisibleGlowLayers))
+        }
+
+        let keepIds = Set(candidates.map { $0.id })
+
+        // 3) 回收不需要的 active layers
+        for (id, layer) in activeGlowLayers where !keepIds.contains(id) {
+            layer.removeFromSuperlayer()
+            activeGlowLayers.removeValue(forKey: id)
+            idleGlowLayers.append(layer)
+        }
+
+        // 4) 确保 keepIds 都有 layer
+        for item in candidates {
+            let layer = getOrCreateGlowLayer(for: item.id)
+            layer.position = item.screenPoint
+        }
+
+        // 5) 统一更新一次几何（bounds/opacity/filter）
+        updateActiveGlowLayerGeometryOnly()
+    }
+
+    /// 跟手期：只更新 active glow layers 的 position/bounds/opacity（不增不减）
+    private func updateActiveGlowLayerGeometryOnly() {
+        guard let mapView else { return }
+
+        let span = Double(mapView.region.span.longitudeDelta)
+        let zoomFactor = glowZoomFactor(span: span)
+        let size = max(44, baseGlowSize * zoomFactor)
+
+        let now = CACurrentMediaTime()
+        let animProgress: CGFloat
+        if let start = animationStartTime {
+            let p = min(1.0, (now - start) / animationDuration)
+            animProgress = CGFloat(1 - pow(1 - p, 3))
+        } else {
+            animProgress = 0
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        for (id, layer) in activeGlowLayers {
+            guard let c = clusters.first(where: { $0.id == id }) else { continue }
+            
+            let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
+            layer.position = mapView.convert(coord, toPointTo: self)
+
+            // 根据状态切换纹理 (Story 黄色 vs Session 白色)
+            layer.contents = c.hasStory ? storyGlowImage : glowImage
+
+            var finalSize = size
+            var finalOpacity = glowOpacity
+
+            if id == animatingClusterId {
+                // 扩散时稍微放大&增亮一点点
+                finalSize = size * (1.0 + 0.35 * animProgress)
+                finalOpacity = min(0.52, glowOpacity + Float(0.18 * animProgress))
             }
 
-            if isSpecial {
-                // 柔和边缘渐变
-                let colors = [
-                    UIColor.black.withAlphaComponent(opacity).cgColor,
-                    UIColor.black.withAlphaComponent(0).cgColor
-                ] as CFArray
-                let locations: [CGFloat] = [0.6, 1.0]
-                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: locations) {
-                    context.drawRadialGradient(gradient, startCenter: screenPoint, startRadius: 0, endCenter: screenPoint, endRadius: radius, options: .drawsAfterEndLocation)
-                }
-            } else {
-                // 普通小洞
-                context.setFillColor(UIColor.black.cgColor)
-                context.fillEllipse(in: CGRect(x: screenPoint.x - radius, y: screenPoint.y - radius, width: radius * 2, height: radius * 2))
+            layer.bounds = CGRect(x: 0, y: 0, width: finalSize, height: finalSize)
+            layer.opacity = finalOpacity
+
+            if layer.compositingFilter == nil {
+                layer.compositingFilter = "screenBlendMode"
             }
         }
-        
-        context.restoreGState()
 
-        if !hasActiveAnimation {
-            displayLink?.invalidate()
-            displayLink = nil
+        CATransaction.commit()
+    }
+
+    private func glowZoomFactor(span: Double) -> CGFloat {
+        // span 越大（越远），factor 越小
+        // 经验函数：平滑、单调、避免极端
+        let f = 1.0 / (1.0 + pow(span / 18.0, 0.85))
+        return CGFloat(max(0.25, min(1.0, f)))
+    }
+
+    private func getOrCreateGlowLayer(for id: UUID) -> CALayer {
+        if let existing = activeGlowLayers[id] { return existing }
+
+        let layer: CALayer
+        if let reused = idleGlowLayers.popLast() {
+            layer = reused
+        } else {
+            layer = CALayer()
         }
+
+        layer.contents = glowImage
+        layer.contentsGravity = .resizeAspect
+        // contentsScale 可以让纹理在 retina 下更锐，但会增加显存；这里用系统默认即可
+
+        glowContainerLayer.addSublayer(layer)
+        activeGlowLayers[id] = layer
+        return layer
     }
 }

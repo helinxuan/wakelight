@@ -500,16 +500,40 @@ flowchart LR
 
 ## 7.1 地图 & 迷雾（Fog）
 
-- **渲染承载方式**：
-  - **FogScreenView (UIKit 层)**：放弃原有的 `MKOverlay` 方案，改用在 `MKMapView` 上方覆盖一层透明的 `FogScreenView (UIView)`。
-  - **优势**：彻底消除 MapKit 瓦片分块渲染导致的“拼接缝隙”；通过 `mapViewDidChangeVisibleRegion` 实时转换坐标，实现 60FPS 的无缝同步刷新。
-- **渲染策略**：
-  - **屏幕空间固定半径**：迷雾洞口大小以屏幕点为基准。
-  - **动态缩放曲线**：使用非线性幂函数（如 `1/(1+(span/20)^0.8)`）使洞口在世界级别缩放时平滑收缩，避免遮挡大范围地理区域。
-  - **性能分级**：默认小洞使用 `fillEllipse` 快速挖洞；正在扩散/已解锁的重点光点使用 `CGGradient` 实现边缘羽化扩散。
-- **交互控制**：
-  - **稳定 Scope**：在地图拖动/缩放过程中不重建 Overlay 容器。
-  - **交互后更新**：仅在 `regionDidChangeAnimated` 触发且视野超出阈值（如原有 Scope 的 80%）时，才重新计算并更新迷雾覆盖范围（2 屏 Margin + World Clamp）。
+### 7.1.1 渲染架构（性能极致版 1.3）
+
+- **渲染承载方式（最终方案）**：
+  - **静态迷雾层**：在 `MKMapView` 上方覆盖一层 `FogView`，使用一个纯黑色半透明的 `CALayer`（`overlayLayer`）作为全局迷雾。该层不使用 mask，不进行重绘。
+  - **纹理光晕层（Glow）**：在迷雾层上方叠加一个 `glowContainerLayer`，通过在其内部动态放置 `CALayer` 实例来实现“驱散”效果。
+  - **GPU 合成**：每个光晕点使用预渲染的柔边 PNG（`FogHoleSoft`）作为 `contents`。通过调整 layer 的 `opacity`（建议 0.32~0.42）和 `compositingFilter`（如 `screenBlendMode`）实现“照亮/变薄”的视觉感。
+
+- **性能约束（红线）**：
+  - ✅ **Layer 复用池**：即使有几万个点，屏幕内同时活跃的 glow layer 必须控制在硬上限内（建议 `maxVisibleGlowLayers = 180`）。
+  - ✅ **可见性筛选**：仅对 `visibleMapRect` 内且已解锁（revealed）或正在动画（animating）的点创建/显示 layer。
+  - ✅ **跟手优化**：地图缩放/平移期间，禁止重建任何 path 或触发 `setNeedsDisplay`。仅更新已存在 layer 的 `position` 和 `bounds`。
+  - ❌ **禁止**：在 `draw(_:)` 中循环绘制、使用 `CGGradient` 在 CPU 做径向渐变、以及每帧重建复杂的 `CAShapeLayer` 路径。
+
+- **视觉权衡**：
+  - 采用“局部照亮/变薄”方案替代“硬性挖洞”。这在大量点场景下性能最稳，且视觉上更具梦幻光晕感。
+
+### 7.1.2 交互与更新策略
+- **交互中**：仅更新可见 Glow Layer 的屏幕坐标与尺寸，确保 60fps 绝对顺滑。
+- **交互结束**：执行一次完整的可见集重算与过期 Layer 回收。
+
+### 7.1.3 动画与视觉（MVP 约束）
+
+- **MVP**：硬边圆洞（`CAShapeLayer` + evenOdd），优先保证性能与稳定。
+- **柔边（可选升级）**：
+  - 推荐方向：以 **预渲染 alpha 纹理（柔边 PNG）** 叠加为视觉层（仍由 GPU 合成），避免回退到 CPU 渐变。
+  - 约束：柔边只能对少量“正在扩散/选中”的点启用，禁止对全量点开启复杂渐变。
+
+### 7.1.4 工程落地检查清单
+
+- [ ] Fog 相关代码中不存在 `override func draw`。
+- [ ] 无 `CGGradient` / `drawRadialGradient`。
+- [ ] `FogView.layer.mask` 为 `CAShapeLayer` 且 `fillRule = .evenOdd`。
+- [ ] 更新发生在 `regionDidChangeAnimated` + 数据变化，而不是 `mapViewDidChangeVisibleRegion` 每帧。
+- [ ] Time Profiler 中不再出现 `argb32_shade_radial_RGB`/`argb32_image_mark` 作为主热点。
 
 ## 7.2 显影与缩略图（Story Thumbnail）
 
