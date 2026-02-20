@@ -266,7 +266,8 @@ final class FogScreenView: UIView {
     private let fogAlpha: CGFloat = 0.65
 
     /// Glow 纹理 alpha（视觉上是“照亮变薄”，不是挖洞）
-    private let glowOpacity: Float = 0.36
+    /// 地图底图较暗时，screenBlendMode 下需要更高的 alpha 才能明显体现“太阳式长尾”。
+    private let glowOpacity: Float = 0.55
     
     /// 解锁后的金黄色 (对齐 ARCHITECTURE_WAKELIGHT.md)
     private let storyGlowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
