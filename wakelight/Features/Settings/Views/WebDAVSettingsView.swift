@@ -3,6 +3,21 @@ import SwiftUI
 struct WebDAVSettingsView: View {
     @StateObject var viewModel: WebDAVSettingsViewModel
 
+    private var selectedPathsSummary: String {
+        let paths = viewModel.rootPaths
+            .map { WebDAVPath.normalizeDirectory($0) }
+            .filter { !$0.isEmpty }
+
+        if paths.isEmpty {
+            return "/"
+        }
+        if paths.count == 1 {
+            return "/" + paths[0]
+        }
+        // Show count for multi-select to avoid overly long trailing text
+        return "已选择 \(paths.count) 个目录"
+    }
+
     var body: some View {
         Form {
             Section("服务器") {
@@ -13,7 +28,9 @@ struct WebDAVSettingsView: View {
 
                 NavigationLink {
                     WebDAVFolderPickerView(
-                        viewModel: WebDAVFolderPickerViewModel(initialPath: viewModel.rootPath) {
+                        viewModel: WebDAVFolderPickerViewModel(
+                            initialPath: viewModel.rootPaths.first ?? viewModel.rootPath
+                        ) {
                             guard let url = URL(string: viewModel.baseURL) else {
                                 throw WebDAVError.invalidBaseURL
                             }
@@ -23,19 +40,42 @@ struct WebDAVSettingsView: View {
                             )
                         },
                         onSelect: { paths in
-                            // 这里暂时只取第一个作为根目录，后续你可以改为保存多目录配置
-                            if let first = paths.first {
-                                viewModel.rootPath = WebDAVPath.normalizeDirectory(first)
-                            }
+                            // Multi-root: store all selected directories
+                            let normalized = paths
+                                .map { WebDAVPath.normalizeDirectory($0) }
+                                .filter { !$0.isEmpty }
+                            viewModel.rootPaths = normalized
+                            viewModel.rootPath = normalized.first ?? ""
                         }
                     )
                 } label: {
                     HStack {
-                        Text("根目录")
+                        Text("导入目录")
                         Spacer()
-                        Text(viewModel.rootPath.isEmpty ? "/" : "/" + WebDAVPath.normalizeDirectory(viewModel.rootPath))
+                        Text(selectedPathsSummary)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                    }
+                }
+
+                if !viewModel.rootPaths.isEmpty {
+                    Section("已选择目录") {
+                        ForEach(viewModel.rootPaths
+                            .map { WebDAVPath.normalizeDirectory($0) }
+                            .filter { !$0.isEmpty }, id: \.self) { path in
+                            Text("/" + path)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                        }
+
+                        Button(role: .destructive) {
+                            viewModel.rootPaths = []
+                            viewModel.rootPath = ""
+                        } label: {
+                            Text("清空已选目录")
+                        }
                     }
                 }
             }

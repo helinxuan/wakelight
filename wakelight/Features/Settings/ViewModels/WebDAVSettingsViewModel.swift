@@ -1,12 +1,18 @@
 import Foundation
 import Combine
 
+// NOTE:
+// This view model relies on app modules in `wakelight/Core/...` and `wakelight/Domain/...`.
+// If you see "cannot find type in scope" errors in Xcode, it usually means the file's
+// target membership / build phase sources is misconfigured, not that these types are missing.
+
 @MainActor
 final class WebDAVSettingsViewModel: ObservableObject {
     @Published var baseURL: String = "http://192.168.0.112:5005/"
     @Published var username: String = "helinxuan"
     @Published var password: String = ""
-    @Published var rootPath: String = ""
+    @Published var rootPath: String = "" // Added for single root compatibility in UI
+    @Published var rootPaths: [String] = []
     @Published var isTesting: Bool = false
     @Published var testResult: String?
     @Published var isSuccess: Bool = false
@@ -29,7 +35,8 @@ final class WebDAVSettingsViewModel: ObservableObject {
                 self.existingProfile = profile
                 self.baseURL = profile.baseURLString
                 self.username = profile.username
-                self.rootPath = profile.rootPath ?? ""
+                self.rootPaths = profile.rootPaths
+                self.rootPath = profile.rootPaths.first ?? ""
                 if let savedPassword = try? keychain.getString(forKey: profile.passwordKey) {
                     self.password = savedPassword
                 }
@@ -99,7 +106,7 @@ final class WebDAVSettingsViewModel: ObservableObject {
             let passwordKey = existingProfile?.passwordKey ?? "webdav.profile.\(profileId.uuidString).password"
 
             let now = Date()
-            let profile = WebDAVProfile(
+            var profile = WebDAVProfile(
                 id: profileId,
                 name: existingProfile?.name ?? "WebDAV Server",
                 baseURLString: baseURL,
@@ -109,6 +116,8 @@ final class WebDAVSettingsViewModel: ObservableObject {
                 createdAt: existingProfile?.createdAt ?? now,
                 updatedAt: now
             )
+            // Store all selected root paths
+            profile.rootPaths = rootPaths.isEmpty ? [WebDAVPath.normalizeDirectory(rootPath)] : rootPaths
 
             print("[WebDAV] 正在写入 Keychain...")
             try keychain.setString(password, forKey: passwordKey)

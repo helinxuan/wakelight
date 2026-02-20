@@ -114,7 +114,10 @@ struct AppDatabase {
                 t.column("baseURLString", .text).notNull()
                 t.column("username", .text).notNull()
                 t.column("passwordKey", .text).notNull()
+                // legacy single root
                 t.column("rootPath", .text)
+                // new multi roots (JSON string of [String])
+                t.column("rootPathsJson", .text)
                 t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
