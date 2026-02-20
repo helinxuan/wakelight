@@ -59,69 +59,96 @@ final class ImportWebDAVPhotosUseCase {
 
         var importedCount = 0
 
-        // `writer.write` expects a synchronous closure. Do network I/O outside the DB write transaction,
-        // then only perform synchronous inserts inside `writer.write`.
-        for (idx, item) in imageItems.enumerated() {
-            let remotePath = normalize(path: item.href)
-            print("[WebDAVImport] [\(idx+1)/\(imageItems.count)] remotePath=\(remotePath) etag=\(item.etag ?? "nil") size=\(item.contentLength.map(String.init) ?? "nil")")
+        // 1. Prefetch existing assets to avoid per-item DB reads
+        print("[WebDAVImport] Prefetching existing assets...")
+        let existingKeys: Set<String> = try await writer.read { db in
+            let assets = try RemoteMediaAsset
+                .filter(Column("profileId") == profile.id.uuidString)
+                .fetchAll(db)
+            let keys = assets.map { "\($0.remotePath)|\($0.etag ?? "")" }
+            return Set(keys)
+        }
 
-            // Check if already imported (DB read)
-            let exists: Bool = try await writer.read { db in
-                if let etag = item.etag {
-                    return try RemoteMediaAsset
-                        .filter(Column("profileId") == profile.id.uuidString)
-                        .filter(Column("remotePath") == remotePath)
-                        .filter(Column("etag") == etag)
-                        .fetchOne(db) != nil
-                } else {
-                    return try RemoteMediaAsset
-                        .filter(Column("profileId") == profile.id.uuidString)
-                        .filter(Column("remotePath") == remotePath)
-                        .fetchOne(db) != nil
+        let itemsToImport = imageItems.filter { item in
+            let remotePath = normalize(path: item.href)
+            let key = "\(remotePath)|\(item.etag ?? "")"
+            return !existingKeys.contains(key)
+        }
+        print("[WebDAVImport] Items to import: \(itemsToImport.count) (skipped \(imageItems.count - itemsToImport.count))")
+
+        if itemsToImport.isEmpty {
+            return 0
+        }
+
+        // 2. Concurrent download and EXIF extraction with bounded concurrency
+        let concurrency = 4
+        let total = itemsToImport.count
+        
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var iterator = itemsToImport.enumerated().makeIterator()
+            
+            // Initial batch
+            for _ in 0..<min(concurrency, total) {
+                if let next = iterator.next() {
+                    group.addTask {
+                        try await self.importItem(next.element, index: next.offset, total: total, client: client, profile: profile, importedAt: importedAt, indexedAt: indexedAt)
+                    }
                 }
             }
-            if exists {
-                print("[WebDAVImport]   - Skip: already imported")
-                continue
+            
+            while let _ = try await group.next() {
+                if let next = iterator.next() {
+                    group.addTask {
+                        try await self.importItem(next.element, index: next.offset, total: total, client: client, profile: profile, importedAt: importedAt, indexedAt: indexedAt)
+                    }
+                }
+                importedCount += 1
             }
-
-            // Network + CPU work outside transaction
-            print("[WebDAVImport]   - Downloading and extracting EXIF...")
-            let data = try await client.get(path: remotePath)
-            let exif = extractExif(from: data)
-            print("[WebDAVImport]   - EXIF: date=\(exif.creationDate.map { "\($0)" } ?? "nil") lat=\(exif.latitude ?? 0) lon=\(exif.longitude ?? 0)")
-
-            // Persist inside a synchronous write
-            try await writer.write { db in
-                let photoId = UUID()
-                let record = PhotoAsset(
-                    id: photoId,
-                    localIdentifier: nil,
-                    creationDate: exif.creationDate,
-                    latitude: exif.latitude,
-                    longitude: exif.longitude,
-                    thumbnailPath: nil,
-                    importedAt: importedAt
-                )
-                try record.insert(db)
-
-                let remote = RemoteMediaAsset(
-                    id: UUID(),
-                    profileId: profile.id,
-                    remotePath: remotePath,
-                    etag: item.etag,
-                    lastModified: item.lastModified,
-                    size: item.contentLength,
-                    photoAssetId: photoId,
-                    indexedAt: indexedAt
-                )
-                try remote.insert(db)
-            }
-
-            importedCount += 1
         }
 
         return importedCount
+    }
+
+    private func importItem(
+        _ item: WebDAVDirectoryItem,
+        index: Int,
+        total: Int,
+        client: WebDAVClient,
+        profile: WebDAVProfile,
+        importedAt: Date,
+        indexedAt: Date
+    ) async throws {
+        let remotePath = normalize(path: item.href)
+        print("[WebDAVImport] [\(index+1)/\(total)] Downloading: \(remotePath)")
+
+        let data = try await client.get(path: remotePath)
+        let exif = extractExif(from: data)
+
+        try await writer.write { db in
+            let photoId = UUID()
+            let record = PhotoAsset(
+                id: photoId,
+                localIdentifier: nil,
+                creationDate: exif.creationDate,
+                latitude: exif.latitude,
+                longitude: exif.longitude,
+                thumbnailPath: nil,
+                importedAt: importedAt
+            )
+            try record.insert(db)
+
+            let remote = RemoteMediaAsset(
+                id: UUID(),
+                profileId: profile.id,
+                remotePath: remotePath,
+                etag: item.etag,
+                lastModified: item.lastModified,
+                size: item.contentLength,
+                photoAssetId: photoId,
+                indexedAt: indexedAt
+            )
+            try remote.insert(db)
+        }
     }
 
     private func listRecursively(client: WebDAVClient, path: String) async throws -> [WebDAVDirectoryItem] {
