@@ -51,7 +51,7 @@ struct ExplorationMapView: UIViewRepresentable {
                     
                     // 只有切换了 Cluster，或者在同一个 Cluster 上停留超过 0.1s 才再次触发反馈
                     // 这样可以避免手指微颤导致的高频触发（rateLimit=32hz 问题）
-                    let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.1)
+                    let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.5)
 
                     if shouldTriggerFeedback {
                         if now - lastHitTime > 0.8 {
