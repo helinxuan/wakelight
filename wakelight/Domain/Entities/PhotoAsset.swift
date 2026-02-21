@@ -10,5 +10,7 @@ struct PhotoAsset: Codable, FetchableRecord, PersistableRecord {
     var latitude: Double?
     var longitude: Double?
     var thumbnailPath: String?
+    var modificationDate: Date?
+    var lastSeenAt: Date?
     var importedAt: Date
 }

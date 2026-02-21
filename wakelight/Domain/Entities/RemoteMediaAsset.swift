@@ -12,4 +12,5 @@ struct RemoteMediaAsset: Codable, FetchableRecord, PersistableRecord {
     var size: Int?
     var photoAssetId: UUID
     var indexedAt: Date
+    var lastSeenAt: Date?
 }

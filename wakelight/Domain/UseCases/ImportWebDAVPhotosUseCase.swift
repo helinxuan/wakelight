@@ -39,17 +39,15 @@ final class ImportWebDAVPhotosUseCase {
 
         let rootPath = normalize(path: profile.rootPath ?? "/")
         if rootPath == "/" {
-            // 用户可能在设置里选择了目录但没点“保存”，导致仍然用默认根目录扫描。
-            // 根目录扫描通常会遇到大量系统/临时目录（例如 ClickHouse 的 tmp_merge_*），可能导致 404。
-            // 这里不阻止导入：只给出提示，并继续扫描。
             await PhotoImportManager.shared.reportNonFatalWarning(
                 "当前 WebDAV 导入路径是根目录 /（可能还没点击保存）。建议到 设置 → WebDAV 选择照片目录后点击保存，以避免扫描到系统/临时目录。"
             )
         }
         print("[WebDAVImport] Start PROPFIND recursively from \(rootPath)")
 
-        let importedAt = Date()
-        let indexedAt = importedAt
+        let scanAt = Date()
+        let importedAt = scanAt
+        let indexedAt = scanAt
 
         let allItems = try await listRecursively(client: client, path: rootPath)
         print("[WebDAVImport] PROPFIND finished, total items=\(allItems.count)")
@@ -68,58 +66,126 @@ final class ImportWebDAVPhotosUseCase {
 
         var importedCount = 0
 
-        // 1. Prefetch existing assets to avoid per-item DB reads
+        // 1. Prefetch existing assets
         print("[WebDAVImport] Prefetching existing assets...")
-        let existingKeys: Set<String> = try await writer.read { db in
+        let existingAssets: [String: RemoteMediaAsset] = try await writer.read { db in
             let assets = try RemoteMediaAsset
                 .filter(Column("profileId") == profile.id.uuidString)
                 .fetchAll(db)
-            let keys = assets.map { "\($0.remotePath)|\($0.etag ?? "")" }
-            return Set(keys)
+            return Dictionary(uniqueKeysWithValues: assets.map { ($0.remotePath, $0) })
         }
 
+        // Helper to check if content changed
+        let hasItemChanged: @Sendable (RemoteMediaAsset, WebDAVDirectoryItem) -> Bool = { existing, item in
+            if let existingEtag = existing.etag, let itemEtag = item.etag, !existingEtag.isEmpty, !itemEtag.isEmpty {
+                return existingEtag != itemEtag
+            }
+            // Fallback: Check lastModified and size
+            let sizeChanged = existing.size != item.contentLength
+            let dateChanged = existing.lastModified != item.lastModified
+            return sizeChanged || dateChanged
+        }
+
+        // Items that need download/re-import (new or changed)
         let itemsToImport = imageItems.filter { item in
             let remotePath = normalize(path: item.href)
-            let key = "\(remotePath)|\(item.etag ?? "")"
-            return !existingKeys.contains(key)
-        }
-        print("[WebDAVImport] Items to import: \(itemsToImport.count) (skipped \(imageItems.count - itemsToImport.count))")
-
-        if itemsToImport.isEmpty {
-            await onProgress?(imageItems.count, imageItems.count)
-            return 0
+            if let existing = existingAssets[remotePath] {
+                return hasItemChanged(existing, item)
+            }
+            return true // New item
         }
 
-        // 2. Concurrent download and EXIF extraction with bounded concurrency
-        let concurrency = 4
-        let total = itemsToImport.count
-        var completedInSession = 0
+        // Items that are unchanged but must be marked as seen to avoid deletion
+        let unchangedItems = imageItems.filter { item in
+            let remotePath = normalize(path: item.href)
+            guard let existing = existingAssets[remotePath] else { return false }
+            return !hasItemChanged(existing, item)
+        }
 
-        await onProgress?(0, total)
+        if !unchangedItems.isEmpty {
+            print("[WebDAVImport] Marking \(unchangedItems.count) unchanged items as seen")
+            let unchangedPaths = unchangedItems.map { normalize(path: $0.href) }
+            _ = try await writer.write { db in
+                try RemoteMediaAsset
+                    .filter(Column("profileId") == profile.id.uuidString && unchangedPaths.contains(Column("remotePath")))
+                    .updateAll(db, Column("lastSeenAt").set(to: scanAt))
+            }
+        }
 
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var iterator = itemsToImport.enumerated().makeIterator()
+        print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total images: \(imageItems.count))")
 
-            // Initial batch
-            for _ in 0..<min(concurrency, total) {
-                if let next = iterator.next() {
-                    group.addTask {
-                        try await self.importItem(next.element, index: next.offset, total: total, client: client, profile: profile, importedAt: importedAt, indexedAt: indexedAt)
+        // 2. Concurrent import for changed/new items
+        if !itemsToImport.isEmpty {
+            let concurrency = 4
+            let total = itemsToImport.count
+            var completedInSession = 0
+
+            await onProgress?(0, total)
+
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                var iterator = itemsToImport.enumerated().makeIterator()
+
+                for _ in 0..<min(concurrency, total) {
+                    if let next = iterator.next() {
+                        group.addTask {
+                            try await self.importItem(
+                                next.element,
+                                index: next.offset,
+                                total: total,
+                                client: client,
+                                profile: profile,
+                                importedAt: importedAt,
+                                indexedAt: indexedAt,
+                                scanAt: scanAt
+                            )
+                        }
+                    }
+                }
+
+                while let _ = try await group.next() {
+                    completedInSession += 1
+                    importedCount += 1
+                    await onProgress?(completedInSession, total)
+
+                    if let next = iterator.next() {
+                        group.addTask {
+                            try await self.importItem(
+                                next.element,
+                                index: next.offset,
+                                total: total,
+                                client: client,
+                                profile: profile,
+                                importedAt: importedAt,
+                                indexedAt: indexedAt,
+                                scanAt: scanAt
+                            )
+                        }
                     }
                 }
             }
+        }
 
-            while let _ = try await group.next() {
-                completedInSession += 1
-                importedCount += 1
-                await onProgress?(completedInSession, total)
+        // 3. Sync deletions
+        print("[WebDAVImport] Cleaning up missing assets...")
+        try await writer.write { db in
+            let missing = try RemoteMediaAsset
+                .filter(Column("profileId") == profile.id.uuidString && (Column("lastSeenAt") < scanAt || Column("lastSeenAt") == nil))
+                .fetchAll(db)
 
-                if let next = iterator.next() {
-                    group.addTask {
-                        try await self.importItem(next.element, index: next.offset, total: total, client: client, profile: profile, importedAt: importedAt, indexedAt: indexedAt)
-                    }
-                }
-            }
+            guard !missing.isEmpty else { return }
+
+            let remoteIds = missing.map { $0.id.uuidString }
+            let photoIds = missing.map { $0.photoAssetId.uuidString }
+
+            try RemoteMediaAsset
+                .filter(remoteIds.contains(Column("id")))
+                .deleteAll(db)
+
+            try PhotoAsset
+                .filter(photoIds.contains(Column("id")))
+                .deleteAll(db)
+
+            print("[WebDAVImport] Sync deleted \(missing.count) missing remote assets")
         }
 
         return importedCount
@@ -132,7 +198,8 @@ final class ImportWebDAVPhotosUseCase {
         client: WebDAVClient,
         profile: WebDAVProfile,
         importedAt: Date,
-        indexedAt: Date
+        indexedAt: Date,
+        scanAt: Date
     ) async throws {
         let remotePath = normalize(path: item.href)
         print("[WebDAVImport] [\(index+1)/\(total)] Downloading: \(remotePath)")
@@ -140,7 +207,57 @@ final class ImportWebDAVPhotosUseCase {
         let data = try await client.get(path: remotePath)
         let exif = extractExif(from: data)
 
+        // Local helper for consistency
+        let hasItemChanged: @Sendable (RemoteMediaAsset, WebDAVDirectoryItem) -> Bool = { existing, item in
+            if let existingEtag = existing.etag, let itemEtag = item.etag, !existingEtag.isEmpty, !itemEtag.isEmpty {
+                return existingEtag != itemEtag
+            }
+            let sizeChanged = existing.size != item.contentLength
+            let dateChanged = existing.lastModified != item.lastModified
+            return sizeChanged || dateChanged
+        }
+
         try await writer.write { db in
+            if var existing = try RemoteMediaAsset
+                .filter(Column("profileId") == profile.id.uuidString && Column("remotePath") == remotePath)
+                .fetchOne(db) {
+
+                let oldPhotoId = existing.photoAssetId
+                let hasChanged = hasItemChanged(existing, item)
+
+                if hasChanged {
+                    let newPhotoId = UUID()
+                    let record = PhotoAsset(
+                        id: newPhotoId,
+                        localIdentifier: nil,
+                        creationDate: exif.creationDate,
+                        latitude: exif.latitude,
+                        longitude: exif.longitude,
+                        thumbnailPath: nil,
+                        modificationDate: nil,
+                        lastSeenAt: scanAt,
+                        importedAt: importedAt
+                    )
+                    try record.insert(db)
+
+                    existing.photoAssetId = newPhotoId
+                    existing.etag = item.etag
+                    existing.lastModified = item.lastModified
+                    existing.size = item.contentLength
+                    existing.indexedAt = indexedAt
+                    existing.lastSeenAt = scanAt
+                    try existing.update(db)
+
+                    _ = try? PhotoAsset.deleteOne(db, key: oldPhotoId.uuidString)
+                } else {
+                    existing.lastModified = item.lastModified
+                    existing.indexedAt = indexedAt
+                    existing.lastSeenAt = scanAt
+                    try existing.update(db)
+                }
+                return
+            }
+
             let photoId = UUID()
             let record = PhotoAsset(
                 id: photoId,
@@ -149,6 +266,8 @@ final class ImportWebDAVPhotosUseCase {
                 latitude: exif.latitude,
                 longitude: exif.longitude,
                 thumbnailPath: nil,
+                modificationDate: nil,
+                lastSeenAt: scanAt,
                 importedAt: importedAt
             )
             try record.insert(db)
@@ -161,9 +280,61 @@ final class ImportWebDAVPhotosUseCase {
                 lastModified: item.lastModified,
                 size: item.contentLength,
                 photoAssetId: photoId,
-                indexedAt: indexedAt
+                indexedAt: indexedAt,
+                lastSeenAt: scanAt
             )
-            try remote.insert(db)
+
+            do {
+                try remote.insert(db)
+            } catch {
+                if let dbError = error as? DatabaseError,
+                   dbError.resultCode == .SQLITE_CONSTRAINT,
+                   dbError.extendedResultCode == .SQLITE_CONSTRAINT_UNIQUE {
+
+                    _ = try? PhotoAsset.deleteOne(db, key: photoId.uuidString)
+
+                    if var existing2 = try RemoteMediaAsset
+                        .filter(Column("profileId") == profile.id.uuidString && Column("remotePath") == remotePath)
+                        .fetchOne(db) {
+
+                        let oldPhotoId2 = existing2.photoAssetId
+                        let hasChanged2 = hasItemChanged(existing2, item)
+
+                        if hasChanged2 {
+                            let newPhotoId2 = UUID()
+                            let record2 = PhotoAsset(
+                                id: newPhotoId2,
+                                localIdentifier: nil,
+                                creationDate: exif.creationDate,
+                                latitude: exif.latitude,
+                                longitude: exif.longitude,
+                                thumbnailPath: nil,
+                                modificationDate: nil,
+                                lastSeenAt: scanAt,
+                                importedAt: importedAt
+                            )
+                            try record2.insert(db)
+
+                            existing2.photoAssetId = newPhotoId2
+                            existing2.etag = item.etag
+                            existing2.lastModified = item.lastModified
+                            existing2.size = item.contentLength
+                            existing2.indexedAt = indexedAt
+                            existing2.lastSeenAt = scanAt
+                            try existing2.update(db)
+
+                            _ = try? PhotoAsset.deleteOne(db, key: oldPhotoId2.uuidString)
+                        } else {
+                            existing2.lastModified = item.lastModified
+                            existing2.indexedAt = indexedAt
+                            existing2.lastSeenAt = scanAt
+                            try existing2.update(db)
+                        }
+                    }
+                } else {
+                    throw error
+                }
+            }
         }
     }
 
@@ -174,35 +345,19 @@ final class ImportWebDAVPhotosUseCase {
 
     private func listRecursively(client: WebDAVClient, path: String, visited: inout Set<String>) async throws -> [WebDAVDirectoryItem] {
         let normalizedPath = normalize(path: path)
-        if visited.contains(normalizedPath) {
-            print("[WebDAVImport] Skip listing already visited path: \(normalizedPath)")
-            return []
-        }
+        if visited.contains(normalizedPath) { return [] }
         visited.insert(normalizedPath)
 
-        // Skip some common system/transient folders
         let lower = normalizedPath.lowercased()
-        if lower.contains("#recycle") || lower.contains("recycle") {
-            print("[WebDAVImport] Skip system path: \(normalizedPath)")
-            return []
-        }
-        // ClickHouse / database transient folders (can appear/disappear during scan)
-        if lower.contains("/tmp_") || lower.contains("tmp_merge") || lower.contains("tmp_mut") {
-            print("[WebDAVImport] Skip transient path: \(normalizedPath)")
-            return []
-        }
+        if lower.contains("#recycle") || lower.contains("recycle") { return [] }
+        if lower.contains("/tmp_") || lower.contains("tmp_merge") || lower.contains("tmp_mut") { return [] }
 
-        print("[WebDAVImport] PROPFIND depth=1 path=\(normalizedPath)")
         var results: [WebDAVDirectoryItem] = []
         let items = try await client.propfind(path: normalizedPath, depth: "1")
-        print("[WebDAVImport] PROPFIND returned \(items.count) items for path=\(normalizedPath)")
 
         for item in items {
             let href = normalize(path: item.href)
-
-            if href == normalizedPath {
-                continue
-            }
+            if href == normalizedPath { continue }
 
             results.append(item)
 
@@ -217,8 +372,8 @@ final class ImportWebDAVPhotosUseCase {
 
     private func normalize(path: String) -> String {
         if path.isEmpty { return "/" }
-        if path == "/" { return "/" }
-        return path.hasPrefix("/") ? path : "/" + path
+        let p = path.hasPrefix("/") ? path : "/" + path
+        return p
     }
 
     private func isSupportedImagePath(_ href: String) -> Bool {

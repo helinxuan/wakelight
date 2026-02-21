@@ -26,6 +26,8 @@ struct AppDatabase {
                 t.column("latitude", .double)
                 t.column("longitude", .double)
                 t.column("thumbnailPath", .text)
+                t.column("modificationDate", .datetime)
+                t.column("lastSeenAt", .datetime) // 用于同步删除
                 t.column("importedAt", .datetime).notNull()
             }
             
@@ -132,7 +134,8 @@ struct AppDatabase {
                 t.column("size", .integer)
                 t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
                 t.column("indexedAt", .datetime).notNull()
-                t.uniqueKey(["profileId", "remotePath", "etag"])
+                t.column("lastSeenAt", .datetime) // 用于同步删除
+                t.uniqueKey(["profileId", "remotePath"])
             }
 
             try db.create(index: "idx_remoteMediaAsset_profile_path", on: "remoteMediaAsset", columns: ["profileId", "remotePath"])
