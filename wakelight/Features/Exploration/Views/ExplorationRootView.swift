@@ -62,16 +62,6 @@ struct ExplorationRootView: View {
                                 .cornerRadius(10)
                         }
 
-                        Button(action: {
-                            print("[Import] Import Photos button tapped")
-                            viewModel.importPhotos()
-                        }) {
-                            Label("Import Photos", systemImage: "photo.on.rectangle")
-                                .padding()
-                                .background(Color.blue)
-                                .foregroundColor(.white)
-                                .cornerRadius(10)
-                        }
                     }
                     .padding(.horizontal)
                     .padding(.top)

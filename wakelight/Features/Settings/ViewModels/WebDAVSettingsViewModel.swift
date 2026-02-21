@@ -142,6 +142,9 @@ final class WebDAVSettingsViewModel: ObservableObject {
             )
             MediaResolver.shared.register(reader: reader)
 
+            // 保存成功后触发一次后台导入（不阻塞 UI）
+            PhotoImportManager.shared.startImportIfNeeded(reason: "webdav_saved")
+
         } catch {
             print("[WebDAV] 保存过程中发生异常: \(error.localizedDescription)")
             testResult = "保存失败: \(error.localizedDescription)"

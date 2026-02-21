@@ -10,6 +10,10 @@ struct SettingsRootView: View {
                         let repo = WebDAVProfileRepository(db: container.db)
                         WebDAVSettingsView(viewModel: WebDAVSettingsViewModel(repo: repo))
                     }
+
+                    NavigationLink("Import Photos") {
+                        ImportPhotosSettingsView()
+                    }
                 }
             }
             .navigationTitle("设置")

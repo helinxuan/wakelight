@@ -17,7 +17,7 @@ final class ImportPhotosUseCase {
         self.writer = writer
     }
 
-    func run(limit: Int? = 200) async throws -> Int {
+    func run(limit: Int? = 200, onProgress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> Int {
         let status = await permissionService.requestAuthorization()
         switch status {
         case .authorized, .limited:
@@ -29,17 +29,24 @@ final class ImportPhotosUseCase {
         }
 
         let assets = try await importService.fetchAssets(limit: limit)
-        if assets.isEmpty { return 0 }
+        if assets.isEmpty {
+            await onProgress?(0, 0)
+            return 0
+        }
+
+        let total = assets.count
+        await onProgress?(0, total)
 
         let importedAt = Date()
+        var processed = 0
 
-        try await writer.write { db in
-            for asset in assets {
-                let localId = asset.localIdentifier
-                let creationDate = asset.creationDate
-                let latitude = asset.location?.coordinate.latitude
-                let longitude = asset.location?.coordinate.longitude
+        for asset in assets {
+            let localId = asset.localIdentifier
+            let creationDate = asset.creationDate
+            let latitude = asset.location?.coordinate.latitude
+            let longitude = asset.location?.coordinate.longitude
 
+            try await writer.write { db in
                 // 增量导入：localIdentifier 唯一，重复则忽略（后续可扩展为字段级更新）
                 if try PhotoAsset.filter(Column("localIdentifier") == localId).fetchOne(db) == nil {
                     let record = PhotoAsset(
@@ -54,6 +61,9 @@ final class ImportPhotosUseCase {
                     try record.insert(db)
                 }
             }
+            
+            processed += 1
+            await onProgress?(processed, total)
         }
 
         return assets.count

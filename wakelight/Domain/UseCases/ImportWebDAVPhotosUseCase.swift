@@ -15,7 +15,7 @@ final class ImportWebDAVPhotosUseCase {
         self.writer = writer
     }
 
-    func run(profileId: String? = nil) async throws -> Int {
+    func run(profileId: String? = nil, onProgress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> Int {
         print("[WebDAVImport] run(profileId: \(profileId ?? "nil"))")
 
         let profile: WebDAVProfile
@@ -38,6 +38,14 @@ final class ImportWebDAVPhotosUseCase {
         let client = WebDAVClient(baseURL: baseURL, credentials: WebDAVCredentials(username: profile.username, password: password))
 
         let rootPath = normalize(path: profile.rootPath ?? "/")
+        if rootPath == "/" {
+            // 用户可能在设置里选择了目录但没点“保存”，导致仍然用默认根目录扫描。
+            // 根目录扫描通常会遇到大量系统/临时目录（例如 ClickHouse 的 tmp_merge_*），可能导致 404。
+            // 这里不阻止导入：只给出提示，并继续扫描。
+            await PhotoImportManager.shared.reportNonFatalWarning(
+                "当前 WebDAV 导入路径是根目录 /（可能还没点击保存）。建议到 设置 → WebDAV 选择照片目录后点击保存，以避免扫描到系统/临时目录。"
+            )
+        }
         print("[WebDAVImport] Start PROPFIND recursively from \(rootPath)")
 
         let importedAt = Date()
@@ -53,6 +61,7 @@ final class ImportWebDAVPhotosUseCase {
         print("[WebDAVImport] Filtered image items=\(imageItems.count)")
 
         if imageItems.isEmpty {
+            await onProgress?(0, 0)
             print("[WebDAVImport] No supported images found")
             return 0
         }
@@ -77,16 +86,20 @@ final class ImportWebDAVPhotosUseCase {
         print("[WebDAVImport] Items to import: \(itemsToImport.count) (skipped \(imageItems.count - itemsToImport.count))")
 
         if itemsToImport.isEmpty {
+            await onProgress?(imageItems.count, imageItems.count)
             return 0
         }
 
         // 2. Concurrent download and EXIF extraction with bounded concurrency
         let concurrency = 4
         let total = itemsToImport.count
-        
+        var completedInSession = 0
+
+        await onProgress?(0, total)
+
         try await withThrowingTaskGroup(of: Void.self) { group in
             var iterator = itemsToImport.enumerated().makeIterator()
-            
+
             // Initial batch
             for _ in 0..<min(concurrency, total) {
                 if let next = iterator.next() {
@@ -95,14 +108,17 @@ final class ImportWebDAVPhotosUseCase {
                     }
                 }
             }
-            
+
             while let _ = try await group.next() {
+                completedInSession += 1
+                importedCount += 1
+                await onProgress?(completedInSession, total)
+
                 if let next = iterator.next() {
                     group.addTask {
                         try await self.importItem(next.element, index: next.offset, total: total, client: client, profile: profile, importedAt: importedAt, indexedAt: indexedAt)
                     }
                 }
-                importedCount += 1
             }
         }
 
@@ -164,9 +180,15 @@ final class ImportWebDAVPhotosUseCase {
         }
         visited.insert(normalizedPath)
 
-        // Skip some common system folders
-        if normalizedPath.lowercased().contains("#recycle") || normalizedPath.lowercased().contains("recycle") {
+        // Skip some common system/transient folders
+        let lower = normalizedPath.lowercased()
+        if lower.contains("#recycle") || lower.contains("recycle") {
             print("[WebDAVImport] Skip system path: \(normalizedPath)")
+            return []
+        }
+        // ClickHouse / database transient folders (can appear/disappear during scan)
+        if lower.contains("/tmp_") || lower.contains("tmp_merge") || lower.contains("tmp_mut") {
+            print("[WebDAVImport] Skip transient path: \(normalizedPath)")
             return []
         }
 
