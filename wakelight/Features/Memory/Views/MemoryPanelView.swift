@@ -548,23 +548,26 @@ private struct StoryNodeRowView: View {
         }
         .task(id: node.id) {
             await loadTimeRange()
-            await loadCoverLocatorKeys()
-        }
-    }
 
-    private func loadCoverLocatorKeys() async {
-        do {
-            let keys: [String] = try await DatabaseContainer.shared.db.reader.read { db in
-                let visitLayerIds = node.subVisitLayerIds
-                guard !visitLayerIds.isEmpty else { return [] }
-                let links = try VisitLayerPhotoAsset.filter(visitLayerIds.contains(Column("visitLayerId"))).fetchAll(db)
-                if links.isEmpty { return [] }
-                let photoIds = Array(Set(links.map { $0.photoAssetId }))
-                let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
-                return locators.map { $0.locatorKey }
+            // 监听 cover locatorKeys，确保导入删除后 UI 自动刷新
+            do {
+                for try await keys in ValueObservation
+                    .tracking({ db in
+                        let visitLayerIds = node.subVisitLayerIds
+                        guard !visitLayerIds.isEmpty else { return [String]() }
+                        let links = try VisitLayerPhotoAsset.filter(visitLayerIds.contains(Column("visitLayerId"))).fetchAll(db)
+                        if links.isEmpty { return [] }
+                        let photoIds = Array(Set(links.map { $0.photoAssetId }))
+                        let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+                        return locators.map { $0.locatorKey }
+                    })
+                    .values(in: DatabaseContainer.shared.db.reader) {
+                    self.coverLocatorKeys = Array(keys.prefix(12))
+                }
+            } catch {
+                // ignore observation errors
             }
-            await MainActor.run { self.coverLocatorKeys = Array(keys.prefix(12)) }
-        } catch {}
+        }
     }
 
     private func loadTimeRange() async {
@@ -634,7 +637,25 @@ private struct VisitLayerRowView: View {
         .onLongPressGesture(minimumDuration: 0.35) { onLongPressSelect() }
         .buttonStyle(.plain)
         .onAppear { draftText = layer.userText ?? "" }
-        .task { await loadLocatorKeys() }
+        .task {
+            // 监听 locatorKeys，确保导入删除后 UI 自动刷新
+            do {
+                for try await keys in ValueObservation
+                    .tracking({ db in
+                        let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
+                        if links.isEmpty { return [String]() }
+                        let photoIds = links.map { $0.photoAssetId }
+                        let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+                        let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+                        return photoIds.compactMap { locatorById[$0] }
+                    })
+                    .values(in: DatabaseContainer.shared.db.reader) {
+                    self.locatorKeys = keys
+                }
+            } catch {
+                // ignore observation errors
+            }
+        }
     }
 
     private func generateAIText() {
@@ -707,12 +728,35 @@ private struct VisitLayerRowView: View {
 
     private func loadLocatorKeys() async {
         do {
+            let debugName = "IMG_2498.HEIC"
             let keys: [String] = try await DatabaseContainer.shared.db.reader.read { db in
+                // Debug: 打印 UI 读取侧的数据库物理路径与表计数（避免刷屏：每个 layer 都会调用，这里只在命中 debugName 时再打印）
                 let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
                 if links.isEmpty { return [] }
                 let photoIds = links.map { $0.photoAssetId }
                 let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
                 let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+
+                // Debug: 如果某张图仍然显示某个已删除的文件名，打印其来源（visitLayerId/photoAssetId/locatorKey）
+                // 同时打印 UI 读取侧 DB 的物理路径与表计数，用于排查“导入写库”和“UI 读库”不一致。
+                for pid in photoIds {
+                    if let key = locatorById[pid], key.localizedCaseInsensitiveContains(debugName) {
+                        let rows = try Row.fetchAll(db, sql: "PRAGMA database_list")
+                        let desc = rows.map { row in
+                            let name: String = row["name"]
+                            let file: String = row["file"]
+                            return "\(name)=\(file)"
+                        }.joined(separator: ", ")
+                        let c1 = try PhotoAsset.fetchCount(db)
+                        let c2 = try RemoteMediaAsset.fetchCount(db)
+                        let c3 = try VisitLayerPhotoAsset.fetchCount(db)
+                        print("[MemoryPanel][DB] database_list: \(desc)")
+                        print("[MemoryPanel][DB] counts: photoAsset=\(c1), remoteMediaAsset=\(c2), visitLayerPhotoAsset=\(c3)")
+
+                        print("[MemoryPanel][Debug2500] visitLayerId=\(layer.id) photoAssetId=\(pid) locatorKey=\(key)")
+                    }
+                }
+
                 return photoIds.compactMap { locatorById[$0] }
             }
             await MainActor.run { self.locatorKeys = keys }
