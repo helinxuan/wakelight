@@ -25,14 +25,14 @@ final class GeneratePlaceClustersUseCase {
             }
 
             var upserted = 0
+            let newKeys = Set(buckets.keys)
+
             for (key, items) in buckets {
                 guard !items.isEmpty else { continue }
-
+                // ... 原有逻辑保持不变 ...
                 let centerLat = items.compactMap { $0.latitude }.reduce(0.0, +) / Double(items.count)
                 let centerLon = items.compactMap { $0.longitude }.reduce(0.0, +) / Double(items.count)
 
-                // 这里用 key 的 hash 作为稳定 id（避免重复生成）。
-                // MVP 先用 UUID(name-based) 的简化实现。
                 let id = UUID(uuidString: UUID.v5String(namespace: UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!, name: key)) ?? UUID()
 
                 let cluster = PlaceCluster(
@@ -48,7 +48,6 @@ final class GeneratePlaceClustersUseCase {
                     lastVisitedAt: items.compactMap { $0.creationDate }.max()
                 )
 
-                // 用 geohash (key) 作为唯一性来源：存在则更新，不存在则插入
                 let existing = try PlaceCluster
                     .filter(Column("geohash") == key)
                     .fetchOne(db)
@@ -66,6 +65,17 @@ final class GeneratePlaceClustersUseCase {
 
                 upserted += 1
             }
+
+            // 同步删除：清理不再有照片的旧光点
+            let deletedCount = try PlaceCluster
+                .filter(!newKeys.contains(Column("geohash")))
+                .deleteAll(db)
+            
+            if deletedCount > 0 {
+                print("[GenerateClusters] Deleted \(deletedCount) stale clusters with no photos")
+            }
+
+            return upserted
 
             return upserted
         }

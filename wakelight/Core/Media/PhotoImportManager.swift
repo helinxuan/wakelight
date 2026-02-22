@@ -77,7 +77,6 @@ final class PhotoImportManager: ObservableObject {
 
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
-
             // A) 本地 Photos 导入（宽松模式：权限拒绝只跳过，不让整个导入失败）
             await self.updateStatus(.importing, phase: .photos, resetCounts: true)
 
