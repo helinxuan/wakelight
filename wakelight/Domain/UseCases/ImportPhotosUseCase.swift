@@ -33,7 +33,8 @@ final class ImportPhotosUseCase {
                     let hasChanged = (existing.creationDate != creationDate) ||
                                      (existing.latitude != latitude) ||
                                      (existing.longitude != longitude) ||
-                                     (existing.modificationDate != modificationDate)
+                                     (existing.modificationDate != modificationDate) ||
+                                     (existing.mediaType?.rawValue != (asset.mediaType == .video ? "video" : "photo"))
 
                     existing.lastSeenAt = scanAt
                     if hasChanged {
@@ -41,17 +42,57 @@ final class ImportPhotosUseCase {
                         existing.latitude = latitude
                         existing.longitude = longitude
                         existing.modificationDate = modificationDate
+                        
+                        // Update new metadata fields
+                        existing.mediaType = asset.mediaType == .video ? .video : .photo
+                        existing.uti = asset.value(forKey: "uniformTypeIdentifier") as? String
+                        existing.pixelWidth = asset.pixelWidth
+                        existing.pixelHeight = asset.pixelHeight
+                        existing.duration = asset.mediaType == .video ? asset.duration : nil
+                        
+                        // Reset cached thumbnail if the source changed
                         existing.thumbnailPath = nil
+                        existing.thumbnailUpdatedAt = nil
                     }
                     try existing.update(db)
+
+                    // Generate / backfill disk thumbnail asynchronously
+                    let recordId = existing.id
+                    let locator = MediaLocator.library(localIdentifier: localId)
+                    let mediaType = existing.mediaType ?? .photo
+                    Task.detached(priority: .background) {
+                        do {
+                            let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                            try await DatabaseContainer.shared.writer.write { db in
+                                if var asset = try PhotoAsset.fetchOne(db, key: recordId) {
+                                    asset.thumbnailPath = path
+                                    asset.thumbnailUpdatedAt = Date()
+                                    try asset.update(db)
+                                }
+                            }
+                        } catch {
+                            print("[PhotoImport] Thumbnail generation failed for \(localId): \(error)")
+                        }
+                    }
                 } else {
+                    let recordId = UUID()
                     let record = PhotoAsset(
-                        id: UUID(),
+                        id: recordId,
                         localIdentifier: localId,
                         creationDate: creationDate,
                         latitude: latitude,
                         longitude: longitude,
+
+                        mediaType: asset.mediaType == .video ? .video : .photo,
+                        uti: asset.value(forKey: "uniformTypeIdentifier") as? String,
+                        pixelWidth: asset.pixelWidth,
+                        pixelHeight: asset.pixelHeight,
+                        duration: asset.mediaType == .video ? asset.duration : nil,
+
                         thumbnailPath: nil,
+                        thumbnailUpdatedAt: nil,
+                        thumbnailCacheKey: nil,
+
                         modificationDate: modificationDate,
                         lastSeenAt: scanAt,
                         importedAt: importedAt
@@ -59,6 +100,24 @@ final class ImportPhotosUseCase {
 
                     do {
                         try record.insert(db)
+
+                        // Generate disk thumbnail asynchronously
+                        let locator = MediaLocator.library(localIdentifier: localId)
+                        let mediaType = record.mediaType ?? .photo
+                        Task.detached(priority: .background) {
+                            do {
+                                let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                                try await DatabaseContainer.shared.writer.write { db in
+                                    if var asset = try PhotoAsset.fetchOne(db, key: recordId) {
+                                        asset.thumbnailPath = path
+                                        asset.thumbnailUpdatedAt = Date()
+                                        try asset.update(db)
+                                    }
+                                }
+                            } catch {
+                                print("[PhotoImport] Thumbnail generation failed for \(localId): \(error)")
+                            }
+                        }
                     } catch {
                         // 并发竞态：如果另一个任务刚插入了同一个 localIdentifier
                         if let dbError = error as? DatabaseError,

@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import UIKit
 import SwiftUI
+import GRDB
 
 final class PhotoThumbnailLoader {
     static let shared = PhotoThumbnailLoader()
@@ -16,6 +17,49 @@ final class PhotoThumbnailLoader {
     }
 
     // MARK: - Public
+
+    /// 加载缩略图，优先从磁盘缓存读取，失败则即时加载并异步补齐磁盘缓存。
+    func loadThumbnailWithDiskCache(locatorKey: String, size: CGSize) async -> UIImage? {
+        // 1. 优先尝试从数据库查找已缓存的缩略图路径
+        if let cachedPath = try? await DatabaseContainer.shared.db.reader.read({ db in
+            try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.thumbnailPath
+        }), let cachedImage = UIImage(contentsOfFile: cachedPath) {
+            return cachedImage
+        }
+
+        // 2. 没找到磁盘缓存，走内存缓存/即时加载老路
+        let image = await loadThumbnail(locatorKey: locatorKey, size: size)
+
+        // 3. 异步触发后台补齐（将该图落盘，下次就快了）
+        if let image = image, let locator = MediaLocator.parse(locatorKey) {
+            triggerBackfill(locator: locator, locatorKey: locatorKey)
+        }
+
+        return image
+    }
+
+    /// 触发后台补齐缩略图缓存
+    private func triggerBackfill(locator: MediaLocator, locatorKey: String) {
+        Task.detached(priority: .background) {
+            do {
+                // 查一下 mediaType 辅助生成
+                let mediaType = try await DatabaseContainer.shared.db.reader.read { db in
+                    try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.mediaType ?? .photo
+                }
+                let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                try await DatabaseContainer.shared.writer.write { db in
+                    if var asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                        asset.thumbnailPath = path
+                        asset.thumbnailUpdatedAt = Date()
+                        try asset.update(db)
+                    }
+                }
+                print("[ThumbLoader] Backfill success: \(locatorKey)")
+            } catch {
+                print("[ThumbLoader] Backfill failed: \(error)")
+            }
+        }
+    }
 
     func loadThumbnail(locatorKey: String, size: CGSize) async -> UIImage? {
         guard let locator = MediaLocator.parse(locatorKey) else {
@@ -167,7 +211,13 @@ struct ThumbnailView: View {
         .clipped()
         .cornerRadius(4)
         .task(id: "\(locatorKey)-\(Int(size.width))x\(Int(size.height))") {
-            image = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: size)
+            image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: size)
+        }
+    }
+
+    private func fetchThumbnailPath(for locatorKey: String) async -> String? {
+        try? await DatabaseContainer.shared.db.reader.read { db in
+            try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.thumbnailPath
         }
     }
 }
@@ -198,8 +248,16 @@ struct FullImageView: View {
         }
         .task(id: locatorKey) {
             isLoading = true
-            // 加载一个中等尺寸的作为预览
-            image = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: 800, height: 800))
+            
+            // 1. 优先从磁盘缓存读取缩略图作为极速预览
+            image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: CGSize(width: 320, height: 320))
+            
+            // 2. 如果没能加载到缩略图（比如还没落盘），则尝试加载一个中等尺寸的作为预览（走内存缓存/即时解码）
+            if image == nil {
+                image = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: 800, height: 800))
+            }
+            
+            // 3. 最后加载全量大图
             if let fullRes = await PhotoThumbnailLoader.shared.loadFullImage(locatorKey: locatorKey) {
                 image = fullRes
             }

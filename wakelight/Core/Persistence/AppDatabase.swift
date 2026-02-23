@@ -3,35 +3,48 @@ import GRDB
 
 struct AppDatabase {
     let writer: DatabaseWriter
-    
+
     init(_ writer: DatabaseWriter) throws {
         self.writer = writer
         try migrator.migrate(writer)
     }
-    
+
     /// 数据库迁移配置
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
-        
+
         #if DEBUG
         migrator.eraseDatabaseOnSchemaChange = true
         #endif
-        
+
         migrator.registerMigration("v1-initial-schema") { db in
-            // 5.2.1 PhotoAsset
+            // PhotoAsset (media asset: photo/video)
             try db.create(table: "photoAsset") { t in
                 t.column("id", .text).primaryKey()
                 t.column("localIdentifier", .text).unique()
                 t.column("creationDate", .datetime)
                 t.column("latitude", .double)
                 t.column("longitude", .double)
+
+                // Cached thumbnails
                 t.column("thumbnailPath", .text)
+                t.column("thumbnailUpdatedAt", .datetime)
+                t.column("thumbnailCacheKey", .text)
+
+                // Media metadata
+                t.column("mediaType", .text) // photo | video
+                t.column("uti", .text)
+                t.column("pixelWidth", .integer)
+                t.column("pixelHeight", .integer)
+                t.column("duration", .double) // seconds (video only)
+
+                // Sync / bookkeeping
                 t.column("modificationDate", .datetime)
                 t.column("lastSeenAt", .datetime) // 用于同步删除
                 t.column("importedAt", .datetime).notNull()
             }
-            
-            // 5.2.2 PlaceCluster
+
+            // PlaceCluster
             try db.create(table: "placeCluster") { t in
                 t.column("id", .text).primaryKey()
                 t.column("centerLatitude", .double).notNull()
@@ -45,8 +58,8 @@ struct AppDatabase {
                 t.column("hasStory", .boolean).notNull().defaults(to: false)
                 t.column("lastVisitedAt", .datetime)
             }
-            
-            // 5.2.3 VisitLayer
+
+            // VisitLayer
             try db.create(table: "visitLayer") { t in
                 t.column("id", .text).primaryKey()
                 t.column("placeClusterId", .text).notNull().references("placeCluster", onDelete: .cascade)
@@ -59,7 +72,7 @@ struct AppDatabase {
                 t.column("settledAt", .datetime)
             }
 
-            // 5.2.4 StoryNode (必须在 timeRouteNode 之前创建，因为有外键引用)
+            // StoryNode (must be before timeRouteNode due to FK)
             try db.create(table: "storyNode") { t in
                 t.column("id", .text).primaryKey()
                 t.column("placeClusterId", .text).notNull().references("placeCluster", onDelete: .cascade)
@@ -70,8 +83,8 @@ struct AppDatabase {
                 t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
-            
-            // 5.2.5 TimeRouteNode (时光模式节点)
+
+            // TimeRouteNode
             try db.create(table: "timeRouteNode") { t in
                 t.column("id", .text).primaryKey()
                 t.column("visitLayerId", .text).notNull().references("visitLayer", onDelete: .cascade)
@@ -80,8 +93,8 @@ struct AppDatabase {
                 t.column("displayTitle", .text)
                 t.column("displaySummary", .text)
             }
-            
-            // 5.2.6 AchievementProgress
+
+            // AchievementProgress
             try db.create(table: "achievementProgress") { t in
                 t.column("id", .text).primaryKey()
                 t.column("achievementId", .text).notNull().unique()
@@ -91,7 +104,7 @@ struct AppDatabase {
                 t.column("updatedAt", .datetime).notNull()
             }
 
-            // 5.2.7 AwakenState
+            // AwakenState
             try db.create(table: "awakenState") { t in
                 t.column("id", .text).primaryKey()
                 t.column("placeClusterId", .text).notNull().unique().references("placeCluster", onDelete: .cascade)
@@ -102,7 +115,7 @@ struct AppDatabase {
                 t.column("updatedAt", .datetime).notNull()
             }
 
-            // 5.2.8 VisitLayerPhotoAsset (关联表)
+            // VisitLayerPhotoAsset (join table)
             try db.create(table: "visitLayerPhotoAsset") { t in
                 t.column("visitLayerId", .text).notNull().references("visitLayer", onDelete: .cascade)
                 t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
@@ -141,7 +154,7 @@ struct AppDatabase {
             try db.create(index: "idx_remoteMediaAsset_profile_path", on: "remoteMediaAsset", columns: ["profileId", "remotePath"])
             try db.create(index: "idx_remoteMediaAsset_photoAssetId", on: "remoteMediaAsset", columns: ["photoAssetId"])
         }
-        
+
         return migrator
     }
 }

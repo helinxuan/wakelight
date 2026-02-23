@@ -237,13 +237,29 @@ Wakelight/
 
 ## 5.2 GRDB 数据模型（建议 MVP 必需集）
 
+> **迁移说明（最小改动、向后兼容）**：
+> - 本轮为支持 **RAW（RW2 等）** 与 **视频（MP4/MOV 等）**，对 `PhotoAsset` 做“加列不改表名”的最小增量。
+> - 旧数据：历史记录缺失 `mediaType/uti/pixelWidth/pixelHeight/duration/thumbnailUpdatedAt/thumbnailCacheKey` 时允许为 `NULL`；读取时按默认值处理（例如 `mediaType` 默认 `photo`）。
+> - 缩略图重建：当 `thumbnailPath` 缺失、文件被 LRU 淘汰、或媒体版本指纹变化（WebDAV 的 `etag`/`lastModified+size`）时，触发后台重建并更新 `thumbnailUpdatedAt`。
+
 ### 5.2.1 `PhotoAsset`
+
+> 说明：该表名沿用 `PhotoAsset`，但逻辑上代表“媒体资产（照片/视频）”。为避免大改代码与表结构，本阶段以 **最小字段增量** 支持 RAW 与视频；后续若需要更强表达力可再抽象为 `MediaAsset`。
 
 - `id: UUID` (PK)
 - `localIdentifier: String`（PHAsset id 或 `webdav://...` URI，唯一索引）
 - `creationDate: Date`
 - `latitude: Double?`, `longitude: Double?`
-- `thumbnailPath: String?`
+
+- `mediaType: String`（`photo` / `video`；**新增**，用于决定缩略图生成管线：downsample vs 抽帧）
+- `uti: String?`（Uniform Type Identifier，如 `public.jpeg`/`public.heic`/`com.panasonic.rw2-raw-image`/`public.mpeg-4`；**新增**）
+- `pixelWidth: Int?`, `pixelHeight: Int?`（**新增**，便于 UI 预布局/按比例裁切）
+- `duration: Double?`（秒；仅视频；**新增**）
+
+- `thumbnailPath: String?`（缩略图落盘路径）
+- `thumbnailUpdatedAt: Date?`（缩略图最后生成时间；**新增**）
+- `thumbnailCacheKey: String?`（可选：缩略图缓存 key；用于路径迁移/重建；**新增，可为空**）
+
 - `importedAt: Date`
 
 ### 5.2.2 `RemoteMediaAsset`（WebDAV 专用，建议）
@@ -487,6 +503,10 @@ stateDiagram-v2
 - 本地 file：直接 `FileHandle` / `CGImageSourceCreateWithURL`
 - WebDAV：通过 `URLSession` 下载到内存或临时文件，再用 `CGImageSourceCreateWithData/URL`
 
+> 说明：这里的“统一读取”覆盖 **照片（含 RAW）** 与 **视频** 两类媒体，但二者的解码管线不同：
+> - 照片/RAW：ImageIO（`CGImageSource`）为主。
+> - 视频：AVFoundation（`AVAsset`）为主，最终仍产出一张封面 `CGImage/UIImage` 进入统一的缩略图缓存。
+
 约束：
 - 缩略图与 EXIF 提取逻辑**不得**直接依赖 Photos/WebDAV SDK；只依赖 `MediaReader`。
 
@@ -498,21 +518,35 @@ stateDiagram-v2
 
 UI 展示策略：
 - 有 `thumbnailPath`：直接从本地 `file://` 读
-- 无 `thumbnailPath`：通过 `MediaReader` 从源端 downsample 即时生成，写回 `MediaCache` 并回填 `thumbnailPath`
+- 无 `thumbnailPath`：通过 `MediaReader` 从源端 downsample/抽帧 即时生成，写回 `MediaCache` 并回填 `thumbnailPath`
+
+补充约束（RAW / 视频）：
+- RAW（如 RW2）与视频的“即时生成”都可能很慢：**允许首屏兜底显示低质量/占位图**，但必须尽快在后台生成并落盘，以保证后续滚动/地图交互稳定。
+- 缩略图文件格式统一（建议 JPEG；或后续根据系统能力改为 HEIC），避免按源格式扩散导致缓存不可控。
 
 ### 6.3.4 WebDAV 轻量索引（路径 B）的范围
 
 做什么：
 - 递归列目录（`Depth: 1` + 递归）拿到文件列表
-- 对每个图片文件获取稳定“版本指纹”（`etag` 优先，否则 `lastModified + size`）
+- 对每个媒体文件获取稳定“版本指纹”（`etag` 优先，否则 `lastModified + size`）
 - 若本地不存在该版本元数据：
-  - 下载该图片（或后续优化为部分下载）
-  - 用 ImageIO 提取 EXIF（时间、GPS）
-  - 写入本地 DB（`PhotoAsset`）与远程映射表（见 5.2.x）
+  - **照片（含 RAW，如 RW2）**：下载文件（或后续优化为部分下载）→ 用 ImageIO 提取 EXIF（时间、GPS）→ 写入本地 DB（`PhotoAsset`）与远程映射表（见 5.2.x）
+  - **视频（MP4/MOV 等）**：
+    - 元数据：尽量先用 WebDAV 的 `PROPFIND` 字段（`getlastmodified`/`getcontentlength`/`etag`）建立版本指纹；必要时再下载到临时文件用 AVFoundation 补齐（例如 creation time）。
+    - 缩略图：通过 `AVAssetImageGenerator` 抽取封面帧，写入 `MediaCache`，并回填 `thumbnailPath`。
 
 不做什么：
-- 不把原图保存到本地（避免爆存储/隐私/重复）
+- 不把原图/原视频长期保存到本地（避免爆存储/隐私/重复）
 - 不要求“先导入才能看图”：缩略图可按需生成并缓存
+
+### 6.3.5 WebDAV 视频的远程处理策略（避免“反复整段下载”）
+
+- **目标**：地图/列表滚动时不反复下载同一视频，不在交互主线程抽帧。
+- **建议策略（阶段性可逐步增强）**：
+  1) 优先命中 `thumbnailPath`（磁盘缩略图）
+  2) 未命中时：允许下载到 **临时文件**（tmp）用于一次性抽帧；抽到的封面图必须落 `MediaCache`，临时视频文件可立即删除
+  3) 若后续需要更强性能：可引入“分段请求 + 只拉 moov header”的优化，但这属于后续优化项，不阻塞当前架构
+- **一致性**：当 `etag/lastModified/size` 变化时，认为远端视频已更新，需要重建缩略图并更新 `thumbnailPath`
 
 > **当前产品策略（阶段性）**：WebDAV 导入暂时仅提供“设置页手动触发”，且实现为全量扫描（递归 PROPFIND）；不参与冷启动/自动导入，以避免耗时与耗电。后续如确有性能需求，再引入客户端目录游标等增量枚举机制。
 
@@ -572,16 +606,60 @@ flowchart LR
 
 ## 7.2 显影与缩略图（Story Thumbnail）
 
-- **目标**：地图默认只展示“足迹光点”，当 VisitLayer 被沉淀为 Story Node 后，在地图上显影为“照片缩略图节点”。
+- **目标**：地图默认只展示“足迹光点”，当 VisitLayer 被沉淀为 Story Node 后，在地图上显影为“照片/视频封面缩略图节点（Story Node Thumbnail）”。
 - **渲染承载方式**：
   - 足迹光点：`MKAnnotation`（支持 MapKit clustering）。
   - 缩略图节点：自定义 annotation view（按缩放等级切换展示样式：小尺寸缩略图/封面卡片）。
-- **缩略图生成与缓存**：
-  - 缩略图在后台队列生成并写入文件缓存（LRU），数据库只存路径与版本号/尺寸等元信息。
-  - 触发点：`StorySettled`（写话/收藏/标记精华）或系统策展确认。
-- **性能约束**：
+
+### 7.2.1 两条链路并存（不推翻原先“能显示缩略图”的实现）
+
+> **定位**：
+> - “即时加载链路（Runtime Loader）”负责 **展示当下能看到的图**（少量/开发期/兜底）。
+> - “落盘缩略图链路（Disk Thumbnail Cache）”负责 **把缩略图沉淀为可复用资产**（WebDAV + 视频 + 大量点位时的稳定体验）。
+
+**A. 即时加载链路（Runtime Loader，老路，兜底）**
+- 代表实现：`Core/Media/PhotoThumbnailLoader`（Photos / WebDAV / file 统一对外提供缩略图/全图的按需加载）。
+- 特征：
+  - **UI 需要时**从源头取图（Photos 由系统内部做一定缓存/降采样；WebDAV/file 直接解码）。
+  - **内存缓存**：使用 `NSCache`（如 `thumbnailCache` / `fullImageCache`）减少短时间重复解码。
+- 适用场景：
+  - Photos 源（`library://`）为主，或数量较少的列表/详情展示。
+  - 作为 `thumbnailPath` 缺失/失效时的兜底。
+
+**B. 落盘缩略图链路（Disk Thumbnail Cache，新路，主路径）**
+- 数据面：`PhotoAsset.thumbnailPath`（DB 存相对/绝对路径均可，但需统一约定；建议存相对路径，便于迁移）。
+- 存储面：`Core/Media/MediaCache`
+  - `Caches/thumbnails/<cacheKey>.jpg`（缩略图）
+  - （可选）`Caches/previews/<cacheKey>.jpg`（预览图，给详情页/编辑页用）
+- UI 展示策略（**保持现有 UI 基本不动**）：
+  1) **优先读** `PhotoAsset.thumbnailPath` → `UIImage(contentsOfFile:)`
+  2) 若没有/读取失败 → 走 `PhotoThumbnailLoader` 即时取图
+  3) 后台补全：生成缩略图写入 `MediaCache`，并回填 `thumbnailPath`（下次直接命中磁盘缓存）
+
+### 7.2.2 缩略图生成与缓存（统一口径）
+
+- **触发点**：
+  - 强触发：`StorySettled`（写话/收藏/标记精华）或系统策展确认 → 生成/刷新对应 Story 封面缩略图。
+  - 弱触发：列表/地图首次展示但 `thumbnailPath` 缺失 → 先即时加载保证体验，同时后台补齐落盘缓存。
+- **性能约束（红线）**：
   - 禁止在地图交互主线程实时生成缩略图。
+  - 缩略图生成必须在后台队列（可取消/可合并）执行。
   - 缩略图节点数量需受控（例如每个 PlaceCluster Top 3–5），避免过载。
+- **缓存淘汰**：`MediaCache` 采用 LRU（按文件访问时间/大小）控制上限；DB 中 `thumbnailPath` 若指向已被淘汰文件，读取失败后自动回退即时链路并重建。
+
+### 7.2.3 格式支持（扩展口径：RAW + 视频）
+
+> 本节只定义“架构上应该如何支持”，不要求一次性把所有格式都做完。
+
+- **常见照片格式**：JPEG/HEIC/PNG/TIFF（ImageIO/Photos 均可处理）
+- **RAW（包含 Panasonic RW2）**：
+  - Photos（`library://`）：由 `PHImageManager.requestImage(...)` 输出目标尺寸 `UIImage`（系统可解码 RAW 并做渲染；App 不需要自己落盘转换原始 RAW）。
+  - WebDAV / file：通过 ImageIO 的 RAW 解码链路生成缩略图（`CGImageSource` + downsample / 或 `CIRAWFilter` 视情况）。缩略图最终仍统一写为 JPEG（或 HEIC）到 `MediaCache`。
+  - 约束：RAW 解码成本高，**必须**优先落盘缓存，避免滚动/地图反复解码。
+- **视频（MP4 / MOV 等）**：
+  - Photos（`library://`）：优先使用 `PHImageManager`/`PHCachingImageManager` 请求视频 poster/目标尺寸图。
+  - WebDAV / file：使用 `AVAssetImageGenerator` 抽取封面帧（可固定取 0s 或 middle frame；最终写入 `MediaCache`）。
+  - 约束：抽帧前如需远程下载，避免把整段视频长期缓存；可允许临时文件参与抽帧，但缩略图必须落盘复用。
 
 ## 7.3 成就系统（事件驱动终极版）
 

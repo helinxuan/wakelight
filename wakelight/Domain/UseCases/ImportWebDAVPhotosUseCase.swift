@@ -59,15 +59,15 @@ final class ImportWebDAVPhotosUseCase {
         let allItems = try await listRecursively(client: client, path: rootPath)
         print("[WebDAVImport] PROPFIND finished, total items=\(allItems.count)")
 
-        let imageItems = allItems.filter { item in
+        let mediaItems = allItems.filter { item in
             guard !item.isCollection else { return false }
-            return isSupportedImagePath(item.href)
+            return isSupportedMediaPath(item.href)
         }
-        print("[WebDAVImport] Filtered image items=\(imageItems.count)")
+        print("[WebDAVImport] Filtered media items=\(mediaItems.count)")
 
-        if imageItems.isEmpty {
+        if mediaItems.isEmpty {
             await onProgress?(0, 0)
-            print("[WebDAVImport] No supported images found")
+            print("[WebDAVImport] No supported media found")
             return WebDAVImportResult(importedCount: 0, deletedPhotoIds: [])
         }
 
@@ -117,7 +117,7 @@ final class ImportWebDAVPhotosUseCase {
             return sizeChanged || dateChanged
         }
 
-        let itemsToImport = imageItems.filter { item in
+        let itemsToImport = mediaItems.filter { item in
             let remotePath = normalize(path: item.href)
             if let existing = existingAssets[remotePath] {
                 return hasItemChanged(existing, item)
@@ -125,7 +125,7 @@ final class ImportWebDAVPhotosUseCase {
             return true
         }
 
-        let unchangedItems = imageItems.filter { item in
+        let unchangedItems = mediaItems.filter { item in
             let remotePath = normalize(path: item.href)
             guard let existing = existingAssets[remotePath] else { return false }
             return !hasItemChanged(existing, item)
@@ -141,7 +141,7 @@ final class ImportWebDAVPhotosUseCase {
             }
         }
 
-        print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total images: \(imageItems.count))")
+        print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total media: \(mediaItems.count))")
 
         if !itemsToImport.isEmpty {
             let concurrency = 4
@@ -226,22 +226,21 @@ final class ImportWebDAVPhotosUseCase {
         scanAt: Date
     ) async throws {
         let remotePath = normalize(path: item.href)
-        print("[WebDAVImport] [\(index+1)/\(total)] Downloading: \(remotePath)")
+        print("[WebDAVImport] [\(index+1)/\(total)] Processing: \(remotePath)")
 
         let data = try await client.get(path: remotePath)
-        var exif = extractExif(from: data)
+        let metadata = extractMetadata(from: data, fileName: remotePath)
 
         // Copy out values used inside the DB write closure to satisfy Swift 6 strict concurrency rules.
         // We will update these if we later find GPS in a sidecar XMP.
-        let creationDate = exif.creationDate
-        var latitude = exif.latitude
-        var longitude = exif.longitude
+        let creationDate = metadata.creationDate
+        var latitude = metadata.latitude
+        var longitude = metadata.longitude
 
-        // Fallback: if the JPG has no embedded GPS, try the sidecar XMP (e.g. "P1068350.JPG.xmp").
+        // Fallback: if the file has no embedded GPS, try the sidecar XMP (e.g. "P1068350.JPG.xmp").
         if latitude == nil || longitude == nil {
-            let xmpPath1 = remotePath + ".xmp" // "P1068350.JPG" -> "P1068350.JPG.xmp"
+            let xmpPath1 = remotePath + ".xmp"
             let xmpPath2: String? = {
-                // Also try "P1068350.xmp" (without the .JPG part) for compatibility.
                 let ext = (remotePath as NSString).pathExtension
                 guard !ext.isEmpty else { return nil }
                 let withoutExt = (remotePath as NSString).deletingPathExtension
@@ -261,8 +260,6 @@ final class ImportWebDAVPhotosUseCase {
 
                 let xmpGps = parseXmpGps(xmpString)
                 if let lat = xmpGps.latitude, let lon = xmpGps.longitude {
-                    exif.latitude = lat
-                    exif.longitude = lon
                     latitude = lat
                     longitude = lon
                     break
@@ -300,12 +297,37 @@ final class ImportWebDAVPhotosUseCase {
                         creationDate: creationDate,
                         latitude: latitude,
                         longitude: longitude,
+                        mediaType: metadata.mediaType,
+                        uti: metadata.uti,
+                        pixelWidth: metadata.pixelWidth,
+                        pixelHeight: metadata.pixelHeight,
+                        duration: metadata.duration,
                         thumbnailPath: nil,
+                        thumbnailUpdatedAt: nil,
+                        thumbnailCacheKey: nil,
                         modificationDate: nil,
                         lastSeenAt: scanAt,
                         importedAt: importedAt
                     )
                     try record.insert(db)
+
+                    // Trigger background thumbnail generation for updated asset
+                    let locator = MediaLocator.webdav(profileId: profile.id.uuidString, remotePath: remotePath)
+                    let mediaType = metadata.mediaType
+                    Task.detached(priority: .background) {
+                        do {
+                            let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                            try await DatabaseContainer.shared.writer.write { db in
+                                if var asset = try PhotoAsset.fetchOne(db, key: newPhotoId.uuidString) {
+                                    asset.thumbnailPath = path
+                                    asset.thumbnailUpdatedAt = Date()
+                                    try asset.update(db)
+                                }
+                            }
+                        } catch {
+                            print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
+                        }
+                    }
 
                     existing.photoAssetId = newPhotoId
                     existing.etag = item.etag
@@ -329,15 +351,40 @@ final class ImportWebDAVPhotosUseCase {
             let record = PhotoAsset(
                 id: photoId,
                 localIdentifier: nil,
-                creationDate: exif.creationDate,
-                latitude: exif.latitude,
-                longitude: exif.longitude,
+                creationDate: creationDate,
+                latitude: latitude,
+                longitude: longitude,
+                mediaType: metadata.mediaType,
+                uti: metadata.uti,
+                pixelWidth: metadata.pixelWidth,
+                pixelHeight: metadata.pixelHeight,
+                duration: metadata.duration,
                 thumbnailPath: nil,
+                thumbnailUpdatedAt: nil,
+                thumbnailCacheKey: nil,
                 modificationDate: nil,
                 lastSeenAt: scanAt,
                 importedAt: importedAt
             )
             try record.insert(db)
+
+            // Trigger background thumbnail generation for new asset
+            let locator = MediaLocator.webdav(profileId: profile.id.uuidString, remotePath: remotePath)
+            let mediaType = metadata.mediaType
+            Task.detached(priority: .background) {
+                do {
+                    let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                    try await DatabaseContainer.shared.writer.write { db in
+                        if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
+                            asset.thumbnailPath = path
+                            asset.thumbnailUpdatedAt = Date()
+                            try asset.update(db)
+                        }
+                    }
+                } catch {
+                    print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
+                }
+            }
 
             let remote = RemoteMediaAsset(
                 id: UUID(),
@@ -372,10 +419,17 @@ final class ImportWebDAVPhotosUseCase {
                             let record2 = PhotoAsset(
                                 id: newPhotoId2,
                                 localIdentifier: nil,
-                                creationDate: exif.creationDate,
-                                latitude: exif.latitude,
-                                longitude: exif.longitude,
+                                creationDate: creationDate,
+                                latitude: latitude,
+                                longitude: longitude,
+                                mediaType: metadata.mediaType,
+                                uti: metadata.uti,
+                                pixelWidth: metadata.pixelWidth,
+                                pixelHeight: metadata.pixelHeight,
+                                duration: metadata.duration,
                                 thumbnailPath: nil,
+                                thumbnailUpdatedAt: nil,
+                                thumbnailCacheKey: nil,
                                 modificationDate: nil,
                                 lastSeenAt: scanAt,
                                 importedAt: importedAt
@@ -447,46 +501,86 @@ final class ImportWebDAVPhotosUseCase {
         return normalized
     }
 
-    private func isSupportedImagePath(_ href: String) -> Bool {
+    private func isSupportedMediaPath(_ href: String) -> Bool {
         let lower = href.lowercased()
-        return lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".heic")
+        let extensions = [
+            // Photos
+            ".jpg", ".jpeg", ".png", ".heic", ".tiff",
+            // RAW
+            ".rw2", ".dng", ".nef", ".arw", ".cr2", ".cr3", ".orf", ".raf",
+            // Videos
+            ".mp4", ".mov", ".m4v"
+        ]
+        return extensions.contains { lower.hasSuffix($0) }
     }
 
-    private struct ExifExtract {
+    private struct MediaMetadata {
         var creationDate: Date?
         var latitude: Double?
         var longitude: Double?
+        var mediaType: PhotoAsset.MediaType
+        var uti: String?
+        var pixelWidth: Int?
+        var pixelHeight: Int?
+        var duration: Double?
     }
 
-    private func extractExif(from data: Data) -> ExifExtract {
+    private func extractMetadata(from data: Data, fileName: String) -> MediaMetadata {
+        let fileExtension = (fileName as NSString).pathExtension.lowercased()
+        let utType = UTType(filenameExtension: fileExtension)
+        let uti = utType?.identifier
+        
+        let isVideo = utType?.conforms(to: .movie) ?? false || utType?.conforms(to: .video) ?? false
+        let mediaType: PhotoAsset.MediaType = isVideo ? .video : .photo
+
+        // Default metadata
+        var metadata = MediaMetadata(
+            creationDate: nil,
+            latitude: nil,
+            longitude: nil,
+            mediaType: mediaType,
+            uti: uti,
+            pixelWidth: nil,
+            pixelHeight: nil,
+            duration: nil
+        )
+
+        if isVideo {
+            // For videos, we'll need to use AVFoundation later (impl-4) to get duration/size from a temporary file.
+            // For now, we just mark it as video.
+            return metadata
+        }
+
+        // For images (including RAW), use ImageIO
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-            return ExifExtract(creationDate: nil, latitude: nil, longitude: nil)
+            return metadata
         }
 
-        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return ExifExtract(creationDate: nil, latitude: nil, longitude: nil)
-        }
+        if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            // Dimensions
+            metadata.pixelWidth = props[kCGImagePropertyPixelWidth] as? Int
+            metadata.pixelHeight = props[kCGImagePropertyPixelHeight] as? Int
 
-        var creationDate: Date?
-        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-            if let dateStr = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
-                creationDate = parseExifDate(dateStr)
+            // Exif
+            if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+                if let dateStr = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+                    metadata.creationDate = parseExifDate(dateStr)
+                }
+            }
+
+            // GPS
+            if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
+                if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
+                   let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String,
+                   let lon = gps[kCGImagePropertyGPSLongitude] as? Double,
+                   let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String {
+                    metadata.latitude = (latRef.uppercased() == "S") ? -lat : lat
+                    metadata.longitude = (lonRef.uppercased() == "W") ? -lon : lon
+                }
             }
         }
 
-        var latitude: Double?
-        var longitude: Double?
-        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
-            if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
-               let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String,
-               let lon = gps[kCGImagePropertyGPSLongitude] as? Double,
-               let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String {
-                latitude = (latRef.uppercased() == "S") ? -lat : lat
-                longitude = (lonRef.uppercased() == "W") ? -lon : lon
-            }
-        }
-
-        return ExifExtract(creationDate: creationDate, latitude: latitude, longitude: longitude)
+        return metadata
     }
 
     private func parseExifDate(_ value: String) -> Date? {
