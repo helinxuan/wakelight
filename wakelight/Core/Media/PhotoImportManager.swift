@@ -277,12 +277,32 @@ final class PhotoImportManager: ObservableObject {
                         let photoIds = photos.map { $0.id }
                         let removedLocalIds = photos.compactMap { $0.localIdentifier }
 
-                        // 2) Delete VisitLayerPhotoAsset links referencing these photos
-                        let deletedLinks = try VisitLayerPhotoAsset
+                        // 2) Find affected VisitLayers BEFORE deleting links
+                        let affectedVisitLayerIds = try VisitLayerPhotoAsset
+                            .filter(photoIds.contains(Column("photoAssetId")))
+                            .fetchAll(db)
+                            .map { $0.visitLayerId }
+                        
+                        // 3) Delete VisitLayerPhotoAsset links referencing these photos
+                        let deletedLinksCount = try VisitLayerPhotoAsset
                             .filter(photoIds.contains(Column("photoAssetId")))
                             .deleteAll(db)
 
-                        // 2.1) Handle StoryNode covers and empty stories
+                        // 4) Clean up empty VisitLayers
+                        var deletedVisitLayerCount = 0
+                        if !affectedVisitLayerIds.isEmpty {
+                            for layerId in Set(affectedVisitLayerIds) {
+                                let photoCount = try VisitLayerPhotoAsset
+                                    .filter(Column("visitLayerId") == layerId)
+                                    .fetchCount(db)
+                                if photoCount == 0 {
+                                    try VisitLayer.filter(Column("id") == layerId).deleteAll(db)
+                                    deletedVisitLayerCount += 1
+                                }
+                            }
+                        }
+
+                        // 5) Handle StoryNode covers and empty stories
                         let storiesNeedingUpdate = try StoryNode
                             .filter(removedLocalIds.contains(Column("coverPhotoId")))
                             .fetchAll(db)
@@ -308,7 +328,6 @@ final class PhotoImportManager: ObservableObject {
                             let remainingPhotoIds = remainingPhotoLinks.map(\.photoAssetId)
 
                             if remainingPhotoIds.isEmpty {
-                                // No photos left in any of the story's visit layers
                                 affectedPlaceClusterIds.insert(story.placeClusterId)
                                 try story.delete(db)
                                 deletedStoryCount += 1
@@ -330,14 +349,13 @@ final class PhotoImportManager: ObservableObject {
                                 try story.update(db)
                                 updatedStoryCount += 1
                             } else {
-                                // Fallback: if no valid localIdentifier found, delete the story
                                 affectedPlaceClusterIds.insert(story.placeClusterId)
                                 try story.delete(db)
                                 deletedStoryCount += 1
                             }
                         }
 
-                        // 2.2) Sync PlaceCluster.hasStory for clusters whose StoryNodes were deleted
+                        // 6) Sync PlaceCluster.hasStory
                         if !affectedPlaceClusterIds.isEmpty {
                             for clusterId in affectedPlaceClusterIds {
                                 let remainingStoryCount = try StoryNode
@@ -352,12 +370,12 @@ final class PhotoImportManager: ObservableObject {
                             }
                         }
 
-                        // 3) Delete PhotoAsset rows themselves
-                        let deletedPhotos = try PhotoAsset
+                        // 7) Delete PhotoAsset rows
+                        let deletedPhotosCount = try PhotoAsset
                             .filter(photoIds.contains(Column("id")))
                             .deleteAll(db)
 
-                        print("[ImportManager] Incremental Photos delete: photos=\(deletedPhotos), links=\(deletedLinks), storiesDeleted=\(deletedStoryCount), storiesUpdated=\(updatedStoryCount)")
+                        print("[ImportManager] Incremental Delete: photos=\(deletedPhotosCount), links=\(deletedLinksCount), layersDeleted=\(deletedVisitLayerCount), storiesDeleted=\(deletedStoryCount), storiesUpdated=\(updatedStoryCount)")
                     }
                 } catch {
                     print("[ImportManager] Incremental Photos delete failed: \(error)")
