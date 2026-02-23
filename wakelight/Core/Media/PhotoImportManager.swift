@@ -49,6 +49,9 @@ final class PhotoImportManager: ObservableObject {
     private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
     private var photosChangeDebounceTask: Task<Void, Never>?
 
+    // MARK: - Incremental Reclustering (Strict Consistency)
+    private var pendingReclusterTask: Task<Void, Never>?
+
     private init() {
         loadProgress()
     }
@@ -95,7 +98,9 @@ final class PhotoImportManager: ObservableObject {
 
             do {
                 let photosImported = try await ImportPhotosUseCase().run(limit: nil) { processed, total in
-                    PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                    Task { @MainActor in
+                        PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                    }
                 }
                 print("[ImportManager] Local Photos imported: \(photosImported)")
 
@@ -132,7 +137,9 @@ final class PhotoImportManager: ObservableObject {
                 await self.updateStatus(.importing, phase: .webdav, resetCounts: true)
 
                 let webdavImported = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
-                    PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                    Task { @MainActor in
+                        PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                    }
                 }
                 print("[ImportManager] WebDAV imported: \(webdavImported)")
 
@@ -241,6 +248,25 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 
+    func scheduleRecluster(reason: String) {
+        // Avoid overlapping with a full import.
+        guard !isRunning else { return }
+
+        pendingReclusterTask?.cancel()
+        pendingReclusterTask = Task.detached(priority: .background) {
+            // Debounce to avoid frequent heavy recomputation when the system emits bursts of changes.
+            try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s
+
+            do {
+                _ = try await GeneratePlaceClustersUseCase().run()
+                _ = try await GenerateVisitLayersUseCase().run()
+                print("[ImportManager] Incremental recluster finished. reason=\(reason)")
+            } catch {
+                print("[ImportManager] Incremental recluster failed: \(error). reason=\(reason)")
+            }
+        }
+    }
+
     private func processPendingPhotosChange() async {
         guard let change = pendingPhotosChange else { return }
         pendingPhotosChange = nil
@@ -257,6 +283,7 @@ final class PhotoImportManager: ObservableObject {
                 do {
                     _ = try await ImportPhotosUseCase().run(localIdentifiers: insertedOrChanged, onProgress: nil)
                     print("[ImportManager] Incremental Photos upsert: \(insertedOrChanged.count) assets")
+                    await PhotoImportManager.shared.scheduleRecluster(reason: "incremental-upsert")
                 } catch {
                     print("[ImportManager] Incremental Photos upsert failed: \(error)")
                 }
@@ -377,6 +404,9 @@ final class PhotoImportManager: ObservableObject {
 
                         print("[ImportManager] Incremental Delete: photos=\(deletedPhotosCount), links=\(deletedLinksCount), layersDeleted=\(deletedVisitLayerCount), storiesDeleted=\(deletedStoryCount), storiesUpdated=\(updatedStoryCount)")
                     }
+                    
+                    // Call scheduleRecluster outside the database transaction
+                    await PhotoImportManager.shared.scheduleRecluster(reason: "incremental-delete")
                 } catch {
                     print("[ImportManager] Incremental Photos delete failed: \(error)")
                 }
