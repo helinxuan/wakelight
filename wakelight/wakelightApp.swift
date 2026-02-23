@@ -21,6 +21,7 @@ struct wakelightApp: App {
 
                     // Wire observer -> import manager (debounced inside manager).
                     PhotosLibraryObserver.shared.onChange = { change in
+                        print("[PhotosObserver] change inserted=\(change.insertedLocalIdentifiers.count) changed=\(change.changedLocalIdentifiers.count) removed=\(change.removedLocalIdentifiers.count)")
                         PhotoImportManager.shared.handlePhotosLibraryChange(change)
                     }
                 }

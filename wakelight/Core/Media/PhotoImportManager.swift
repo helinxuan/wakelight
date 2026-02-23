@@ -230,6 +230,7 @@ final class PhotoImportManager: ObservableObject {
     /// Called by `PhotosLibraryObserver` (on main actor) when the Photos library changes.
     /// We debounce the incoming changes to avoid thrashing when the system reports many small updates.
     func handlePhotosLibraryChange(_ change: PhotosLibraryObserver.ChangeSet) {
+        print("[ImportManager] handlePhotosLibraryChange inserted=\(change.insertedLocalIdentifiers.count) changed=\(change.changedLocalIdentifiers.count) removed=\(change.removedLocalIdentifiers.count)")
         // Merge into pending set
         if var existing = pendingPhotosChange {
             existing.insertedLocalIdentifiers.append(contentsOf: change.insertedLocalIdentifiers)
