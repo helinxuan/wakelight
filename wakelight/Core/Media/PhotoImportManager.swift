@@ -136,12 +136,17 @@ final class PhotoImportManager: ObservableObject {
             do {
                 await self.updateStatus(.importing, phase: .webdav, resetCounts: true)
 
-                let webdavImported = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
+                let result = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
                     Task { @MainActor in
                         PhotoImportManager.shared.reportProgress(processed: processed, total: total)
                     }
                 }
-                print("[ImportManager] WebDAV imported: \(webdavImported)")
+                print("[ImportManager] WebDAV imported: \(result.importedCount), deleted: \(result.deletedPhotoIds.count)")
+
+                // Perform shared cleanup for deleted WebDAV photos
+                if !result.deletedPhotoIds.isEmpty {
+                    try await self.cleanupDeletedPhotoAssets(photoIds: result.deletedPhotoIds)
+                }
 
                 // WebDAV 导入完成后，生成聚类与 VisitLayers
                 await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
@@ -284,7 +289,9 @@ final class PhotoImportManager: ObservableObject {
                 do {
                     _ = try await ImportPhotosUseCase().run(localIdentifiers: insertedOrChanged, onProgress: nil)
                     print("[ImportManager] Incremental Photos upsert: \(insertedOrChanged.count) assets")
-                    await PhotoImportManager.shared.scheduleRecluster(reason: "incremental-upsert")
+                    await MainActor.run {
+                        PhotoImportManager.shared.scheduleRecluster(reason: "incremental-upsert")
+                    }
                 } catch {
                     print("[ImportManager] Incremental Photos upsert failed: \(error)")
                 }
@@ -295,123 +302,154 @@ final class PhotoImportManager: ObservableObject {
         if !removed.isEmpty {
             Task.detached(priority: .background) {
                 do {
-                    try await DatabaseContainer.shared.writer.write { db in
-                        // 1) Find PhotoAsset ids for the removed localIdentifiers
-                        let photos = try PhotoAsset
+                    // 1) Find PhotoAsset ids for the removed localIdentifiers
+                    let photoIds: [UUID] = try await DatabaseContainer.shared.db.reader.read { db in
+                        try PhotoAsset
                             .filter(removed.contains(Column("localIdentifier")))
                             .fetchAll(db)
-                        guard !photos.isEmpty else { return }
-
-                        let photoIds = photos.map { $0.id }
-                        let removedLocalIds = photos.compactMap { $0.localIdentifier }
-
-                        // 2) Find affected VisitLayers BEFORE deleting links
-                        let affectedVisitLayerIds = try VisitLayerPhotoAsset
-                            .filter(photoIds.contains(Column("photoAssetId")))
-                            .fetchAll(db)
-                            .map { $0.visitLayerId }
-                        
-                        // 3) Delete VisitLayerPhotoAsset links referencing these photos
-                        let deletedLinksCount = try VisitLayerPhotoAsset
-                            .filter(photoIds.contains(Column("photoAssetId")))
-                            .deleteAll(db)
-
-                        // 4) Clean up empty VisitLayers
-                        var deletedVisitLayerCount = 0
-                        if !affectedVisitLayerIds.isEmpty {
-                            for layerId in Set(affectedVisitLayerIds) {
-                                let photoCount = try VisitLayerPhotoAsset
-                                    .filter(Column("visitLayerId") == layerId)
-                                    .fetchCount(db)
-                                if photoCount == 0 {
-                                    try VisitLayer.filter(Column("id") == layerId).deleteAll(db)
-                                    deletedVisitLayerCount += 1
-                                }
-                            }
-                        }
-
-                        // 5) Handle StoryNode covers and empty stories
-                        let storiesNeedingUpdate = try StoryNode
-                            .filter(removedLocalIds.contains(Column("coverPhotoId")))
-                            .fetchAll(db)
-
-                        var deletedStoryCount = 0
-                        var updatedStoryCount = 0
-                        var affectedPlaceClusterIds = Set<UUID>()
-
-                        for var story in storiesNeedingUpdate {
-                            let visitLayerIds = story.subVisitLayerIds
-                            if visitLayerIds.isEmpty {
-                                affectedPlaceClusterIds.insert(story.placeClusterId)
-                                try story.delete(db)
-                                deletedStoryCount += 1
-                                continue
-                            }
-
-                            // Find remaining photos for this story's visit layers
-                            let remainingPhotoLinks = try VisitLayerPhotoAsset
-                                .filter(visitLayerIds.contains(Column("visitLayerId")))
-                                .fetchAll(db)
-                            
-                            let remainingPhotoIds = remainingPhotoLinks.map(\.photoAssetId)
-
-                            if remainingPhotoIds.isEmpty {
-                                affectedPlaceClusterIds.insert(story.placeClusterId)
-                                try story.delete(db)
-                                deletedStoryCount += 1
-                                continue
-                            }
-
-                            // Pick a new cover from remaining photos
-                            let candidates = try PhotoAsset
-                                .filter(remainingPhotoIds.contains(Column("id")))
-                                .fetchAll(db)
-
-                            if let newCover = candidates
-                                .sorted(by: { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) })
-                                .first,
-                               let newLocalId = newCover.localIdentifier {
-                                
-                                story.coverPhotoId = newLocalId
-                                story.updatedAt = Date()
-                                try story.update(db)
-                                updatedStoryCount += 1
-                            } else {
-                                affectedPlaceClusterIds.insert(story.placeClusterId)
-                                try story.delete(db)
-                                deletedStoryCount += 1
-                            }
-                        }
-
-                        // 6) Sync PlaceCluster.hasStory
-                        if !affectedPlaceClusterIds.isEmpty {
-                            for clusterId in affectedPlaceClusterIds {
-                                let remainingStoryCount = try StoryNode
-                                    .filter(Column("placeClusterId") == clusterId)
-                                    .fetchCount(db)
-
-                                if remainingStoryCount == 0 {
-                                    _ = try PlaceCluster
-                                        .filter(Column("id") == clusterId)
-                                        .updateAll(db, Column("hasStory").set(to: false))
-                                }
-                            }
-                        }
-
-                        // 7) Delete PhotoAsset rows
-                        let deletedPhotosCount = try PhotoAsset
-                            .filter(photoIds.contains(Column("id")))
-                            .deleteAll(db)
-
-                        print("[ImportManager] Incremental Delete: photos=\(deletedPhotosCount), links=\(deletedLinksCount), layersDeleted=\(deletedVisitLayerCount), storiesDeleted=\(deletedStoryCount), storiesUpdated=\(updatedStoryCount)")
+                            .map { $0.id }
                     }
                     
-                    // Call scheduleRecluster outside the database transaction
-                    await PhotoImportManager.shared.scheduleRecluster(reason: "incremental-delete")
+                    guard !photoIds.isEmpty else { return }
+
+                    // 2) Run shared cleanup
+                    try await self.cleanupDeletedPhotoAssets(photoIds: photoIds)
+                    
+                    // 3) Recluster
+                    await MainActor.run {
+                        PhotoImportManager.shared.scheduleRecluster(reason: "incremental-delete")
+                    }
                 } catch {
                     print("[ImportManager] Incremental Photos delete failed: \(error)")
                 }
             }
+        }
+    }
+
+    /// Shared cleanup logic used by both Photos incremental sync and WebDAV sync deletions.
+    /// This handles: VisitLayerPhotoAsset links, empty VisitLayers, StoryNode covers/deletion, and PlaceCluster.hasStory consistency.
+    func cleanupDeletedPhotoAssets(photoIds: [UUID]) async throws {
+        guard !photoIds.isEmpty else { return }
+        
+        try await DatabaseContainer.shared.writer.write { db in
+            // 1) Find affected VisitLayers BEFORE deleting links
+            let affectedVisitLayerIds = try VisitLayerPhotoAsset
+                .filter(photoIds.contains(Column("photoAssetId")))
+                .fetchAll(db)
+                .map { $0.visitLayerId }
+            
+            // 2) Find localIdentifiers for StoryNode cover matching (if any)
+            let removedLocalIds = try PhotoAsset
+                .filter(photoIds.contains(Column("id")))
+                .fetchAll(db)
+                .compactMap { $0.localIdentifier }
+
+            // 3) Delete VisitLayerPhotoAsset links referencing these photos
+            let deletedLinksCount = try VisitLayerPhotoAsset
+                .filter(photoIds.contains(Column("photoAssetId")))
+                .deleteAll(db)
+
+            // 4) Clean up empty VisitLayers
+            var deletedVisitLayerCount = 0
+            if !affectedVisitLayerIds.isEmpty {
+                for layerId in Set(affectedVisitLayerIds) {
+                    let photoCount = try VisitLayerPhotoAsset
+                        .filter(Column("visitLayerId") == layerId)
+                        .fetchCount(db)
+                    if photoCount == 0 {
+                        try VisitLayer.filter(Column("id") == layerId).deleteAll(db)
+                        deletedVisitLayerCount += 1
+                    }
+                }
+            }
+
+            // 5) Handle StoryNode covers and empty stories
+            // Note: We match by coverPhotoId which could be a localIdentifier or a locatorKey.
+            // First, find stories that might be affected by deleted photoIds (by checking their locatorKeys)
+            let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            let removedLocatorKeys = locators.map { $0.locatorKey }
+            let allMatchKeys = Set(removedLocalIds + removedLocatorKeys)
+
+            let storiesNeedingUpdate = try StoryNode
+                .filter(allMatchKeys.contains(Column("coverPhotoId")))
+                .fetchAll(db)
+
+            var deletedStoryCount = 0
+            var updatedStoryCount = 0
+            var affectedPlaceClusterIds = Set<UUID>()
+
+            for var story in storiesNeedingUpdate {
+                let visitLayerIds = story.subVisitLayerIds
+                if visitLayerIds.isEmpty {
+                    affectedPlaceClusterIds.insert(story.placeClusterId)
+                    try story.delete(db)
+                    deletedStoryCount += 1
+                    continue
+                }
+
+                // Find remaining photos for this story's visit layers
+                let remainingPhotoLinks = try VisitLayerPhotoAsset
+                    .filter(visitLayerIds.contains(Column("visitLayerId")))
+                    .fetchAll(db)
+                
+                let remainingPhotoIds = remainingPhotoLinks.map(\.photoAssetId)
+
+                if remainingPhotoIds.isEmpty {
+                    affectedPlaceClusterIds.insert(story.placeClusterId)
+                    try story.delete(db)
+                    deletedStoryCount += 1
+                    continue
+                }
+
+                // Pick a new cover from remaining photos
+                let candidates = try PhotoAsset
+                    .filter(remainingPhotoIds.contains(Column("id")))
+                    .fetchAll(db)
+
+                if let newCover = candidates
+                    .sorted(by: { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) })
+                    .first {
+                    
+                    // Fetch the locatorKey for the new cover
+                    let newLocators = try PhotoAsset.fetchLocators(db: db, ids: [newCover.id])
+                    if let newCoverKey = newLocators.first?.locatorKey {
+                        story.coverPhotoId = newCoverKey
+                        story.updatedAt = Date()
+                        try story.update(db)
+                        updatedStoryCount += 1
+                    } else {
+                        affectedPlaceClusterIds.insert(story.placeClusterId)
+                        try story.delete(db)
+                        deletedStoryCount += 1
+                    }
+                } else {
+                    affectedPlaceClusterIds.insert(story.placeClusterId)
+                    try story.delete(db)
+                    deletedStoryCount += 1
+                }
+            }
+
+            // 6) Sync PlaceCluster.hasStory
+            if !affectedPlaceClusterIds.isEmpty {
+                for clusterId in affectedPlaceClusterIds {
+                    let remainingStoryCount = try StoryNode
+                        .filter(Column("placeClusterId") == clusterId)
+                        .fetchCount(db)
+
+                    if remainingStoryCount == 0 {
+                        _ = try PlaceCluster
+                            .filter(Column("id") == clusterId)
+                            .updateAll(db, Column("hasStory").set(to: false))
+                    }
+                }
+            }
+
+            // 7) Delete PhotoAsset rows
+            let deletedPhotosCount = try PhotoAsset
+                .filter(photoIds.contains(Column("id")))
+                .deleteAll(db)
+
+            print("[Cleanup] Deleted: photos=\(deletedPhotosCount), links=\(deletedLinksCount), layers=\(deletedVisitLayerCount), storiesDel=\(deletedStoryCount), storiesUpd=\(updatedStoryCount)")
         }
     }
 
