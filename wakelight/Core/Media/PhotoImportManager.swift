@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import GRDB
 
 enum ImportStatus: String, Codable {
     case idle
@@ -43,6 +44,11 @@ final class PhotoImportManager: ObservableObject {
     @Published private(set) var isRunning = false
     private var runningTask: Task<Void, Never>?
 
+    // MARK: - Photos Change Observer (Incremental Sync)
+
+    private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
+    private var photosChangeDebounceTask: Task<Void, Never>?
+
     private init() {
         loadProgress()
     }
@@ -69,15 +75,22 @@ final class PhotoImportManager: ObservableObject {
         startImport(reason: reason)
     }
 
+    /// 默认导入：只同步系统 Photos（用于自动触发：App 启动 / 设置保存等）。
+    /// WebDAV 由于可能全量扫描、耗时且耗电，默认不自动触发。
     func startImport(reason: String) {
+        startLocalPhotosImport(reason: reason)
+    }
+
+    /// 仅导入系统 Photos（推荐 & 自动触发的默认行为）
+    func startLocalPhotosImport(reason: String) {
         guard !isRunning else { return }
         isRunning = true
 
-        print("[ImportManager] Starting import. reason=\(reason)")
+        print("[ImportManager] Starting LOCAL photos import. reason=\(reason)")
 
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
-            // A) 本地 Photos 导入（宽松模式：权限拒绝只跳过，不让整个导入失败）
+
             await self.updateStatus(.importing, phase: .photos, resetCounts: true)
 
             do {
@@ -85,13 +98,37 @@ final class PhotoImportManager: ObservableObject {
                     PhotoImportManager.shared.reportProgress(processed: processed, total: total)
                 }
                 print("[ImportManager] Local Photos imported: \(photosImported)")
+
+                // 本地 Photos 导入完成后，继续生成聚类与 VisitLayers
+                await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
+                _ = try await GeneratePlaceClustersUseCase().run()
+
+                await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                _ = try await GenerateVisitLayersUseCase().run()
+
+                await self.completeImport()
             } catch {
-                print("[ImportManager] Local Photos import skipped/failed: \(error)")
-                await self.recordNonFatalError("本地 Photos 导入跳过: \(error.localizedDescription)")
+                await self.failImport(error: error.localizedDescription)
             }
 
+            await MainActor.run {
+                self.isRunning = false
+                self.runningTask = nil
+            }
+        }
+    }
+
+    /// 手动触发：WebDAV 导入（可能全量扫描，耗时/耗电）
+    func startWebDAVImport(reason: String) {
+        guard !isRunning else { return }
+        isRunning = true
+
+        print("[ImportManager] Starting WebDAV import (manual). reason=\(reason)")
+
+        runningTask = Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
+
             do {
-                // B) WebDAV 导入（带进度）
                 await self.updateStatus(.importing, phase: .webdav, resetCounts: true)
 
                 let webdavImported = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
@@ -99,11 +136,10 @@ final class PhotoImportManager: ObservableObject {
                 }
                 print("[ImportManager] WebDAV imported: \(webdavImported)")
 
-                // C) 生成聚类
+                // WebDAV 导入完成后，生成聚类与 VisitLayers
                 await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
                 _ = try await GeneratePlaceClustersUseCase().run()
 
-                // D) 生成 visit layers
                 await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
@@ -179,6 +215,154 @@ final class PhotoImportManager: ObservableObject {
     private func saveProgress() {
         if let data = try? JSONEncoder().encode(progress) {
             UserDefaults.standard.set(data, forKey: progressKey)
+        }
+    }
+
+    // MARK: - Incremental Photos Handling
+
+    /// Called by `PhotosLibraryObserver` (on main actor) when the Photos library changes.
+    /// We debounce the incoming changes to avoid thrashing when the system reports many small updates.
+    func handlePhotosLibraryChange(_ change: PhotosLibraryObserver.ChangeSet) {
+        // Merge into pending set
+        if var existing = pendingPhotosChange {
+            existing.insertedLocalIdentifiers.append(contentsOf: change.insertedLocalIdentifiers)
+            existing.changedLocalIdentifiers.append(contentsOf: change.changedLocalIdentifiers)
+            existing.removedLocalIdentifiers.append(contentsOf: change.removedLocalIdentifiers)
+            pendingPhotosChange = existing
+        } else {
+            pendingPhotosChange = change
+        }
+
+        photosChangeDebounceTask?.cancel()
+        photosChangeDebounceTask = Task { [weak self] in
+            // Simple debounce: wait a short delay to merge bursts of changes.
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            await self?.processPendingPhotosChange()
+        }
+    }
+
+    private func processPendingPhotosChange() async {
+        guard let change = pendingPhotosChange else { return }
+        pendingPhotosChange = nil
+
+        // Avoid overlapping with a full import; if a full import is running, we skip incremental.
+        if isRunning { return }
+
+        let insertedOrChanged = Array(Set(change.insertedLocalIdentifiers + change.changedLocalIdentifiers))
+        let removed = Array(Set(change.removedLocalIdentifiers))
+
+        // Incremental upsert for inserted/changed assets
+        if !insertedOrChanged.isEmpty {
+            Task.detached(priority: .background) {
+                do {
+                    _ = try await ImportPhotosUseCase().run(localIdentifiers: insertedOrChanged, onProgress: nil)
+                    print("[ImportManager] Incremental Photos upsert: \(insertedOrChanged.count) assets")
+                } catch {
+                    print("[ImportManager] Incremental Photos upsert failed: \(error)")
+                }
+            }
+        }
+
+        // Deletion cleanup for removed assets
+        if !removed.isEmpty {
+            Task.detached(priority: .background) {
+                do {
+                    try await DatabaseContainer.shared.writer.write { db in
+                        // 1) Find PhotoAsset ids for the removed localIdentifiers
+                        let photos = try PhotoAsset
+                            .filter(removed.contains(Column("localIdentifier")))
+                            .fetchAll(db)
+                        guard !photos.isEmpty else { return }
+
+                        let photoIds = photos.map { $0.id }
+                        let removedLocalIds = photos.compactMap { $0.localIdentifier }
+
+                        // 2) Delete VisitLayerPhotoAsset links referencing these photos
+                        let deletedLinks = try VisitLayerPhotoAsset
+                            .filter(photoIds.contains(Column("photoAssetId")))
+                            .deleteAll(db)
+
+                        // 2.1) Handle StoryNode covers and empty stories
+                        let storiesNeedingUpdate = try StoryNode
+                            .filter(removedLocalIds.contains(Column("coverPhotoId")))
+                            .fetchAll(db)
+
+                        var deletedStoryCount = 0
+                        var updatedStoryCount = 0
+                        var affectedPlaceClusterIds = Set<UUID>()
+
+                        for var story in storiesNeedingUpdate {
+                            let visitLayerIds = story.subVisitLayerIds
+                            if visitLayerIds.isEmpty {
+                                affectedPlaceClusterIds.insert(story.placeClusterId)
+                                try story.delete(db)
+                                deletedStoryCount += 1
+                                continue
+                            }
+
+                            // Find remaining photos for this story's visit layers
+                            let remainingPhotoLinks = try VisitLayerPhotoAsset
+                                .filter(visitLayerIds.contains(Column("visitLayerId")))
+                                .fetchAll(db)
+                            
+                            let remainingPhotoIds = remainingPhotoLinks.map(\.photoAssetId)
+
+                            if remainingPhotoIds.isEmpty {
+                                // No photos left in any of the story's visit layers
+                                affectedPlaceClusterIds.insert(story.placeClusterId)
+                                try story.delete(db)
+                                deletedStoryCount += 1
+                                continue
+                            }
+
+                            // Pick a new cover from remaining photos
+                            let candidates = try PhotoAsset
+                                .filter(remainingPhotoIds.contains(Column("id")))
+                                .fetchAll(db)
+
+                            if let newCover = candidates
+                                .sorted(by: { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) })
+                                .first,
+                               let newLocalId = newCover.localIdentifier {
+                                
+                                story.coverPhotoId = newLocalId
+                                story.updatedAt = Date()
+                                try story.update(db)
+                                updatedStoryCount += 1
+                            } else {
+                                // Fallback: if no valid localIdentifier found, delete the story
+                                affectedPlaceClusterIds.insert(story.placeClusterId)
+                                try story.delete(db)
+                                deletedStoryCount += 1
+                            }
+                        }
+
+                        // 2.2) Sync PlaceCluster.hasStory for clusters whose StoryNodes were deleted
+                        if !affectedPlaceClusterIds.isEmpty {
+                            for clusterId in affectedPlaceClusterIds {
+                                let remainingStoryCount = try StoryNode
+                                    .filter(Column("placeClusterId") == clusterId)
+                                    .fetchCount(db)
+
+                                if remainingStoryCount == 0 {
+                                    _ = try PlaceCluster
+                                        .filter(Column("id") == clusterId)
+                                        .updateAll(db, Column("hasStory").set(to: false))
+                                }
+                            }
+                        }
+
+                        // 3) Delete PhotoAsset rows themselves
+                        let deletedPhotos = try PhotoAsset
+                            .filter(photoIds.contains(Column("id")))
+                            .deleteAll(db)
+
+                        print("[ImportManager] Incremental Photos delete: photos=\(deletedPhotos), links=\(deletedLinks), storiesDeleted=\(deletedStoryCount), storiesUpdated=\(updatedStoryCount)")
+                    }
+                } catch {
+                    print("[ImportManager] Incremental Photos delete failed: \(error)")
+                }
+            }
         }
     }
 

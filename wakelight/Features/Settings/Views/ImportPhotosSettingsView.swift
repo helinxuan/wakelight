@@ -27,7 +27,11 @@ struct ImportPhotosSettingsView: View {
     var body: some View {
         Form {
             Section("导入") {
-                Text("导入会在 App 启动或 WebDAV 保存成功后自动在后台运行（不阻塞 UI）。")
+                Text("系统相册导入会在 App 启动或检测到变化时自动在后台运行（不阻塞 UI）。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Text("WebDAV 导入需要全量扫描远端目录，耗时且耗电，建议仅在有大量新照片上传后手动触发。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -74,18 +78,40 @@ struct ImportPhotosSettingsView: View {
                 }
             }
 
-            Section {
+            Section("手动执行") {
                 Button {
-                    importManager.startImport(reason: "manual")
+                    importManager.startLocalPhotosImport(reason: "manual")
                 } label: {
-                    Text("手动触发导入")
+                    HStack {
+                        Image(systemName: "photo.on.rectangle")
+                        Text("同步系统相册")
+                    }
                 }
+                .disabled(importManager.isRunning)
+
+                Button {
+                    importManager.startWebDAVImport(reason: "manual")
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Image(systemName: "network")
+                            Text("WebDAV 全量扫描导入")
+                        }
+                        Text("警告：会递归扫描所有目录，照片多时非常耗时")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
+                .disabled(importManager.isRunning)
 
                 if importManager.isRunning {
                     Button(role: .destructive) {
                         importManager.cancelImport()
                     } label: {
-                        Text("停止导入")
+                        HStack {
+                            Image(systemName: "stop.circle.fill")
+                            Text("停止导入")
+                        }
                     }
                 }
             }

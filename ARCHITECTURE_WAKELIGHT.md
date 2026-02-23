@@ -434,6 +434,39 @@ stateDiagram-v2
   - emit `StorySettled(storyId, placeId)` 领域事件。
 ## 6.3 WebDAV 远程媒体源（轻量索引 + 按需缩略图缓存）
 
+## 6.3A 系统相册（Photos）增量同步（PHPhotoLibraryChangeObserver）
+
+> 目标：系统相册导入要做到“冷启动一次全量、后续增量”，并支持本地删除/修改的同步；避免每次冷启动都全量扫描。
+
+### 6.3A.1 基线与增量
+
+- **首次/冷启动基线**：执行一次全量索引（UseCase：`ImportPhotosUseCase.run(limit: nil)` 或分批分页），建立本地 `PhotoAsset(localIdentifier=PHAsset.localIdentifier)` 基线。
+- **增量更新**：通过 `PHPhotoLibraryChangeObserver` 接收系统相册变更事件，仅处理新增/修改/删除集合。
+
+### 6.3A.2 删除同步（可以同步删除）
+
+- `PHPhotoLibraryChangeObserver` 回调中，使用 `PHFetchResultChangeDetails` 获取 `removedObjects`（被删除的 `PHAsset`）。
+- 以 `removedAsset.localIdentifier` 为键，从本地数据库删除对应 `PhotoAsset`。
+- **关联清理（推荐）**：同步清理 `VisitLayerPhotoAsset` 等关联表，避免 UI 出现孤儿引用。
+- 备注：若未来引入“用户文本/故事节点”与照片强绑定，需要定义删除策略（例如：只移除照片引用，不删除用户文本）。
+
+### 6.3A.3 修改同步
+
+- `changedObjects`（被修改的 `PHAsset`）需要重新读取 `creationDate/location/modificationDate` 等字段并更新 `PhotoAsset`；必要时清空缩略图缓存以触发重建。
+
+### 6.3A.4 Limited Photos 权限注意
+
+- 当用户使用 **Limited Photos** 权限时，系统的“授权范围变化”对 App 表现为新增/删除；导入层按变化结果同步即可。
+- 产品层面可在设置页提示：变更授权范围会影响导入范围。
+
+### 6.3A.5 工程落地建议
+
+- Core 层新增服务：`PhotosLibraryObserver`（实现 `PHPhotoLibraryChangeObserver`），在 App 生命周期启动时注册。
+- Observer 收到变化后，触发 `PhotoImportManager` 的“增量导入入口”（对新增/修改做 upsert，对删除做清理），并做 debounce（例如 0.5~2s）合并频繁变更。
+
+---
+
+
 > 目标：把 WebDAV 当“本地文件源”来用。除了路径/鉴权/网络适配外，上层（索引、EXIF、缩略图、UI 展示、聚类）尽量复用同一套逻辑，避免在各处写 `if webdav`。
 
 ### 6.3.1 统一定位符：`MediaLocator`
@@ -480,6 +513,8 @@ UI 展示策略：
 不做什么：
 - 不把原图保存到本地（避免爆存储/隐私/重复）
 - 不要求“先导入才能看图”：缩略图可按需生成并缓存
+
+> **当前产品策略（阶段性）**：WebDAV 导入暂时仅提供“设置页手动触发”，且实现为全量扫描（递归 PROPFIND）；不参与冷启动/自动导入，以避免耗时与耗电。后续如确有性能需求，再引入客户端目录游标等增量枚举机制。
 
 ## 6.4 时光模式节点生成（MVP）
 

@@ -15,6 +15,14 @@ struct wakelightApp: App {
                 .onAppear {
                     _ = AchievementService.shared
                     WebDAVBootstrap.shared.bootstrap()
+
+                    // Start observing Photos library changes for incremental sync.
+                    PhotosLibraryObserver.shared.start()
+
+                    // Wire observer -> import manager (debounced inside manager).
+                    PhotosLibraryObserver.shared.onChange = { change in
+                        PhotoImportManager.shared.handlePhotosLibraryChange(change)
+                    }
                 }
         }
     }
