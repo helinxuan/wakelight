@@ -9,6 +9,8 @@ struct WebDAVImportResult {
 }
 
 final class ImportWebDAVPhotosUseCase {
+    private static let debug = false
+
     private let profileRepository: WebDAVProfileRepositoryProtocol
     private let writer: DatabaseWriter
 
@@ -227,10 +229,16 @@ final class ImportWebDAVPhotosUseCase {
         print("[WebDAVImport] [\(index+1)/\(total)] Downloading: \(remotePath)")
 
         let data = try await client.get(path: remotePath)
-        var exif = extractExif(from: data, remotePath: remotePath)
+        var exif = extractExif(from: data)
+
+        // Copy out values used inside the DB write closure to satisfy Swift 6 strict concurrency rules.
+        // We will update these if we later find GPS in a sidecar XMP.
+        let creationDate = exif.creationDate
+        var latitude = exif.latitude
+        var longitude = exif.longitude
 
         // Fallback: if the JPG has no embedded GPS, try the sidecar XMP (e.g. "P1068350.JPG.xmp").
-        if exif.latitude == nil || exif.longitude == nil {
+        if latitude == nil || longitude == nil {
             let xmpPath1 = remotePath + ".xmp" // "P1068350.JPG" -> "P1068350.JPG.xmp"
             let xmpPath2: String? = {
                 // Also try "P1068350.xmp" (without the .JPG part) for compatibility.
@@ -255,6 +263,8 @@ final class ImportWebDAVPhotosUseCase {
                 if let lat = xmpGps.latitude, let lon = xmpGps.longitude {
                     exif.latitude = lat
                     exif.longitude = lon
+                    latitude = lat
+                    longitude = lon
                     break
                 }
             }
@@ -287,9 +297,9 @@ final class ImportWebDAVPhotosUseCase {
                     let record = PhotoAsset(
                         id: newPhotoId,
                         localIdentifier: nil,
-                        creationDate: exif.creationDate,
-                        latitude: exif.latitude,
-                        longitude: exif.longitude,
+                        creationDate: creationDate,
+                        latitude: latitude,
+                        longitude: longitude,
                         thumbnailPath: nil,
                         modificationDate: nil,
                         lastSeenAt: scanAt,
@@ -601,7 +611,7 @@ final class ImportWebDAVPhotosUseCase {
         let latRaw = extractValue("GPSLatitude")
         let lonRaw = extractValue("GPSLongitude")
 
-        if debug {
+        if Self.debug {
             print("[WebDAVImport][ExifDebug] XMP contains 'GPSLatitude'? \(xmp.localizedCaseInsensitiveContains("GPSLatitude")) 'GPSLongitude'? \(xmp.localizedCaseInsensitiveContains("GPSLongitude"))")
             print("[WebDAVImport][ExifDebug] XMP extracted latRaw=\(String(describing: latRaw)) lonRaw=\(String(describing: lonRaw))")
         }
@@ -609,7 +619,7 @@ final class ImportWebDAVPhotosUseCase {
         let lat = latRaw.flatMap(parseDmsOrDecimal)
         let lon = lonRaw.flatMap(parseDmsOrDecimal)
 
-        if debug {
+        if Self.debug {
             print("[WebDAVImport][ExifDebug] XMP parsed lat=\(String(describing: lat)) lon=\(String(describing: lon))")
         }
 

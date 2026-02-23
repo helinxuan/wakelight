@@ -1,5 +1,6 @@
 import SwiftUI
 import GRDB
+import Photos
 
 /// Full screen photo preview pager used by both MemoryDetailSheet and MemoryPanelView.
 struct PhotoPreviewPager: View {
@@ -15,10 +16,26 @@ struct PhotoPreviewPager: View {
         _selection = State(initialValue: startIndex)
     }
 
+    @State private var phAssetNames: [String: String] = [:]
+
     private var fileName: String {
         guard selection >= 0, selection < locatorKeys.count else { return "" }
         let key = locatorKeys[selection]
-        // locatorKey in this app is typically a path-like string; keep extension.
+
+        if key.hasPrefix("webdav://") {
+            let trimmed = String(key.dropFirst("webdav://".count))
+            return trimmed.split(separator: "/").last.map(String.init) ?? key
+        }
+
+        if key.hasPrefix("library://") {
+            if let name = phAssetNames[key] {
+                return name
+            }
+            // Fallback while loading
+            let localId = String(key.dropFirst("library://".count))
+            return localId.split(separator: "/").first.map(String.init) ?? localId
+        }
+
         return key.split(separator: "/").last.map(String.init) ?? key
     }
 
@@ -27,11 +44,24 @@ struct PhotoPreviewPager: View {
             Color.black.ignoresSafeArea()
 
             TabView(selection: $selection) {
-                ForEach(Array(locatorKeys.enumerated()), id: \.offset) { idx, key in
+                ForEach(locatorKeys.indices, id: \.self) { idx in
+                    let key = locatorKeys[idx]
                     ZoomableScrollView {
                         FullImageView(locatorKey: key)
                     }
                     .tag(idx)
+                    .task {
+                        if key.hasPrefix("library://") && phAssetNames[key] == nil {
+                            let localId = String(key.dropFirst("library://".count))
+                            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
+                            if let asset = assets.firstObject {
+                                let resources = PHAssetResource.assetResources(for: asset)
+                                if let filename = resources.first?.originalFilename {
+                                    phAssetNames[key] = filename
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))

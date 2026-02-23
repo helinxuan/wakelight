@@ -76,8 +76,6 @@ final class GeneratePlaceClustersUseCase {
             }
 
             return upserted
-
-            return upserted
         }
     }
 }

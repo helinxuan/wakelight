@@ -88,7 +88,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         // iOS 26+: MKAddressRepresentations is a collection of representations.
         // We can access it as an array if it conforms to Collection, or use address properties if available.
         // Since MKAddress does not have localizedAddress, we use the name or other properties from MKMapItem.
-        return item.name ?? item.placemark.name
+        // Avoid using deprecated `placemark` on iOS 26+.
+        return item.name
     }
 
     @available(iOS, deprecated: 26.0)
