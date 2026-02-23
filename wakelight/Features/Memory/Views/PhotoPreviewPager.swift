@@ -46,22 +46,20 @@ struct PhotoPreviewPager: View {
             TabView(selection: $selection) {
                 ForEach(locatorKeys.indices, id: \.self) { idx in
                     let key = locatorKeys[idx]
-                    ZoomableScrollView {
-                        FullImageView(locatorKey: key)
-                    }
-                    .tag(idx)
-                    .task {
-                        if key.hasPrefix("library://") && phAssetNames[key] == nil {
-                            let localId = String(key.dropFirst("library://".count))
-                            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
-                            if let asset = assets.firstObject {
-                                let resources = PHAssetResource.assetResources(for: asset)
-                                if let filename = resources.first?.originalFilename {
-                                    phAssetNames[key] = filename
+                    MediaContentView(locatorKey: key)
+                        .tag(idx)
+                        .task {
+                            if key.hasPrefix("library://") && phAssetNames[key] == nil {
+                                let localId = String(key.dropFirst("library://".count))
+                                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
+                                if let asset = assets.firstObject {
+                                    let resources = PHAssetResource.assetResources(for: asset)
+                                    if let filename = resources.first?.originalFilename {
+                                        phAssetNames[key] = filename
+                                    }
                                 }
                             }
                         }
-                    }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -97,6 +95,49 @@ struct PhotoPreviewPager: View {
             .padding(.horizontal, 12)
             .padding(.top, 14)
             .zIndex(1)
+        }
+    }
+}
+
+// MARK: - Media Content Wrapper
+
+struct MediaContentView: View {
+    let locatorKey: String
+    @State private var mediaType: PhotoAsset.MediaType = .photo
+
+    var body: some View {
+        Group {
+            if mediaType == .video {
+                VideoPlayerView(locatorKey: locatorKey)
+            } else {
+                ZoomableScrollView {
+                    FullImageView(locatorKey: locatorKey)
+                }
+            }
+        }
+        .task(id: locatorKey) {
+            let type = try? await DatabaseContainer.shared.db.reader.read { db -> PhotoAsset.MediaType? in
+                // Try full locatorKey match first
+                if let asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                    return asset.mediaType
+                }
+                // If library://..., also try raw PHAsset localIdentifier
+                if let locator = MediaLocator.parse(locatorKey),
+                   case .library(let id) = locator {
+                    if let asset = try PhotoAsset.filter(Column("localIdentifier") == id).fetchOne(db) {
+                        return asset.mediaType
+                    }
+                }
+                return nil
+            }
+
+            if let type = type {
+                self.mediaType = type
+            } else {
+                // Fallback by file extension
+                let lower = locatorKey.lowercased()
+                self.mediaType = (lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v")) ? .video : .photo
+            }
         }
     }
 }

@@ -195,29 +195,64 @@ struct ThumbnailView: View {
     let size: CGSize
 
     @State private var image: UIImage?
+    @State private var isVideo = false
 
     var body: some View {
-        Group {
-            if let image = image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Color.gray.opacity(0.2)
-                    .overlay(ProgressView().scaleEffect(0.5))
+        ZStack {
+            Group {
+                if let image = image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Color.gray.opacity(0.2)
+                        .overlay(ProgressView().scaleEffect(0.5))
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .clipped()
+
+            if isVideo {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: min(size.width, size.height) * 0.42))
+                    .foregroundColor(.white.opacity(0.92))
+                    .shadow(radius: 6)
             }
         }
         .frame(width: size.width, height: size.height)
-        .clipped()
         .cornerRadius(4)
         .task(id: "\(locatorKey)-\(Int(size.width))x\(Int(size.height))") {
+            await refreshIsVideo()
             image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: size)
         }
     }
 
-    private func fetchThumbnailPath(for locatorKey: String) async -> String? {
-        try? await DatabaseContainer.shared.db.reader.read { db in
-            try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.thumbnailPath
+    private func refreshIsVideo() async {
+        // 1. 尝试从数据库查询
+        let type = try? await DatabaseContainer.shared.db.reader.read { db -> PhotoAsset.MediaType? in
+            // 先尝试完全匹配 locatorKey (library://... 或 webdav://...)
+            if let asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                return asset.mediaType
+            }
+            
+            // 如果是 library://，尝试提取纯 identifier 再次匹配
+            if let locator = MediaLocator.parse(locatorKey),
+               case .library(let id) = locator {
+                if let asset = try PhotoAsset.filter(Column("localIdentifier") == id).fetchOne(db) {
+                    return asset.mediaType
+                }
+            }
+            return nil
+        }
+        
+        await MainActor.run {
+            if let type = type {
+                self.isVideo = (type == .video)
+            } else {
+                // 2. 数据库没查到，根据扩展名兜底判断
+                let lower = locatorKey.lowercased()
+                self.isVideo = lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v")
+            }
         }
     }
 }
