@@ -227,7 +227,38 @@ final class ImportWebDAVPhotosUseCase {
         print("[WebDAVImport] [\(index+1)/\(total)] Downloading: \(remotePath)")
 
         let data = try await client.get(path: remotePath)
-        let exif = extractExif(from: data)
+        var exif = extractExif(from: data, remotePath: remotePath)
+
+        // Fallback: if the JPG has no embedded GPS, try the sidecar XMP (e.g. "P1068350.JPG.xmp").
+        if exif.latitude == nil || exif.longitude == nil {
+            let xmpPath1 = remotePath + ".xmp" // "P1068350.JPG" -> "P1068350.JPG.xmp"
+            let xmpPath2: String? = {
+                // Also try "P1068350.xmp" (without the .JPG part) for compatibility.
+                let ext = (remotePath as NSString).pathExtension
+                guard !ext.isEmpty else { return nil }
+                let withoutExt = (remotePath as NSString).deletingPathExtension
+                return withoutExt + ".xmp"
+            }()
+
+            let xmpCandidates = [xmpPath1, xmpPath2].compactMap { $0 }
+
+            for xmpPath in xmpCandidates {
+                guard let xmpData = try? await client.get(path: xmpPath) else {
+                    continue
+                }
+
+                guard let xmpString = String(data: xmpData, encoding: .utf8) else {
+                    continue
+                }
+
+                let xmpGps = parseXmpGps(xmpString)
+                if let lat = xmpGps.latitude, let lon = xmpGps.longitude {
+                    exif.latitude = lat
+                    exif.longitude = lon
+                    break
+                }
+            }
+        }
 
         let hasItemChanged: @Sendable (RemoteMediaAsset, WebDAVDirectoryItem) -> Bool = { existing, item in
             if let existingEtag = existing.etag, let itemEtag = item.etag, !existingEtag.isEmpty, !itemEtag.isEmpty {
@@ -454,5 +485,134 @@ final class ImportWebDAVPhotosUseCase {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter.date(from: value)
+    }
+
+    private func parseXmpGps(_ xmp: String) -> (latitude: Double?, longitude: Double?) {
+        func decodeXmlEntities(_ s: String) -> String {
+            // Minimal entity decoding sufficient for ExifTool-generated XMP.
+            return s
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .replacingOccurrences(of: "&#34;", with: "\"")
+                .replacingOccurrences(of: "&apos;", with: "'")
+                .replacingOccurrences(of: "&#39;", with: "'")
+                .replacingOccurrences(of: "&amp;", with: "&")
+        }
+
+        func extractAnyAttrValue(_ key: String) -> String? {
+            // Match both `exif:GPSLatitude="..."` and `GPSLatitude="..."` anywhere in the document.
+            // We purposefully do NOT anchor to tag names because ExifTool typically stores these on rdf:Description.
+            let escaped = NSRegularExpression.escapedPattern(for: key)
+            let pattern = "(?:^|[\\s<])(?:[A-Za-z0-9_\\-]+:)?" + escaped + "\\s*=\\s*\"([^\"]*)\""
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return nil }
+            guard let m = re.firstMatch(in: xmp, range: NSRange(xmp.startIndex..<xmp.endIndex, in: xmp)) else { return nil }
+            guard let r1 = Range(m.range(at: 1), in: xmp) else { return nil }
+            return decodeXmlEntities(String(xmp[r1])).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        func extractAnyTagValue(_ key: String) -> String? {
+            // Match `<exif:GPSLatitude>...</exif:GPSLatitude>` or `<GPSLatitude>...</GPSLatitude>`
+            let escaped = NSRegularExpression.escapedPattern(for: key)
+            let pattern = "<\\s*(?:[A-Za-z0-9_\\-]+:)?" + escaped + "\\s*>(.*?)<\\s*/\\s*(?:[A-Za-z0-9_\\-]+:)?" + escaped + "\\s*>"
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return nil }
+            guard let m = re.firstMatch(in: xmp, range: NSRange(xmp.startIndex..<xmp.endIndex, in: xmp)) else { return nil }
+            guard let r1 = Range(m.range(at: 1), in: xmp) else { return nil }
+            return decodeXmlEntities(String(xmp[r1])).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        func extractValue(_ key: String) -> String? {
+            // Prefer attributes (most common for ExifTool sidecar), then fallback to tag content.
+            return extractAnyAttrValue(key) ?? extractAnyTagValue(key)
+        }
+
+        func parseDmsOrDecimal(_ raw: String) -> Double? {
+            // Supports formats like:
+            // - 18 deg 18' 10.74" N
+            // - 109 deg 20' 1.20" E
+            // - 18.302983 (decimal)
+            // - 18,18.17892N  (Panasonic/ExifTool compact format: degrees,minutes.decimal + direction)
+            // - 109,20.02008E
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let upper = trimmed.uppercased()
+
+            let direction: String? = {
+                if upper.contains(" N") || upper.hasSuffix("N") { return "N" }
+                if upper.contains(" S") || upper.hasSuffix("S") { return "S" }
+                if upper.contains(" E") || upper.hasSuffix("E") { return "E" }
+                if upper.contains(" W") || upper.hasSuffix("W") { return "W" }
+                if upper.contains("NORTH") { return "N" }
+                if upper.contains("SOUTH") { return "S" }
+                if upper.contains("EAST") { return "E" }
+                if upper.contains("WEST") { return "W" }
+                return nil
+            }()
+
+            // Panasonic/ExifTool compact: "18,18.17892N" => deg=18, min=18.17892
+            if trimmed.contains(","),
+               let re = try? NSRegularExpression(pattern: "^\\s*([0-9]+(?:\\.[0-9]+)?)\\s*,\\s*([0-9]+(?:\\.[0-9]+)?)\\s*([NSEW])\\s*$", options: [.caseInsensitive]),
+               let m = re.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)),
+               let rDeg = Range(m.range(at: 1), in: trimmed),
+               let rMin = Range(m.range(at: 2), in: trimmed),
+               let rDir = Range(m.range(at: 3), in: trimmed) {
+                let deg = Double(trimmed[rDeg])
+                let minutes = Double(trimmed[rMin])
+                let dir = trimmed[rDir].uppercased()
+                if let deg, let minutes {
+                    var decimal = deg + (minutes / 60.0)
+                    if dir == "S" || dir == "W" { decimal = -decimal }
+                    return decimal
+                }
+            }
+
+            // Pull out numbers. In DMS case we'll use first 3 numbers.
+            guard let re = try? NSRegularExpression(pattern: "([0-9]+(?:\\.[0-9]+)?)", options: []) else { return nil }
+            let matches = re.matches(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed))
+            let nums: [Double] = matches.prefix(3).compactMap { m in
+                guard let r = Range(m.range(at: 1), in: trimmed) else { return nil }
+                return Double(trimmed[r])
+            }
+
+            if nums.count >= 3 {
+                let d = nums[0]
+                let m = nums[1]
+                let s = nums[2]
+                var decimal = d + (m / 60.0) + (s / 3600.0)
+                if direction == "S" || direction == "W" { decimal = -decimal }
+                return decimal
+            }
+
+            if nums.count == 2 {
+                // Another common variant: degrees + minutes.decimal
+                let d = nums[0]
+                let m = nums[1]
+                var decimal = d + (m / 60.0)
+                if direction == "S" || direction == "W" { decimal = -decimal }
+                return decimal
+            }
+
+            if nums.count == 1 {
+                var decimal = nums[0]
+                if direction == "S" || direction == "W" { decimal = -abs(decimal) }
+                return decimal
+            }
+
+            return nil
+        }
+
+        let latRaw = extractValue("GPSLatitude")
+        let lonRaw = extractValue("GPSLongitude")
+
+        if debug {
+            print("[WebDAVImport][ExifDebug] XMP contains 'GPSLatitude'? \(xmp.localizedCaseInsensitiveContains("GPSLatitude")) 'GPSLongitude'? \(xmp.localizedCaseInsensitiveContains("GPSLongitude"))")
+            print("[WebDAVImport][ExifDebug] XMP extracted latRaw=\(String(describing: latRaw)) lonRaw=\(String(describing: lonRaw))")
+        }
+
+        let lat = latRaw.flatMap(parseDmsOrDecimal)
+        let lon = lonRaw.flatMap(parseDmsOrDecimal)
+
+        if debug {
+            print("[WebDAVImport][ExifDebug] XMP parsed lat=\(String(describing: lat)) lon=\(String(describing: lon))")
+        }
+
+        return (latitude: lat, longitude: lon)
     }
 }

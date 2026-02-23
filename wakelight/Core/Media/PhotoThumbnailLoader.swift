@@ -19,7 +19,12 @@ final class PhotoThumbnailLoader {
 
     func loadThumbnail(locatorKey: String, size: CGSize) async -> UIImage? {
         guard let locator = MediaLocator.parse(locatorKey) else {
+            print("[Thumb] parse failed: \(locatorKey)")
             return nil
+        }
+
+        if case .webdav(let profileId, let remotePath) = locator {
+            print("[Thumb] request webdav thumb profile=\(profileId) path=\(remotePath) size=\(Int(size.width))x\(Int(size.height))")
         }
 
         let cacheKey = "thumb-\(locator.stableKey)-\(Int(size.width))x\(Int(size.height))" as NSString
