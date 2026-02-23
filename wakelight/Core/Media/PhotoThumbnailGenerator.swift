@@ -38,6 +38,10 @@ final class PhotoThumbnailGenerator {
         }
         
         try data.write(to: destinationURL)
+
+        // Enforce disk cache limit (LRU trim)
+        try? MediaCache.shared.trimThumbnailsIfNeeded()
+
         return destinationURL.path
     }
     
