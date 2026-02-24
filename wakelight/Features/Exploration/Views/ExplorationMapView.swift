@@ -10,25 +10,21 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var isAwakenMode: Bool
     @Binding var revealedClusterIds: Set<UUID>
 
+    var onFirstAwakenInSession: ((PlaceCluster, CGPoint) -> Void)?
+
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
         private var panGesture: UIPanGestureRecognizer?
         weak var fogScreenView: FogScreenView?
-        weak var floatingTextOverlay: FloatingTextOverlayView?
 
         private var hitStreakCount: Int = 0
         private var lastHitTime: TimeInterval = 0
         private var lastFeedbackTime: TimeInterval = 0
         private var lastHitClusterId: UUID?
 
-        // MARK: - "Batch scratch" text sampling
-        private var scratchHitCountInSession: Int = 0
-        private var lastKnowledgeTime: TimeInterval = 0
-        private var lastKnowledgeCandidate: PlaceCluster?
-        private let knowledgeCooldown: TimeInterval = 1.5
-        private let knowledgeEveryNHits: Int = 6
-        private var didShowKnowledgeInScratchSession: Bool = false
+
+        private var didTriggerFirstAwakenCallbackInSession: Bool = false
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -47,13 +43,9 @@ struct ExplorationMapView: UIViewRepresentable {
             let mapView = gesture.view as! MKMapView
             let location = gesture.location(in: mapView)
             
-            // Treat one pan as a "scratch session" so we can do a guaranteed first knowledge pop.
             switch gesture.state {
             case .began:
-                scratchHitCountInSession = 0
-                lastKnowledgeCandidate = nil
-                lastKnowledgeTime = 0
-                didShowKnowledgeInScratchSession = false
+                didTriggerFirstAwakenCallbackInSession = false
                 return
             case .changed:
                 break
@@ -94,21 +86,14 @@ struct ExplorationMapView: UIViewRepresentable {
                             StardustEmitter.emit(at: point, in: mapView)
                         }
                         
-                        // Knowledge text should be tied to the same rate-limited feedback branch.
-                        // First feedback in this scratch session always shows once (bypass cooldown + N-hit gate).
-                        let didShow = maybeShowKnowledgeText(
-                            for: hitCluster,
-                            annotation: annotation,
-                            mapView: mapView,
-                            forceShow: !didShowKnowledgeInScratchSession
-                        )
-                        if didShow {
-                            didShowKnowledgeInScratchSession = true
-                        }
                     }
 
                     // 2. 业务逻辑
                     if !isAlreadyInQueue {
+                        if !didTriggerFirstAwakenCallbackInSession {
+                            didTriggerFirstAwakenCallbackInSession = true
+                            parent.onFirstAwakenInSession?(hitCluster, point)
+                        }
                         Task { @MainActor in
                             parent.awakenQueue.append(hitCluster)
                             parent.revealedClusterIds.insert(hitCluster.id)
@@ -135,128 +120,6 @@ struct ExplorationMapView: UIViewRepresentable {
             }
         }
 
-        @discardableResult
-        private func maybeShowKnowledgeText(
-            for hitCluster: PlaceCluster,
-            annotation: ClusterAnnotation,
-            mapView: MKMapView,
-            forceShow: Bool
-        ) -> Bool {
-            scratchHitCountInSession += 1
-
-            let now = CACurrentMediaTime()
-            
-            if !forceShow {
-                guard now - lastKnowledgeTime >= knowledgeCooldown else { return false }
-
-                if lastKnowledgeCandidate == nil || hitCluster.hasStory {
-                    lastKnowledgeCandidate = hitCluster
-                }
-
-                guard scratchHitCountInSession % knowledgeEveryNHits == 0 else { return false }
-                guard let candidate = lastKnowledgeCandidate else { return false }
-
-                scheduleAIKnowledgeText(for: candidate, annotation: annotation, mapView: mapView)
-
-                lastKnowledgeTime = now
-                lastKnowledgeCandidate = nil
-                return true
-            }
-
-            // First feedback in a session: show immediately on the current hit.
-            scheduleAIKnowledgeText(for: hitCluster, annotation: annotation, mapView: mapView, forceImmediate: true)
-
-            lastKnowledgeTime = now
-            lastKnowledgeCandidate = nil
-            return true
-        }
-        
-        private func showKnowledgeText(_ text: String, for annotation: ClusterAnnotation, mapView: MKMapView) {
-            if let overlay = floatingTextOverlay {
-                let p = mapView.convert(annotation.coordinate, toPointTo: overlay)
-                overlay.show(text: text, at: p)
-            } else if let fogView = fogScreenView {
-                let p = mapView.convert(annotation.coordinate, toPointTo: fogView)
-                let temp = FloatingTextOverlayView(frame: fogView.bounds)
-                temp.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                fogView.addSubview(temp)
-                temp.show(text: text, at: p)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                    temp.removeFromSuperview()
-                }
-            }
-        }
-
-        /// 构造 AI 请求（含 geohash_6 + time_bucket + fallback），并异步生成地图知识短句。
-        private func scheduleAIKnowledgeText(
-            for cluster: PlaceCluster,
-            annotation: ClusterAnnotation,
-            mapView: MKMapView,
-            forceImmediate: Bool = false
-        ) {
-            let geohash6 = String(cluster.geohash.prefix(6))
-
-            let nowDate = Date()
-            let calendar = Calendar.current
-            let month = calendar.component(.month, from: nowDate)
-            let hour = calendar.component(.hour, from: nowDate)
-
-            let season: String
-            switch month {
-            case 3...5: season = "春季"
-            case 6...8: season = "夏季"
-            case 9...11: season = "秋季"
-            default: season = "冬季"
-            }
-
-            let timeOfDay: String
-            switch hour {
-            case 5...11: timeOfDay = "清晨"
-            case 12...14: timeOfDay = "正午"
-            case 15...18: timeOfDay = "傍晚"
-            case 19...23: timeOfDay = "深夜"
-            default: timeOfDay = "夜间"
-            }
-
-            let timeBucket = "\(season)_\(timeOfDay)"
-            let cacheKey = "culture:\(geohash6):\(timeBucket)"
-
-            // 先用本地 CultureService 生成一条短句，作为 AI 的知识背景 + 兜底文案。
-            let cultureContext = CultureService.Context(cityName: cluster.cityName, isStoryPoint: cluster.hasStory)
-            let fallbackText = CultureService.shared.shortLine(for: cultureContext)
-
-            let systemPrompt = """
-            你是一个地理文化向导。请基于提供的地理坐标、所在城市与本地文化描述，为用户生成一句简短、灵动、且带有“显影感”的中文句子（不超过 20 个汉字），适合在地图上作为瞬间浮现的提示文字。严禁废话和空泛鸡汤。
-            """
-
-            let city = cluster.cityName ?? "未知城市"
-            let userPrompt = """
-            地理位置：
-            - 城市：\(city)
-            - geohash_6：\(geohash6)
-            - 粗略经纬度：(\(cluster.centerLatitude), \(cluster.centerLongitude))
-
-            当前时间氛围：\(season) 的 \(timeOfDay)
-
-            本地文化知识（简略描述，可以作为参考语气和意象）：\(fallbackText)
-
-            请根据以上信息，生成一句适合作为“划过光点时短暂浮现”的中文提示语，不要解释，不要前后缀修饰，只输出这句话本身。
-            """
-
-            let request = AITextRequest(
-                systemPrompt: systemPrompt,
-                userPrompt: userPrompt,
-                cacheKey: cacheKey,
-                fallbackText: fallbackText
-            )
-
-            Task {
-                let text = await AITextEngine.shared.generateText(for: request)
-                await MainActor.run {
-                    self.showKnowledgeText(text, for: annotation, mapView: mapView)
-                }
-            }
-        }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             true
@@ -264,8 +127,6 @@ struct ExplorationMapView: UIViewRepresentable {
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             if !parent.isAwakenMode {
-                scratchHitCountInSession = 0
-                lastKnowledgeCandidate = nil
             }
             return true
         }
@@ -342,11 +203,6 @@ struct ExplorationMapView: UIViewRepresentable {
         container.addSubview(fogView)
         context.coordinator.fogScreenView = fogView
 
-        let textOverlay = FloatingTextOverlayView()
-        textOverlay.translatesAutoresizingMaskIntoConstraints = false
-        textOverlay.isUserInteractionEnabled = false
-        container.addSubview(textOverlay)
-        context.coordinator.floatingTextOverlay = textOverlay
 
         NSLayoutConstraint.activate([
             mapView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -359,10 +215,6 @@ struct ExplorationMapView: UIViewRepresentable {
             fogView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             fogView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
-            textOverlay.topAnchor.constraint(equalTo: container.topAnchor),
-            textOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            textOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            textOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
