@@ -74,11 +74,32 @@ final class FloatingTextOverlayView: UIView {
         let targetSize = label.sizeThatFits(CGSize(width: maxWidth, height: CGFloat.greatestFiniteMagnitude))
         label.bounds = CGRect(origin: .zero, size: CGSize(width: min(maxWidth, targetSize.width), height: targetSize.height))
 
-        // Keep inside bounds.
-        var x = point.x
-        var y = point.y - 14
-        x = max(label.bounds.width / 2 + 8, min(bounds.width - label.bounds.width / 2 - 8, x))
-        y = max(label.bounds.height / 2 + 8, min(bounds.height - label.bounds.height / 2 - 8, y))
+        // Keep inside bounds, avoid being clipped/covered:
+        // - Prefer showing above the point with a larger offset.
+        // - If near the top, flip to below.
+        // - Clamp within safe area.
+        let margin: CGFloat = 8
+        let safeTop = safeAreaInsets.top + margin
+        let safeBottom = safeAreaInsets.bottom + margin
+        let safeLeft = safeAreaInsets.left + margin
+        let safeRight = safeAreaInsets.right + margin
+        
+        let halfW = label.bounds.width / 2
+        let halfH = label.bounds.height / 2
+        
+        let minX = safeLeft + halfW
+        let maxX = bounds.width - safeRight - halfW
+        let minY = safeTop + halfH
+        let maxY = bounds.height - safeBottom - halfH
+        
+        let x = max(minX, min(maxX, point.x))
+        
+        let offset: CGFloat = 50
+        let preferredAboveY = point.y - offset
+        let wouldClipAbove = (preferredAboveY - halfH) < safeTop
+        let rawY = wouldClipAbove ? (point.y + offset) : preferredAboveY
+        let y = max(minY, min(maxY, rawY))
+        
         label.center = CGPoint(x: x, y: y)
 
         let startCenter = label.center

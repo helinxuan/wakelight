@@ -28,6 +28,7 @@ struct ExplorationMapView: UIViewRepresentable {
         private var lastKnowledgeCandidate: PlaceCluster?
         private let knowledgeCooldown: TimeInterval = 1.5
         private let knowledgeEveryNHits: Int = 6
+        private var didShowKnowledgeInScratchSession: Bool = false
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -45,7 +46,20 @@ struct ExplorationMapView: UIViewRepresentable {
             guard parent.isAwakenMode else { return }
             let mapView = gesture.view as! MKMapView
             let location = gesture.location(in: mapView)
-            guard gesture.state == .changed else { return }
+            
+            // Treat one pan as a "scratch session" so we can do a guaranteed first knowledge pop.
+            switch gesture.state {
+            case .began:
+                scratchHitCountInSession = 0
+                lastKnowledgeCandidate = nil
+                lastKnowledgeTime = 0
+                didShowKnowledgeInScratchSession = false
+                return
+            case .changed:
+                break
+            default:
+                return
+            }
 
             let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
 
@@ -79,12 +93,22 @@ struct ExplorationMapView: UIViewRepresentable {
                         } else {
                             StardustEmitter.emit(at: point, in: mapView)
                         }
+                        
+                        // Knowledge text should be tied to the same rate-limited feedback branch.
+                        // First feedback in this scratch session always shows once (bypass cooldown + N-hit gate).
+                        let didShow = maybeShowKnowledgeText(
+                            for: hitCluster,
+                            annotation: annotation,
+                            mapView: mapView,
+                            forceShow: !didShowKnowledgeInScratchSession
+                        )
+                        if didShow {
+                            didShowKnowledgeInScratchSession = true
+                        }
                     }
 
                     // 2. 业务逻辑
                     if !isAlreadyInQueue {
-                        maybeShowKnowledgeText(for: hitCluster, annotation: annotation, mapView: mapView)
-
                         Task { @MainActor in
                             parent.awakenQueue.append(hitCluster)
                             parent.revealedClusterIds.insert(hitCluster.id)
@@ -111,23 +135,51 @@ struct ExplorationMapView: UIViewRepresentable {
             }
         }
 
-        private func maybeShowKnowledgeText(for hitCluster: PlaceCluster, annotation: ClusterAnnotation, mapView: MKMapView) {
+        @discardableResult
+        private func maybeShowKnowledgeText(
+            for hitCluster: PlaceCluster,
+            annotation: ClusterAnnotation,
+            mapView: MKMapView,
+            forceShow: Bool
+        ) -> Bool {
             scratchHitCountInSession += 1
 
             let now = CACurrentMediaTime()
-            guard now - lastKnowledgeTime >= knowledgeCooldown else { return }
+            
+            if !forceShow {
+                guard now - lastKnowledgeTime >= knowledgeCooldown else { return false }
 
-            if lastKnowledgeCandidate == nil || hitCluster.hasStory {
-                lastKnowledgeCandidate = hitCluster
+                if lastKnowledgeCandidate == nil || hitCluster.hasStory {
+                    lastKnowledgeCandidate = hitCluster
+                }
+
+                guard scratchHitCountInSession % knowledgeEveryNHits == 0 else { return false }
+                guard let candidate = lastKnowledgeCandidate else { return false }
+                
+                let text = CultureService.shared.shortLine(
+                    for: .init(cityName: candidate.cityName, isStoryPoint: candidate.hasStory)
+                )
+                
+                showKnowledgeText(text, for: annotation, mapView: mapView)
+                
+                lastKnowledgeTime = now
+                lastKnowledgeCandidate = nil
+                return true
             }
 
-            guard scratchHitCountInSession % knowledgeEveryNHits == 0 else { return }
-            guard let candidate = lastKnowledgeCandidate else { return }
-
+            // First feedback in a session: show immediately on the current hit.
             let text = CultureService.shared.shortLine(
-                for: .init(cityName: candidate.cityName, isStoryPoint: candidate.hasStory)
+                for: .init(cityName: hitCluster.cityName, isStoryPoint: hitCluster.hasStory)
             )
 
+            showKnowledgeText(text, for: annotation, mapView: mapView)
+
+            lastKnowledgeTime = now
+            lastKnowledgeCandidate = nil
+            return true
+        }
+        
+        private func showKnowledgeText(_ text: String, for annotation: ClusterAnnotation, mapView: MKMapView) {
             if let overlay = floatingTextOverlay {
                 let p = mapView.convert(annotation.coordinate, toPointTo: overlay)
                 overlay.show(text: text, at: p)
@@ -141,9 +193,6 @@ struct ExplorationMapView: UIViewRepresentable {
                     temp.removeFromSuperview()
                 }
             }
-
-            lastKnowledgeTime = now
-            lastKnowledgeCandidate = nil
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
