@@ -669,11 +669,32 @@ flowchart LR
   - 成就进度与解锁结果必须落 SQLite/GRDB（防丢）。
   - 开启 CloudKit 时，可同步 `CDAchievementProgress`（同步的是“结果/进度”，不是规则推导）。
 
-## 7.4 文化系统（Culture）
+## 7.4 文化系统（Culture）与 边缘侧 AI（On-Device AI）
 
-- **默认离线**：本地 JSON（`Resources/LocalData`）提供诗词/知识库。
-- **匹配策略**：关键词/标签匹配属于 Domain 层策略（可测试），数据读取属于 Core 层 DataSource。
-- **热更新（可选）**：可通过 CloudKit 下发“数据包版本信息/配置”，但客户端仍按本地策略匹配与展示。
+### 7.4.1 核心理念：离线文化百科 + 端侧智能
+- **默认离线**：本地 JSON（`Resources/LocalData`）提供基础诗词/知识库。
+- **端侧智能（Apple Foundation Models）**：引入 Apple 本地大语言模型，将“原始地理坐标”与“冷冰冰的知识”转化为“有温度的特效文字”。
+- **隐私边界**：所有 Prompt 推理均在设备端完成，不上传坐标或照片信息。
+
+### 7.4.2 AI 赋能：知识“润色”与“时空连结”
+当用户划过光点时，AI 承担以下职责：
+1. **语义压缩（Summarization）**：将冗长的地理百科压缩为适合“特效文字”展示的极简金句（15字以内）。
+2. **时空对齐（Contextualization）**：根据当前季节（Spring/Winter）、时段（Sunset/Midnight），从知识库中筛选并改写最应景的内容。
+3. **风格转换（Stylizing）**：根据该地点的属性（荒野 vs 城市），切换 AI 生成的语调（浪漫诗意 vs 硬核地理）。
+
+### 7.4.3 技术架构与数据流
+- **模型引擎**：使用 Apple `Foundation Models` (Swift `LanguageModel` 框架)。
+- **Prompt 策略（System Instructions）**：
+  - “你是一个地理文化向导。请基于提供的[地理事实]和[诗词]，为用户生成一句简短、灵动、且带有‘显影感’的中文。严禁废话。”
+- **缓存机制**：AI 生成的内容按 `(geohash_6, time_bucket)` 进行本地缓存，避免对相同区域的重复推理，节省能耗。
+- **降级方案（Fallback）**：
+  - 若模型未下载或算力受限：直接展示本地库中的 `highlightLine` 原文。
+
+### 7.4.4 特效文字生成流程（AI 参与版）
+1. **输入**：`[Raw Geo Data] + [Matched Local Poem/Fact]`。
+2. **推理**：LLM 执行端侧推理（约 200-500ms）。
+3. **输出**：`Refined Text`（如：“此刻你脚下，是沉睡三千年的良渚古城”）。
+4. **渲染**：调用 `DesignSystem/Particles` 发起“文字显影”特效。
 
 ## 7.5 聚类（Clustering）
 

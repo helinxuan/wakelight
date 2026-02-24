@@ -1,6 +1,7 @@
 import SwiftUI
 import MapKit
 import UIKit
+import CoreLocation
 
 struct ExplorationMapView: UIViewRepresentable {
     @ObservedObject var viewModel: ExploreViewModel
@@ -14,11 +15,19 @@ struct ExplorationMapView: UIViewRepresentable {
         var currentAnnotations: [ClusterAnnotation] = []
         private var panGesture: UIPanGestureRecognizer?
         weak var fogScreenView: FogScreenView?
+        weak var floatingTextOverlay: FloatingTextOverlayView?
 
         private var hitStreakCount: Int = 0
         private var lastHitTime: TimeInterval = 0
         private var lastFeedbackTime: TimeInterval = 0
         private var lastHitClusterId: UUID?
+
+        // MARK: - "Batch scratch" text sampling
+        private var scratchHitCountInSession: Int = 0
+        private var lastKnowledgeTime: TimeInterval = 0
+        private var lastKnowledgeCandidate: PlaceCluster?
+        private let knowledgeCooldown: TimeInterval = 1.5
+        private let knowledgeEveryNHits: Int = 6
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -50,7 +59,6 @@ struct ExplorationMapView: UIViewRepresentable {
                     let now = CACurrentMediaTime()
                     
                     // 只有切换了 Cluster，或者在同一个 Cluster 上停留超过 0.1s 才再次触发反馈
-                    // 这样可以避免手指微颤导致的高频触发（rateLimit=32hz 问题）
                     let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.5)
 
                     if shouldTriggerFeedback {
@@ -75,6 +83,8 @@ struct ExplorationMapView: UIViewRepresentable {
 
                     // 2. 业务逻辑
                     if !isAlreadyInQueue {
+                        maybeShowKnowledgeText(for: hitCluster, annotation: annotation, mapView: mapView)
+
                         Task { @MainActor in
                             parent.awakenQueue.append(hitCluster)
                             parent.revealedClusterIds.insert(hitCluster.id)
@@ -88,11 +98,8 @@ struct ExplorationMapView: UIViewRepresentable {
                             // 通知屏幕层启动扩散动画
                             fogScreenView?.triggerDiffusion(for: hitCluster.id)
                             parent.selectedCluster = hitCluster
-
-                            // Session-only 半显影：不落库
                         }
                     } else {
-                        // 如果已经在队列中，滑动滑过时也要更新 selectedCluster 以触发面板置顶
                         if parent.selectedCluster?.id != hitCluster.id {
                             Task { @MainActor in
                                 parent.selectedCluster = hitCluster
@@ -104,7 +111,50 @@ struct ExplorationMapView: UIViewRepresentable {
             }
         }
 
+        private func maybeShowKnowledgeText(for hitCluster: PlaceCluster, annotation: ClusterAnnotation, mapView: MKMapView) {
+            scratchHitCountInSession += 1
+
+            let now = CACurrentMediaTime()
+            guard now - lastKnowledgeTime >= knowledgeCooldown else { return }
+
+            if lastKnowledgeCandidate == nil || hitCluster.hasStory {
+                lastKnowledgeCandidate = hitCluster
+            }
+
+            guard scratchHitCountInSession % knowledgeEveryNHits == 0 else { return }
+            guard let candidate = lastKnowledgeCandidate else { return }
+
+            let text = CultureService.shared.shortLine(
+                for: .init(cityName: candidate.cityName, isStoryPoint: candidate.hasStory)
+            )
+
+            if let overlay = floatingTextOverlay {
+                let p = mapView.convert(annotation.coordinate, toPointTo: overlay)
+                overlay.show(text: text, at: p)
+            } else if let fogView = fogScreenView {
+                let p = mapView.convert(annotation.coordinate, toPointTo: fogView)
+                let temp = FloatingTextOverlayView(frame: fogView.bounds)
+                temp.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                fogView.addSubview(temp)
+                temp.show(text: text, at: p)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    temp.removeFromSuperview()
+                }
+            }
+
+            lastKnowledgeTime = now
+            lastKnowledgeCandidate = nil
+        }
+
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if !parent.isAwakenMode {
+                scratchHitCountInSession = 0
+                lastKnowledgeCandidate = nil
+            }
             return true
         }
 
@@ -133,12 +183,10 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-            // 跟手：交互中只做轻量更新（只更新 glow 的 position/bounds），禁止重建 path / setNeedsDisplay
             fogScreenView?.updateIfNeeded(interactionPhase: true)
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            // 地图交互结束后再做一次完整可见集重算 + 回收
             fogScreenView?.updateIfNeeded(interactionPhase: false)
         }
 
@@ -154,7 +202,6 @@ struct ExplorationMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
             guard view.annotation is ClusterAnnotation else { return }
-            // 唤醒模式下点击空白处不退出，必须通过 UI 按钮明确退出
             if parent.isAwakenMode { return }
             if parent.selectedCluster != nil {
                 Task { @MainActor in parent.selectedCluster = nil }
@@ -175,14 +222,19 @@ struct ExplorationMapView: UIViewRepresentable {
         mapView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(mapView)
 
-        // 添加屏幕空间迷雾视图
         let fogView = FogScreenView(mapView: mapView)
         fogView.clusters = viewModel.clusters
         fogView.revealedClusterIds = revealedClusterIds
         fogView.translatesAutoresizingMaskIntoConstraints = false
-        fogView.isUserInteractionEnabled = false // 穿透交互
+        fogView.isUserInteractionEnabled = false
         container.addSubview(fogView)
         context.coordinator.fogScreenView = fogView
+
+        let textOverlay = FloatingTextOverlayView()
+        textOverlay.translatesAutoresizingMaskIntoConstraints = false
+        textOverlay.isUserInteractionEnabled = false
+        container.addSubview(textOverlay)
+        context.coordinator.floatingTextOverlay = textOverlay
 
         NSLayoutConstraint.activate([
             mapView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -193,7 +245,12 @@ struct ExplorationMapView: UIViewRepresentable {
             fogView.topAnchor.constraint(equalTo: container.topAnchor),
             fogView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             fogView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            fogView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            fogView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            textOverlay.topAnchor.constraint(equalTo: container.topAnchor),
+            textOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            textOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            textOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
@@ -206,46 +263,36 @@ struct ExplorationMapView: UIViewRepresentable {
         return container
     }
 
-        func updateUIView(_ uiView: UIView, context: Context) {
-            context.coordinator.parent = self
-            guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
-                  let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+        guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
+              let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
 
-            mapView.isScrollEnabled = !isAwakenMode
-            
-            // 同步数据到迷雾视图
-            fogView.clusters = viewModel.clusters
-            fogView.revealedClusterIds = revealedClusterIds
-            fogView.updateIfNeeded(interactionPhase: false)
+        mapView.isScrollEnabled = !isAwakenMode
+        
+        fogView.clusters = viewModel.clusters
+        fogView.revealedClusterIds = revealedClusterIds
+        fogView.updateIfNeeded(interactionPhase: false)
 
-            // 1. 检查数量变化
-            if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
-                context.coordinator.applyAnnotations(to: mapView)
-            }
+        if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
+            context.coordinator.applyAnnotations(to: mapView)
+        }
 
-            // 2. 每次 update 都强制同步可见点状态（解决 MKAnnotationView 复用导致的残留样式）
-            //    这样在退出唤醒模式后，白点会立刻恢复为灰点。
-            for annotation in context.coordinator.currentAnnotations {
-                guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
-                guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
+        for annotation in context.coordinator.currentAnnotations {
+            guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
+            guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
 
-                let shouldHalfReveal = isAwakenMode && revealedClusterIds.contains(cluster.id)
+            let shouldHalfReveal = isAwakenMode && revealedClusterIds.contains(cluster.id)
 
-                if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
-                    view.isStoryPoint = cluster.hasStory
-                    view.isHalfRevealed = shouldHalfReveal
-                    view.updateStyle()
-                }
+            if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
+                view.isStoryPoint = cluster.hasStory
+                view.isHalfRevealed = shouldHalfReveal
+                view.updateStyle()
             }
         }
+    }
 }
 
-/// 迷雾遮罩（GPU 合成）：用 `CAShapeLayer` 作为 mask，通过 even-odd 规则在黑色遮罩上“挖洞”。
-///
-/// 设计目标：
-/// - 禁止 `draw(_:)` / `CGGradient` / `blendMode(.destinationOut)` 这类 CPU 像素级绘制路径
-/// - 只在交互结束（regionDidChange）或数据变更时更新 mask（节流）
-/// - 使用 PNG 纹理叠加实现柔边光晕（Glow），解决硬边圈圈感
 final class FogScreenView: UIView {
     weak var mapView: MKMapView?
 
@@ -257,43 +304,20 @@ final class FogScreenView: UIView {
         didSet { needsFullUpdate = true }
     }
 
-    // MARK: - Tunables (per ARCHITECTURE_WAKELIGHT.md 7.1)
-
-    /// 硬上限：屏幕内同时可见的 glow layer 数量
     private let maxVisibleGlowLayers: Int = 180
-
-    /// 全屏静态迷雾不透明度
     private let fogAlpha: CGFloat = 0.65
-
-    /// Glow 纹理 alpha（视觉上是“照亮变薄”，不是挖洞）
-    /// 地图底图较暗时，screenBlendMode 下需要更高的 alpha 才能明显体现“太阳式长尾”。
     private let glowOpacity: Float = 0.55
-    
-    /// 解锁后的金黄色 (对齐 ARCHITECTURE_WAKELIGHT.md)
     private let storyGlowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
-
-    /// 交互结束后完整更新时的可见范围缓冲（减少边缘 pop）
     private let visiblePadding: CGFloat = 140
-
-    /// 根据缩放计算 glow 尺寸的基准（可看作文档里 B 参数的工程落点）
     private let baseGlowSize: CGFloat = 120
-
-    // MARK: - Animation state (optional diffusion)
 
     private var animatingClusterId: UUID?
     private var animationStartTime: TimeInterval?
     private var displayLink: CADisplayLink?
     private let animationDuration: TimeInterval = 0.6
 
-    // MARK: - Layers
-
-    /// 静态迷雾：1 个半透明 CALayer，不做 mask、不重绘
     private let overlayLayer = CALayer()
-
-    /// Glow 容器层：内部放若干个 contents=PNG 的 CALayer，由 GPU 合成
     private let glowContainerLayer = CALayer()
-
-    /// 复用池：active + idle
     private var activeGlowLayers: [UUID: CALayer] = [:]
     private var idleGlowLayers: [CALayer] = []
 
@@ -312,7 +336,6 @@ final class FogScreenView: UIView {
 
         overlayLayer.backgroundColor = UIColor.black.withAlphaComponent(fogAlpha).cgColor
         layer.addSublayer(overlayLayer)
-
         layer.addSublayer(glowContainerLayer)
     }
 
@@ -326,9 +349,6 @@ final class FogScreenView: UIView {
         updateIfNeeded(interactionPhase: false)
     }
 
-    /// 外部入口：
-    /// - interactionPhase=true：跟手期，只更新 position/bounds（禁止 rebuild path / setNeedsDisplay）
-    /// - interactionPhase=false：交互结束，重算可见集 + 回收
     func updateIfNeeded(interactionPhase: Bool) {
         if interactionPhase {
             updateActiveGlowLayerGeometryOnly()
@@ -336,7 +356,6 @@ final class FogScreenView: UIView {
         }
 
         guard needsFullUpdate else {
-            // 即使不需要 full update，也要确保 animating 的 frame 更新
             updateActiveGlowLayerGeometryOnly()
             return
         }
@@ -360,7 +379,6 @@ final class FogScreenView: UIView {
     }
 
     @objc private func onDisplayLink() {
-        // 动画期间不做 full rebuild，只做轻量几何更新 + opacity 变化
         updateActiveGlowLayerGeometryOnly()
 
         if let start = animationStartTime {
@@ -375,8 +393,6 @@ final class FogScreenView: UIView {
         }
     }
 
-    // MARK: - Core update
-
     private func updateVisibleSetAndRecycle() {
         guard let mapView else { return }
         let rect = bounds
@@ -384,17 +400,12 @@ final class FogScreenView: UIView {
 
         let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
 
-        // 1) 先筛选屏幕内 & revealed/animating
         var candidates: [(id: UUID, screenPoint: CGPoint, dist2: CGFloat)] = []
         candidates.reserveCapacity(256)
 
         let center = CGPoint(x: rect.midX, y: rect.midY)
 
         for c in clusters {
-            // 三段状态对应的迷雾光晕显示逻辑：
-            // - locked: 无光晕
-            // - half-revealed (session): 显示白色光晕 (FogHoleSoft)
-            // - fully revealed (story): 显示黄色光晕 (FogHoleSoftYellow)
             let isHalfRevealed = revealedClusterIds.contains(c.id)
             let isFullyRevealed = c.hasStory
             let isAnimating = c.id == animatingClusterId
@@ -410,7 +421,6 @@ final class FogScreenView: UIView {
             candidates.append((c.id, p, dx * dx + dy * dy))
         }
 
-        // 2) 硬上限：取最近的 maxVisibleGlowLayers 个（靠屏幕中心）
         if candidates.count > maxVisibleGlowLayers {
             candidates.sort { $0.dist2 < $1.dist2 }
             candidates = Array(candidates.prefix(maxVisibleGlowLayers))
@@ -418,24 +428,20 @@ final class FogScreenView: UIView {
 
         let keepIds = Set(candidates.map { $0.id })
 
-        // 3) 回收不需要的 active layers
         for (id, layer) in activeGlowLayers where !keepIds.contains(id) {
             layer.removeFromSuperlayer()
             activeGlowLayers.removeValue(forKey: id)
             idleGlowLayers.append(layer)
         }
 
-        // 4) 确保 keepIds 都有 layer
         for item in candidates {
             let layer = getOrCreateGlowLayer(for: item.id)
             layer.position = item.screenPoint
         }
 
-        // 5) 统一更新一次几何（bounds/opacity/filter）
         updateActiveGlowLayerGeometryOnly()
     }
 
-    /// 跟手期：只更新 active glow layers 的 position/bounds/opacity（不增不减）
     private func updateActiveGlowLayerGeometryOnly() {
         guard let mapView else { return }
 
@@ -460,15 +466,12 @@ final class FogScreenView: UIView {
             
             let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
             layer.position = mapView.convert(coord, toPointTo: self)
-
-            // 根据状态切换纹理 (Story 黄色 vs Session 白色)
             layer.contents = c.hasStory ? storyGlowImage : glowImage
 
             var finalSize = size
             var finalOpacity = glowOpacity
 
             if id == animatingClusterId {
-                // 扩散时稍微放大&增亮一点点
                 finalSize = size * (1.0 + 0.35 * animProgress)
                 finalOpacity = min(0.52, glowOpacity + Float(0.18 * animProgress))
             }
@@ -485,8 +488,6 @@ final class FogScreenView: UIView {
     }
 
     private func glowZoomFactor(span: Double) -> CGFloat {
-        // span 越大（越远），factor 越小
-        // 经验函数：平滑、单调、避免极端
         let f = 1.0 / (1.0 + pow(span / 18.0, 0.85))
         return CGFloat(max(0.25, min(1.0, f)))
     }
@@ -503,7 +504,6 @@ final class FogScreenView: UIView {
 
         layer.contents = glowImage
         layer.contentsGravity = .resizeAspect
-        // contentsScale 可以让纹理在 retina 下更锐，但会增加显存；这里用系统默认即可
 
         glowContainerLayer.addSublayer(layer)
         activeGlowLayers[id] = layer
