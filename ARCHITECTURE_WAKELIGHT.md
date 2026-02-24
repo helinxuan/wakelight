@@ -671,10 +671,14 @@ flowchart LR
 
 ## 7.4 文化系统（Culture）与 边缘侧 AI（On-Device AI）
 
-### 7.4.1 核心理念：离线文化百科 + 端侧智能
+### 7.4.1 核心理念：离线文化百科 + 智能润色层
 - **默认离线**：本地 JSON（`Resources/LocalData`）提供基础诗词/知识库。
-- **端侧智能（Apple Foundation Models）**：引入 Apple 本地大语言模型，将“原始地理坐标”与“冷冰冰的知识”转化为“有温度的特效文字”。
-- **隐私边界**：所有 Prompt 推理均在设备端完成，不上传坐标或照片信息。
+- **智能润色层（AI）**：通过统一的 `AITextEngine` 将“原始地理坐标”与“冷冰冰的知识”转化为“有温度的特效文字”。
+  - 长期目标：在支持的设备上优先使用 Apple Foundation Models（端侧推理）。
+  - 当前实现：使用在线大模型服务（硅基流动 Qwen2.5-7B-Instruct），在无网/失败时自动回退到本地文案。
+- **隐私边界**：
+  - 离线路径：所有逻辑仅依赖本地 JSON 与客户端状态，不上传坐标或照片信息。
+  - 在线路径（可选增强）：仅上传必要的抽象描述（城市名/季节/时间氛围/照片数量等），不上传精确 GPS 与原图内容。
 
 ### 7.4.2 AI 赋能：知识“润色”与“时空连结”
 当用户划过光点时，AI 承担以下职责：
@@ -683,18 +687,40 @@ flowchart LR
 3. **风格转换（Stylizing）**：根据该地点的属性（荒野 vs 城市），切换 AI 生成的语调（浪漫诗意 vs 硬核地理）。
 
 ### 7.4.3 技术架构与数据流
-- **模型引擎**：使用 Apple `Foundation Models` (Swift `LanguageModel` 框架)。
+- **模型引擎封装**：统一通过 `Core/AI/AITextEngine` 访问 AI 文本生成能力，对 Feature 隐藏具体模型细节。
+  - 长期目标：在支持的系统上优先走 Apple `Foundation Models`（Swift `LanguageModel` / `FoundationModels` 框架，端侧推理）。
+  - 当前实现：通过在线服务硅基流动 `Qwen2.5-7B-Instruct (Free)` 生成文案，接口兼容 OpenAI Chat Completions 协议。
+- **统一请求模型**：使用 `AITextRequest` 结构体，明确区分：
+  - `systemPrompt`：场景级 System Instructions（例如“地理文化向导”、“回忆文案助手”）。
+  - `userPrompt`：携带具体上下文的用户输入（地理事实、诗词、时间信息、照片数量等）。
+  - `cacheKey`：用于本地缓存命中（例如 `culture:\(geohash_6):\(time_bucket)` / `writing:\(placeId):\(time_bucket)`）。
+  - `fallbackText`：当模型不可用或推理失败时回退展示的本地文案。
 - **Prompt 策略（System Instructions）**：
-  - “你是一个地理文化向导。请基于提供的[地理事实]和[诗词]，为用户生成一句简短、灵动、且带有‘显影感’的中文。严禁废话。”
-- **缓存机制**：AI 生成的内容按 `(geohash_6, time_bucket)` 进行本地缓存，避免对相同区域的重复推理，节省能耗。
+  - 地图文化短句场景：  
+    “你是一个地理文化向导。请基于提供的[地理事实]和[诗词]，为用户生成一句简短、灵动、且带有‘显影感’的中文。严禁废话。”
+  - 写话智能补全场景：  
+    “你是一个温柔的回忆文案助手。请基于提供的信息，为用户生成一句简短、真诚、自然的中文句子，适合作为个人回忆的说明文字。禁止废话和空洞鸡汤。”
+- **缓存机制**：
+  - 地图文化短句：按 `(geohash_6, time_bucket)`（例如日间/夜间、季节等）缓存生成结果，避免对相同区域与时段重复推理。
+  - 写话智能补全：按 `(placeId, yyyy-MM-dd-HH)` 缓存生成结果，使同一地点、相近时间段的写话建议保持稳定。
+  - 缓存目前采用内存 LRU（由 `AITextEngine` 内部维护简单字典，未来可视需要落库）。
 - **降级方案（Fallback）**：
-  - 若模型未下载或算力受限：直接展示本地库中的 `highlightLine` 原文。
+  - 若在线模型不可用（无网络/HTTP 错误/超时/限流等）：`AITextEngine` 自动返回 `fallbackText`。
+  - 地图短句场景：`fallbackText` 来自 `CultureService.shortLine(for:)` 提供的本地短句（不依赖 AI）。
+  - 写话场景：`fallbackText` 来自现有本地模板（例如“清晨的 XX，留下了 N 个瞬间”等）。
 
 ### 7.4.4 特效文字生成流程（AI 参与版）
-1. **输入**：`[Raw Geo Data] + [Matched Local Poem/Fact]`。
-2. **推理**：LLM 执行端侧推理（约 200-500ms）。
-3. **输出**：`Refined Text`（如：“此刻你脚下，是沉睡三千年的良渚古城”）。
-4. **渲染**：调用 `DesignSystem/Particles` 发起“文字显影”特效。
+1. **输入构造**：
+   - 地图场景：`[Raw Geo Data] + [Matched Local Poem/Fact] + [Season/Daytime] + [Place Attributes]`。
+   - 写话场景：`[地点名称] + [照片数量] + [时间氛围]`。
+2. **请求封装**：Feature 根据场景构造 `AITextRequest`（带上 `systemPrompt` / `userPrompt` / `cacheKey` / `fallbackText`），交给 `AITextEngine`。
+3. **推理与缓存**：
+   - `AITextEngine` 在支持 `LanguageModel` 的系统上执行端侧推理（约 200–500ms），并按 `cacheKey` 将结果写入本地内存缓存。
+   - 在不支持或推理失败时，直接返回 `fallbackText`，确保用户始终有文案可见。
+4. **输出**：`Refined Text`（如：“此刻你脚下，是沉睡三千年的良渚古城” 或 “这里的这段时光，都被收进了你的相册里”）。
+5. **渲染**：
+   - 地图场景：调用 `FloatingTextOverlayView.show(text:at:)` + `DesignSystem/Particles`，完成“文字显影”特效。
+   - 写话场景：将生成的文本填入写话输入框（`draftText`），用户可直接使用或再编辑。
 
 ## 7.5 聚类（Clustering）
 

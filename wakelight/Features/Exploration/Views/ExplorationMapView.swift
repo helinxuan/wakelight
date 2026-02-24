@@ -155,24 +155,16 @@ struct ExplorationMapView: UIViewRepresentable {
 
                 guard scratchHitCountInSession % knowledgeEveryNHits == 0 else { return false }
                 guard let candidate = lastKnowledgeCandidate else { return false }
-                
-                let text = CultureService.shared.shortLine(
-                    for: .init(cityName: candidate.cityName, isStoryPoint: candidate.hasStory)
-                )
-                
-                showKnowledgeText(text, for: annotation, mapView: mapView)
-                
+
+                scheduleAIKnowledgeText(for: candidate, annotation: annotation, mapView: mapView)
+
                 lastKnowledgeTime = now
                 lastKnowledgeCandidate = nil
                 return true
             }
 
             // First feedback in a session: show immediately on the current hit.
-            let text = CultureService.shared.shortLine(
-                for: .init(cityName: hitCluster.cityName, isStoryPoint: hitCluster.hasStory)
-            )
-
-            showKnowledgeText(text, for: annotation, mapView: mapView)
+            scheduleAIKnowledgeText(for: hitCluster, annotation: annotation, mapView: mapView, forceImmediate: true)
 
             lastKnowledgeTime = now
             lastKnowledgeCandidate = nil
@@ -191,6 +183,77 @@ struct ExplorationMapView: UIViewRepresentable {
                 temp.show(text: text, at: p)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     temp.removeFromSuperview()
+                }
+            }
+        }
+
+        /// 构造 AI 请求（含 geohash_6 + time_bucket + fallback），并异步生成地图知识短句。
+        private func scheduleAIKnowledgeText(
+            for cluster: PlaceCluster,
+            annotation: ClusterAnnotation,
+            mapView: MKMapView,
+            forceImmediate: Bool = false
+        ) {
+            let geohash6 = String(cluster.geohash.prefix(6))
+
+            let nowDate = Date()
+            let calendar = Calendar.current
+            let month = calendar.component(.month, from: nowDate)
+            let hour = calendar.component(.hour, from: nowDate)
+
+            let season: String
+            switch month {
+            case 3...5: season = "春季"
+            case 6...8: season = "夏季"
+            case 9...11: season = "秋季"
+            default: season = "冬季"
+            }
+
+            let timeOfDay: String
+            switch hour {
+            case 5...11: timeOfDay = "清晨"
+            case 12...14: timeOfDay = "正午"
+            case 15...18: timeOfDay = "傍晚"
+            case 19...23: timeOfDay = "深夜"
+            default: timeOfDay = "夜间"
+            }
+
+            let timeBucket = "\(season)_\(timeOfDay)"
+            let cacheKey = "culture:\(geohash6):\(timeBucket)"
+
+            // 先用本地 CultureService 生成一条短句，作为 AI 的知识背景 + 兜底文案。
+            let cultureContext = CultureService.Context(cityName: cluster.cityName, isStoryPoint: cluster.hasStory)
+            let fallbackText = CultureService.shared.shortLine(for: cultureContext)
+
+            let systemPrompt = """
+            你是一个地理文化向导。请基于提供的地理坐标、所在城市与本地文化描述，为用户生成一句简短、灵动、且带有“显影感”的中文句子（不超过 20 个汉字），适合在地图上作为瞬间浮现的提示文字。严禁废话和空泛鸡汤。
+            """
+
+            let city = cluster.cityName ?? "未知城市"
+            let userPrompt = """
+            地理位置：
+            - 城市：\(city)
+            - geohash_6：\(geohash6)
+            - 粗略经纬度：(\(cluster.centerLatitude), \(cluster.centerLongitude))
+
+            当前时间氛围：\(season) 的 \(timeOfDay)
+
+            本地文化知识（简略描述，可以作为参考语气和意象）：\(fallbackText)
+
+            请根据以上信息，生成一句适合作为“划过光点时短暂浮现”的中文提示语，不要解释，不要前后缀修饰，只输出这句话本身。
+            """
+
+            let request = AITextRequest(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                cacheKey: cacheKey,
+                fallbackText: fallbackText
+            )
+
+            Task {
+                let text = await AITextEngine.shared.generateText(for: request)
+                await MainActor.run {
+                    self.showKnowledgeText(text, for: annotation, mapView: mapView)
                 }
             }
         }
