@@ -14,9 +14,22 @@
 		5937E0C82F3E1521003DDC17 /* wakelight.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = wakelight.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		59237CCE2F4DA185004E5A84 /* Exceptions for "wakelight" folder in "wakelight" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 5937E0C72F3E1521003DDC17 /* wakelight */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		5937E0CA2F3E1521003DDC17 /* wakelight */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				59237CCE2F4DA185004E5A84 /* Exceptions for "wakelight" folder in "wakelight" target */,
+			);
 			path = wakelight;
 			sourceTree = "<group>";
 		};
@@ -263,6 +276,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = wakelight/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow adding photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow access to your photo library.";
@@ -310,6 +324,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = wakelight/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow adding photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow access to your photo library.";

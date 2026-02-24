@@ -670,8 +670,54 @@ private struct VisitLayerRowView: View {
         case 19...23: timePrefix = "深夜的"
         default: timePrefix = "这时候的"
         }
-        let templates = ["\(timePrefix)\(loc)，留下了 \(count) 个瞬间。", "在这里捕捉到了 \(count) 张回忆。", "\(loc) 的这段时光都在这里了。"]
-        withAnimation { draftText = templates.randomElement() ?? "" }
+
+        // 现有的本地模板，作为 AI 不可用时的兜底文案。
+        let templates = [
+            "\(timePrefix)\(loc)，留下了 \(count) 个瞬间。",
+            "在这里捕捉到了 \(count) 张回忆。",
+            "\(loc) 的这段时光都在这里了。"
+        ]
+        let fallback = templates.randomElement() ?? ""
+
+        // 基于地点 + 起始时间构造一个相对稳定的缓存键，
+        // 避免同一地点/时段重复生成完全不同的文案。
+        let placeIdPart = layer.placeClusterId.uuidString
+        let date = layer.startAt
+        let components = Calendar.current.dateComponents([.year, .month, .day, .hour], from: date)
+        let bucketId = String(format: "%04d-%02d-%02d-%02d",
+                              components.year ?? 0,
+                              components.month ?? 0,
+                              components.day ?? 0,
+                              components.hour ?? 0)
+        let cacheKey = "writing:\(placeIdPart):\(bucketId)"
+
+        let systemPrompt = """
+        你是一个温柔的回忆文案助手。请基于提供的信息，为用户生成一句简短、真诚、自然的中文句子（不超过 30 个汉字），适合作为个人回忆的说明文字。禁止废话和空洞鸡汤。
+        """
+
+        let userPrompt = """
+        地点：\(loc)
+        照片数量：\(count)
+        时间氛围：\(timePrefix)
+
+        请根据以上信息，生成一句适合写在相册/日记里的中文说明句子，只要一句话。
+        """
+
+        let request = AITextRequest(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            cacheKey: cacheKey,
+            fallbackText: fallback
+        )
+
+        Task {
+            let text = await AITextEngine.shared.generateText(for: request)
+            await MainActor.run {
+                withAnimation {
+                    self.draftText = text
+                }
+            }
+        }
     }
 
     private struct InputAreaView: View {
