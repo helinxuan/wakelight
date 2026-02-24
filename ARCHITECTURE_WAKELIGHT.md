@@ -524,20 +524,21 @@ UI 展示策略：
 - RAW（如 RW2）与视频的“即时生成”都可能很慢：**允许首屏兜底显示低质量/占位图**，但必须尽快在后台生成并落盘，以保证后续滚动/地图交互稳定。
 - 缩略图文件格式统一（建议 JPEG；或后续根据系统能力改为 HEIC），避免按源格式扩散导致缓存不可控。
 
-### 6.3.4 WebDAV 轻量索引（路径 B）的范围
+### 6.3.4 WebDAV 索引与元数据提取策略（优化版）
 
-做什么：
-- 递归列目录（`Depth: 1` + 递归）拿到文件列表
-- 对每个媒体文件获取稳定“版本指纹”（`etag` 优先，否则 `lastModified + size`）
-- 若本地不存在该版本元数据：
-  - **照片（含 RAW，如 RW2）**：下载文件（或后续优化为部分下载）→ 用 ImageIO 提取 EXIF（时间、GPS）→ 写入本地 DB（`PhotoAsset`）与远程映射表（见 5.2.x）
-  - **视频（MP4/MOV 等）**：
-    - 元数据：尽量先用 WebDAV 的 `PROPFIND` 字段（`getlastmodified`/`getcontentlength`/`etag`）建立版本指纹；必要时再下载到临时文件用 AVFoundation 补齐（例如 creation time）。
-    - 缩略图：通过 `AVAssetImageGenerator` 抽取封面帧，写入 `MediaCache`，并回填 `thumbnailPath`。
-
-不做什么：
-- 不把原图/原视频长期保存到本地（避免爆存储/隐私/重复）
-- 不要求“先导入才能看图”：缩略图可按需生成并缓存
+- **轻量扫描**：首先通过递归 `PROPFIND` 获取文件列表及稳定“版本指纹”（etag/size/lastModified）。
+- **300MB 安全阈值**：导入阶段仅处理 **≤ 300MB** 的媒体文件。超过此大小的文件将直接跳过（不下载、不解析 GPS、不入库），以保证整体导入的带宽稳定与内存安全。
+- **GPS 强制获取（流式提取）**：
+  - **核心目标**：必须在导入阶段获取 GPS 以支持地图聚类与“光点”生成。
+  - **优先读取 sidecar XMP**：若存在同名 `.xmp`，优先从中提取 GPS（成本最低）。
+  - **流式下载提取**：若无 XMP，则通过 `URLSession.download` 下载到本地临时文件（不进入内存 `Data` 对象）。
+    - **照片/RAW**：使用 ImageIO 从临时文件提取 EXIF/GPS、像素尺寸及拍摄时间。
+    - **视频**：使用 AVFoundation 解析元数据。支持多种 ISO 6709 坐标格式（十进制、度分、度分秒）及多个 metadata keySpace（Common, QuickTime, UserData ©xyz）。
+  - **即时清理**：元数据解析完成后，立即删除本地临时文件，防止磁盘空间暴涨。
+- **缩略图策略（按需生成）**：
+  - **导入阶段不生成**：为了极致的内存稳定和导入速度，导入 Pass 仅负责索引元数据，不触发缩略图生成任务。
+  - **UI 触发生成**：当 UI 真正需要展示该资源时（如滑动照片墙），由 `PhotoThumbnailGenerator` 触发生成并写入 `MediaCache`。
+  - **生成优化**：生成缩略图时采用流式下载 + `kCGImageSourceShouldCache: false` 参数，确保即便按需生成时也不会产生 OOM 内存风险。
 
 ### 6.3.5 WebDAV 视频的远程处理策略（避免“反复整段下载”）
 
@@ -647,19 +648,18 @@ flowchart LR
   - 缩略图节点数量需受控（例如每个 PlaceCluster Top 3–5），避免过载。
 - **缓存淘汰**：`MediaCache` 采用 LRU（按文件访问时间/大小）控制上限；DB 中 `thumbnailPath` 若指向已被淘汰文件，读取失败后自动回退即时链路并重建。
 
-### 7.2.3 格式支持（扩展口径：RAW + 视频）
+### 7.2.3 格式支持矩阵（当前实现状态）
 
-> 本节只定义“架构上应该如何支持”，不要求一次性把所有格式都做完。
+| 媒体类型 | 格式/扩展名 | Photos (library://) | WebDAV / Local (webdav://, file://) | 处理框架 |
+| :--- | :--- | :--- | :--- | :--- |
+| **通用图片** | JPG, HEIC, PNG, TIFF | ✅ 支持 | ✅ 支持 | ImageIO |
+| **RAW 照片** | RW2, DNG, NEF, ARW, CR2, CR3, ORF, RAF | ✅ 支持 | ✅ 支持 (落盘缓存) | ImageIO / Photos |
+| **视频** | MP4, MOV, M4V | ✅ 支持 | ✅ 支持 (中间帧抽帧) | AVFoundation |
 
-- **常见照片格式**：JPEG/HEIC/PNG/TIFF（ImageIO/Photos 均可处理）
-- **RAW（包含 Panasonic RW2）**：
-  - Photos（`library://`）：由 `PHImageManager.requestImage(...)` 输出目标尺寸 `UIImage`（系统可解码 RAW 并做渲染；App 不需要自己落盘转换原始 RAW）。
-  - WebDAV / file：通过 ImageIO 的 RAW 解码链路生成缩略图（`CGImageSource` + downsample / 或 `CIRAWFilter` 视情况）。缩略图最终仍统一写为 JPEG（或 HEIC）到 `MediaCache`。
-  - 约束：RAW 解码成本高，**必须**优先落盘缓存，避免滚动/地图反复解码。
-- **视频（MP4 / MOV 等）**：
-  - Photos（`library://`）：优先使用 `PHImageManager`/`PHCachingImageManager` 请求视频 poster/目标尺寸图。
-  - WebDAV / file：使用 `AVAssetImageGenerator` 抽取封面帧（可固定取 0s 或 middle frame；最终写入 `MediaCache`）。
-  - 约束：抽帧前如需远程下载，避免把整段视频长期缓存；可允许临时文件参与抽帧，但缩略图必须落盘复用。
+**实现说明与限制**：
+- **WebDAV 视频播放**：当前采用“下载至临时文件后播放”策略。对于超大视频文件，首屏加载可能较慢且受内存限制。
+- **RAW 解码**：WebDAV/Local 源的 RAW 缩略图生成依赖系统 ImageIO 解码能力。若遇到特定机型无法解码，将回退至占位图。
+- **缩略图标准**：统一生成 **320x320 JPEG**（质量 0.7）并落盘，文件名采用 `MediaLocator` 稳定键的 FNV-1a 64位哈希值。
 
 ## 7.3 成就系统（事件驱动终极版）
 

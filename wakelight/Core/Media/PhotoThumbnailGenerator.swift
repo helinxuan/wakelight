@@ -96,7 +96,9 @@ final class PhotoThumbnailGenerator {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(targetSize.width, targetSize.height),
-            kCGImageSourceShouldCacheImmediately: true
+            // Avoid decoding/caching full-resolution images into memory.
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
         ]
         
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -112,7 +114,9 @@ final class PhotoThumbnailGenerator {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(targetSize.width, targetSize.height),
-            kCGImageSourceShouldCacheImmediately: true
+            // Avoid decoding/caching full-resolution images into memory.
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
         ]
         
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),

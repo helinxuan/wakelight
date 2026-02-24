@@ -81,6 +81,28 @@ final class WebDAVClient {
         return data
     }
 
+    /// Downloads a remote resource to a local temporary file.
+    /// This avoids holding large files (RAW/video) entirely in memory.
+    func downloadToTemporaryFile(path: String, fileExtension: String? = nil) async throws -> URL {
+        let url = try makeURL(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+
+        let (tempURL, response) = try await session.download(for: request)
+        guard let http = response as? HTTPURLResponse else { throw WebDAVError.invalidResponse }
+        guard (200...299).contains(http.statusCode) else {
+            throw WebDAVError.httpStatus(http.statusCode)
+        }
+
+        // Move into our own temp location so the caller can manage lifetime.
+        let ext = (fileExtension?.isEmpty == false) ? fileExtension! : "tmp"
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.moveItem(at: tempURL, to: dest)
+        return dest
+    }
+
     private func makeURL(path: String) throws -> URL {
         // Normalize base URL to always end with a slash so relative paths resolve correctly.
         var base = baseURL
