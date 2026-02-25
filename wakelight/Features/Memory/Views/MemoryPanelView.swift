@@ -288,6 +288,7 @@ struct MemoryPanelView: View {
         .sheet(isPresented: $isPresentingMergeSheet) {
             MergeVisitLayersSheet(
                 visitLayers: viewModel.visitLayers.filter { selectedVisitLayerIds.contains($0.id) },
+                clusterNames: viewModel.clusterNames,
                 summaryText: $mergeDraftSummary,
                 isMerging: $isMerging,
                 errorMessage: $mergeErrorMessage,
@@ -330,15 +331,26 @@ struct MemoryPanelView: View {
 
 private struct MergeVisitLayersSheet: View {
     let visitLayers: [VisitLayer]
+    let clusterNames: [UUID: String]
     @Binding var summaryText: String
     @Binding var isMerging: Bool
     @Binding var errorMessage: String?
+    @State private var isGeneratingAI: Bool = false
     let onConfirm: () -> Void
     let onCancel: () -> Void
     @State private var localSummaryText: String
 
-    init(visitLayers: [VisitLayer], summaryText: Binding<String>, isMerging: Binding<Bool>, errorMessage: Binding<String?>, onConfirm: @escaping () -> Void, onCancel: @escaping () -> Void) {
+    init(
+        visitLayers: [VisitLayer],
+        clusterNames: [UUID: String],
+        summaryText: Binding<String>,
+        isMerging: Binding<Bool>,
+        errorMessage: Binding<String?>,
+        onConfirm: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) {
         self.visitLayers = visitLayers
+        self.clusterNames = clusterNames
         self._summaryText = summaryText
         self._isMerging = isMerging
         self._errorMessage = errorMessage
@@ -362,10 +374,26 @@ private struct MergeVisitLayersSheet: View {
                 .padding(.top, 10)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("故事摘要")
-                        .font(.caption.weight(.medium))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
+                    HStack {
+                        Text("故事摘要")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 4)
+                        
+                        Spacer()
+                        
+                        Button(action: generateAIText) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                Text("AI 润色")
+                            }
+                            .font(.caption.weight(.bold))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.blue.opacity(0.1)))
+                        }
+                    }
 
                     TextEditor(text: $localSummaryText)
                         .frame(minHeight: 120)
@@ -417,6 +445,80 @@ private struct MergeVisitLayersSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { onCancel() }
+                }
+            }
+        }
+    }
+
+    private func generateAIText() {
+        guard !visitLayers.isEmpty else { return }
+        isGeneratingAI = true
+        
+        Task {
+            // 1. 获取所有照片 Locator
+            let allLocators: [PhotoAssetLocator] = (try? await DatabaseContainer.shared.db.reader.read { db in
+                let layerIds = visitLayers.map { $0.id }
+                let links = try VisitLayerPhotoAsset.filter(layerIds.contains(Column("visitLayerId"))).fetchAll(db)
+                if links.isEmpty { return [PhotoAssetLocator]() }
+                let photoIds = Array(Set(links.map { $0.photoAssetId }))
+                return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            }) ?? []
+            
+            // 2. Vision 分析 (最多分析 15 张，合并场景多取几张)
+            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: allLocators, maxPhotos: 15)
+            let keywords = analysis.topKeywords.joined(separator: "、")
+            
+            // 3. 准备 Prompt 属性
+            let count = allLocators.count
+            let timeRange = timeRangeText(visitLayers) ?? ""
+
+            let uniquePlaces = Array(Set(visitLayers.map { $0.placeClusterId }))
+            let placeNames = uniquePlaces.compactMap { clusterNames[$0] }.filter { !$0.isEmpty }
+            let loc = placeNames.isEmpty ? "这里" : placeNames.prefix(4).joined(separator: "、")
+            
+            let systemPrompt = """
+            你是一位克制、真诚的回忆日记写作者。
+
+            你要为一组照片写一段像私人日记的回忆文字。
+            输入包含：具体地点、具体时间范围、照片数量、以及由本地视觉识别得到的照片关键词。
+
+            写作要求：
+            - 3~4段
+            - 总字数 100~150 字
+            - 口吻自然、像本人在记
+            - 禁止使用“这些地方”“这段时间”等模糊代称，必须直接使用提供的具体地点与时间范围。
+            - 不写旅游攻略，不写宣传语
+            - 不使用感叹号
+            - 不使用“著名”“历史悠久”“文化名城”“旅游胜地”等词
+            - 不编造具体历史事件或年份
+            - 不杜撰诗句
+            - 不要逐条罗列关键词，要把内容融化在叙述里
+            - 最后一段必须是两句连续真实存在、与该城市相关的诗词，单独成段
+
+            输出只包含正文内容。
+            """
+
+            let userPrompt = """
+            地点：\(loc)
+            时间范围：\(timeRange)
+            照片数量：\(count)
+            照片内容关键词：\(keywords)
+
+            生成一段可以直接放进回忆卡片的日记文字。
+            """
+
+            let request = AITextRequest(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                cacheKey: "merge_diary_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)",
+                fallbackText: "\(timeRange)，留下了 \(count) 个瞬间。"
+            )
+
+            let text = await AITextEngine.shared.generateText(for: request)
+            await MainActor.run {
+                withAnimation {
+                    self.localSummaryText = text
+                    self.isGeneratingAI = false
                 }
             }
         }
