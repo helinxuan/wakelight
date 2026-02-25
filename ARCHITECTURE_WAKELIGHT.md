@@ -710,6 +710,22 @@ flowchart LR
   - 写话场景：`fallbackText` 来自现有本地模板（例如“清晨的 XX，留下了 N 个瞬间”等）。
 
 ### 7.4.4 特效文字生成流程（AI 参与版）
+
+### 7.4.5 Memory 日记生成流程（Vision + 云端 LLM，可选）
+
+目标：对一组照片（同一 VisitLayer）进行离线视觉分析，抽取关键词后上传文本到云端大模型生成“AI 日记”。不上传原图。
+
+数据流：
+1. `MemoryPanelView` 读取当前 `VisitLayer` 对应的 `PhotoAssetLocator` 列表。
+2. 调用 `Core/AI/VisionImageAnalysisService` 使用 `Vision` 在本地识别图片内容（关键词/是否人物/是否文字）。
+3. `MemoryPanelView` 将 `地点 + 时间氛围 + 照片数量 + 关键词` 拼为 `AITextRequest.userPrompt`。
+4. 通过 `Core/AI/AITextEngine` 调用在线模型（硅基流动 Qwen2.5-7B-Instruct），失败自动回退本地 `fallbackText`。
+5. 将生成文本填入记忆面板输入框，用户可直接“加入故事”。
+
+隐私约束：
+- 仅上传抽象文本（地点/时间氛围/数量/关键词），不上传原图与精确坐标。
+- `cacheKey` 建议按 `diary:<placeId>:<timeBucket>` 缓存，减少同一时段重复生成。
+
 1. **输入构造**：
    - 地图场景：`[Raw Geo Data] + [Matched Local Poem/Fact] + [Season/Daytime] + [Place Attributes]`。
    - 写话场景：`[地点名称] + [照片数量] + [时间氛围]`。
