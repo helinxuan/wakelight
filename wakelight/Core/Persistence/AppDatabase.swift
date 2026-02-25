@@ -148,6 +148,14 @@ struct AppDatabase {
                 t.column("photoAssetId", .text).notNull().references("photoAsset", onDelete: .cascade)
                 t.column("indexedAt", .datetime).notNull()
                 t.column("lastSeenAt", .datetime) // 用于同步删除
+                t.column("rawPath", .text)
+                t.column("hasJPG", .boolean).notNull().defaults(to: false)
+                t.column("isPrimary", .boolean).notNull().defaults(to: true)
+
+                // Live Photo pairing (HEIC + MOV/MP4/M4V)
+                t.column("livePhotoVideoPath", .text)
+                t.column("livePhotoPhotoPath", .text)
+
                 t.uniqueKey(["profileId", "remotePath"])
             }
 

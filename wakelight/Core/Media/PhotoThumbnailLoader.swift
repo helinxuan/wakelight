@@ -193,6 +193,8 @@ final class PhotoThumbnailLoader {
 struct ThumbnailView: View {
     let locatorKey: String
     let size: CGSize
+    var showRawBadge: Bool = false
+    var showLiveBadge: Bool = false
 
     @State private var image: UIImage?
     @State private var isVideo = false
@@ -217,6 +219,34 @@ struct ThumbnailView: View {
                     .font(.system(size: min(size.width, size.height) * 0.42))
                     .foregroundColor(.white.opacity(0.92))
                     .shadow(radius: 6)
+            } else if showRawBadge || showLiveBadge {
+                VStack(alignment: .trailing, spacing: 3) {
+                    HStack {
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 3) {
+                            if showLiveBadge {
+                                Text("LIVE")
+                                    .font(.system(size: 8, weight: .black))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.6))
+                                    .cornerRadius(2)
+                            }
+                            if showRawBadge {
+                                Text("RAW")
+                                    .font(.system(size: 8, weight: .black))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.6))
+                                    .cornerRadius(2)
+                            }
+                        }
+                        .padding(4)
+                    }
+                    Spacer()
+                }
             }
         }
         .frame(width: size.width, height: size.height)

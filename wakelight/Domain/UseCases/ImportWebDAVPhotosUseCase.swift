@@ -24,6 +24,14 @@ final class ImportWebDAVPhotosUseCase {
         self.writer = writer
     }
 
+    private struct MediaGroup {
+        let primary: WebDAVDirectoryItem
+        let rawPath: String?
+        let hasJPG: Bool
+        let livePhotoVideoPath: String?
+        let livePhotoPhotoPath: String?
+    }
+
     func run(profileId: String? = nil, onProgress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> WebDAVImportResult {
         print("[WebDAVImport] run(profileId: \(profileId ?? "nil"))")
 
@@ -67,7 +75,10 @@ final class ImportWebDAVPhotosUseCase {
         }
         print("[WebDAVImport] Filtered media items=\(mediaItems.count)")
 
-        if mediaItems.isEmpty {
+        let groupedItems = groupMediaItems(mediaItems)
+        print("[WebDAVImport] Grouped into \(groupedItems.count) primary items")
+
+        if groupedItems.isEmpty {
             await onProgress?(0, 0)
             print("[WebDAVImport] No supported media found")
             return WebDAVImportResult(importedCount: 0, deletedPhotoIds: [])
@@ -119,23 +130,31 @@ final class ImportWebDAVPhotosUseCase {
             return sizeChanged || dateChanged
         }
 
-        let itemsToImport = mediaItems.filter { item in
-            let remotePath = normalize(path: item.href)
+        let itemsToImport = groupedItems.filter { group in
+            let remotePath = normalize(path: group.primary.href)
             if let existing = existingAssets[remotePath] {
-                return hasItemChanged(existing, item)
+                return hasItemChanged(existing, group.primary) || 
+                       existing.rawPath != group.rawPath || 
+                       existing.hasJPG != group.hasJPG ||
+                       existing.livePhotoVideoPath != group.livePhotoVideoPath ||
+                       existing.livePhotoPhotoPath != group.livePhotoPhotoPath
             }
             return true
         }
 
-        let unchangedItems = mediaItems.filter { item in
-            let remotePath = normalize(path: item.href)
+        let unchangedItems = groupedItems.filter { group in
+            let remotePath = normalize(path: group.primary.href)
             guard let existing = existingAssets[remotePath] else { return false }
-            return !hasItemChanged(existing, item)
+            return !hasItemChanged(existing, group.primary) && 
+                   existing.rawPath == group.rawPath && 
+                   existing.hasJPG == group.hasJPG &&
+                   existing.livePhotoVideoPath == group.livePhotoVideoPath &&
+                   existing.livePhotoPhotoPath == group.livePhotoPhotoPath
         }
 
         if !unchangedItems.isEmpty {
             print("[WebDAVImport] Marking \(unchangedItems.count) unchanged items as seen")
-            let unchangedPaths = unchangedItems.map { normalize(path: $0.href) }
+            let unchangedPaths = unchangedItems.map { normalize(path: $0.primary.href) }
             _ = try await writer.write { db in
                 try RemoteMediaAsset
                     .filter(Column("profileId") == profile.id && unchangedPaths.contains(Column("remotePath")))
@@ -143,7 +162,7 @@ final class ImportWebDAVPhotosUseCase {
             }
         }
 
-        print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total media: \(mediaItems.count))")
+        print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total primary: \(groupedItems.count))")
 
         if !itemsToImport.isEmpty {
             let concurrency = 4
@@ -158,7 +177,7 @@ final class ImportWebDAVPhotosUseCase {
                 for _ in 0..<min(concurrency, total) {
                     if let next = iterator.next() {
                         group.addTask {
-                            try await self.importItem(
+                            try await self.importGroup(
                                 next.element,
                                 index: next.offset,
                                 total: total,
@@ -179,7 +198,7 @@ final class ImportWebDAVPhotosUseCase {
 
                     if let next = iterator.next() {
                         group.addTask {
-                            try await self.importItem(
+                            try await self.importGroup(
                                 next.element,
                                 index: next.offset,
                                 total: total,
@@ -217,6 +236,191 @@ final class ImportWebDAVPhotosUseCase {
         return WebDAVImportResult(importedCount: importedCount, deletedPhotoIds: deletedPhotoIds)
     }
 
+    private func importGroup(
+        _ group: MediaGroup,
+        index: Int,
+        total: Int,
+        client: WebDAVClient,
+        profile: WebDAVProfile,
+        importedAt: Date,
+        indexedAt: Date,
+        scanAt: Date
+    ) async throws {
+        let primaryItem = group.primary
+        let primaryPath = normalize(path: primaryItem.href)
+
+        try await importItem(
+            primaryItem,
+            index: index,
+            total: total,
+            client: client,
+            profile: profile,
+            importedAt: importedAt,
+            indexedAt: indexedAt,
+            scanAt: scanAt
+        )
+
+        // Update pairing info after importItem has ensured the remote record exists/updated.
+        try await writer.write { db in
+            if var remote = try RemoteMediaAsset
+                .filter(Column("profileId") == profile.id && Column("remotePath") == primaryPath)
+                .fetchOne(db) {
+                remote.rawPath = group.rawPath
+                remote.hasJPG = group.hasJPG
+                remote.livePhotoVideoPath = group.livePhotoVideoPath
+                remote.livePhotoPhotoPath = group.livePhotoPhotoPath
+                remote.isPrimary = true
+                remote.lastSeenAt = scanAt
+                try remote.update(db)
+            }
+        }
+    }
+
+    private func groupMediaItems(_ items: [WebDAVDirectoryItem]) -> [MediaGroup] {
+        func extLower(_ path: String) -> String {
+            (path as NSString).pathExtension.lowercased()
+        }
+
+        func isJPG(_ path: String) -> Bool {
+            let e = extLower(path)
+            return e == "jpg" || e == "jpeg"
+        }
+
+        func isHEIC(_ path: String) -> Bool {
+            extLower(path) == "heic"
+        }
+
+        func isRAW(_ path: String) -> Bool {
+            let e = extLower(path)
+            let rawExts = ["rw2", "dng", "nef", "arw", "cr2", "cr3", "orf", "raf"]
+            return rawExts.contains(e)
+        }
+
+        func isLiveVideo(_ path: String) -> Bool {
+            let e = extLower(path)
+            return e == "mov" || e == "mp4" || e == "m4v"
+        }
+
+        func baseKey(_ href: String) -> String {
+            let normalized = normalize(path: href)
+            let dir = (normalized as NSString).deletingLastPathComponent
+            let file = (normalized as NSString).lastPathComponent
+            let stem = ((file as NSString).deletingPathExtension)
+            return (dir + "/" + stem).lowercased()
+        }
+
+        struct PhotoCandidates {
+            var jpgs: [WebDAVDirectoryItem] = []
+            var raws: [WebDAVDirectoryItem] = []
+            var heics: [WebDAVDirectoryItem] = []
+            var liveVideos: [WebDAVDirectoryItem] = []
+        }
+
+        var byKey: [String: PhotoCandidates] = [:]
+        var passthrough: [MediaGroup] = []
+
+        for item in items {
+            let path = normalize(path: item.href)
+            let key = baseKey(path)
+
+            if isJPG(path) {
+                byKey[key, default: PhotoCandidates()].jpgs.append(item)
+            } else if isRAW(path) {
+                byKey[key, default: PhotoCandidates()].raws.append(item)
+            } else if isHEIC(path) {
+                byKey[key, default: PhotoCandidates()].heics.append(item)
+            } else if isLiveVideo(path) {
+                byKey[key, default: PhotoCandidates()].liveVideos.append(item)
+            } else {
+                passthrough.append(
+                    MediaGroup(
+                        primary: item,
+                        rawPath: nil,
+                        hasJPG: isJPG(path),
+                        livePhotoVideoPath: nil,
+                        livePhotoPhotoPath: nil
+                    )
+                )
+            }
+        }
+
+        var groups: [MediaGroup] = []
+        groups.reserveCapacity(passthrough.count + byKey.count)
+        groups.append(contentsOf: passthrough)
+
+        for (_, c) in byKey {
+            if let heic = c.heics.first, let video = c.liveVideos.first {
+                let heicPath = normalize(path: heic.href)
+                let videoPath = normalize(path: video.href)
+
+                groups.append(
+                    MediaGroup(
+                        primary: heic,
+                        rawPath: nil,
+                        hasJPG: false,
+                        livePhotoVideoPath: videoPath,
+                        livePhotoPhotoPath: heicPath
+                    )
+                )
+                continue
+            }
+
+            if let jpg = c.jpgs.first {
+                let rawPath = c.raws.first.map { normalize(path: $0.href) }
+                groups.append(
+                    MediaGroup(
+                        primary: jpg,
+                        rawPath: rawPath,
+                        hasJPG: true,
+                        livePhotoVideoPath: nil,
+                        livePhotoPhotoPath: nil
+                    )
+                )
+                continue
+            }
+
+            if let raw = c.raws.first {
+                groups.append(
+                    MediaGroup(
+                        primary: raw,
+                        rawPath: nil,
+                        hasJPG: false,
+                        livePhotoVideoPath: nil,
+                        livePhotoPhotoPath: nil
+                    )
+                )
+                continue
+            }
+
+            if let heic = c.heics.first {
+                groups.append(
+                    MediaGroup(
+                        primary: heic,
+                        rawPath: nil,
+                        hasJPG: false,
+                        livePhotoVideoPath: nil,
+                        livePhotoPhotoPath: nil
+                    )
+                )
+                continue
+            }
+
+            if let video = c.liveVideos.first {
+                groups.append(
+                    MediaGroup(
+                        primary: video,
+                        rawPath: nil,
+                        hasJPG: false,
+                        livePhotoVideoPath: nil,
+                        livePhotoPhotoPath: nil
+                    )
+                )
+            }
+        }
+
+        return groups
+    }
+
     private func importItem(
         _ item: WebDAVDirectoryItem,
         index: Int,
@@ -240,7 +444,7 @@ final class ImportWebDAVPhotosUseCase {
         // 2. Download to a temporary file to extract GPS/metadata without loading full file into memory.
         let fileExtension = (remotePath as NSString).pathExtension
         let tempURL = try await client.downloadToTemporaryFile(path: remotePath, fileExtension: fileExtension)
-        
+
         defer {
             try? FileManager.default.removeItem(at: tempURL)
         }
@@ -334,9 +538,6 @@ final class ImportWebDAVPhotosUseCase {
                     )
                     try record.insert(db)
 
-                    // NOTE: Thumbnail generation is intentionally NOT performed during WebDAV import.
-                    // Thumbnails will be generated on-demand when the UI needs them.
-
                     existing.photoAssetId = newPhotoId
                     existing.etag = item.etag
                     existing.lastModified = item.lastModified
@@ -405,7 +606,12 @@ final class ImportWebDAVPhotosUseCase {
                 size: item.contentLength,
                 photoAssetId: photoId,
                 indexedAt: indexedAt,
-                lastSeenAt: scanAt
+                lastSeenAt: scanAt,
+                rawPath: nil,
+                hasJPG: false,
+                isPrimary: true,
+                livePhotoVideoPath: nil,
+                livePhotoPhotoPath: nil
             )
 
             do {
@@ -543,7 +749,7 @@ final class ImportWebDAVPhotosUseCase {
         let fileExtension = (fileName as NSString).pathExtension.lowercased()
         let utType = UTType(filenameExtension: fileExtension)
         let uti = utType?.identifier
-        
+
         let isVideo = utType?.conforms(to: .movie) ?? false || utType?.conforms(to: .video) ?? false
         let mediaType: PhotoAsset.MediaType = isVideo ? .video : .photo
 
@@ -560,10 +766,10 @@ final class ImportWebDAVPhotosUseCase {
 
         if isVideo {
             let asset = AVURLAsset(url: url)
-            
+
             // Try to extract GPS from multiple metadata keys and spaces
             let metadataItems = AVMetadataItem.metadataItems(from: asset.metadata, withKey: nil, keySpace: nil)
-            
+
             for item in metadataItems {
                 // 1. Common Key Location (ISO 6709)
                 if let key = item.commonKey, key == .commonKeyLocation, let locationString = item.stringValue {
@@ -573,7 +779,7 @@ final class ImportWebDAVPhotosUseCase {
                         break
                     }
                 }
-                
+
                 // 2. QuickTime Location ISO 6709
                 // Use rawValue strings here to avoid SDK differences (some SDKs don't expose typed constants).
                 if item.keySpace?.rawValue == "mdta",
@@ -600,7 +806,7 @@ final class ImportWebDAVPhotosUseCase {
                     }
                 }
             }
-            
+
             // Duration and Size (basic)
             if let duration = try? CMTimeGetSeconds(asset.duration) {
                 metadata.duration = duration
@@ -610,7 +816,7 @@ final class ImportWebDAVPhotosUseCase {
                 metadata.pixelWidth = Int(abs(size.width))
                 metadata.pixelHeight = Int(abs(size.height))
             }
-            
+
             return metadata
         }
 
@@ -649,9 +855,9 @@ final class ImportWebDAVPhotosUseCase {
         // 2. +DDMM.MMM+DDDMM.MMM/ (Degrees and decimal minutes)
         // 3. +DDMMSS.SS+DDDMMSS.SS/ (Degrees, minutes and decimal seconds)
         // Note: The last '/' and trailing text are optional.
-        
+
         let trimmed = value.trimmingCharacters(in: .init(charactersIn: "/ ")).uppercased()
-        
+
         // Pattern matches two groups of [+-][digits and dots]
         let pattern = "^([+-][0-9.]+)([+-][0-9.]+)"
         guard let regex = try? NSRegularExpression(pattern: pattern),
@@ -660,19 +866,19 @@ final class ImportWebDAVPhotosUseCase {
               let r2 = Range(match.range(at: 2), in: trimmed) else {
             return nil
         }
-        
+
         let latStr = String(trimmed[r1])
         let lonStr = String(trimmed[r2])
-        
+
         func convertToDecimal(_ s: String) -> Double? {
             let sign = s.hasPrefix("-") ? -1.0 : 1.0
             let val = String(s.dropFirst())
             guard let num = Double(val) else { return nil }
-            
+
             // Determine format based on number of digits before the decimal point
             let parts = val.components(separatedBy: ".")
             let integerPart = parts[0]
-            
+
             if integerPart.count <= 3 {
                 // Case 1: Decimal degrees (e.g., +38.8977)
                 return num * sign
@@ -694,7 +900,7 @@ final class ImportWebDAVPhotosUseCase {
             }
             return num * sign
         }
-        
+
         if let lat = convertToDecimal(latStr), let lon = convertToDecimal(lonStr) {
             return (lat, lon)
         }

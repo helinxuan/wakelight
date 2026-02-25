@@ -4,6 +4,8 @@ import GRDB
 struct PhotoAssetLocator: Codable {
     let photoAssetId: UUID
     let locatorKey: String
+    let hasRaw: Bool
+    let hasLive: Bool
 }
 
 extension PhotoAsset {
@@ -33,7 +35,17 @@ extension PhotoAsset {
                 return nil
             }
             
-            return PhotoAssetLocator(photoAssetId: id, locatorKey: key)
+            let hasRaw: Bool
+            let hasLive: Bool
+            if let remote = remoteMap[id] {
+                hasRaw = (remote.rawPath != nil)
+                hasLive = (remote.livePhotoVideoPath != nil || remote.livePhotoPhotoPath != nil)
+            } else {
+                hasRaw = false
+                hasLive = false
+            }
+
+            return PhotoAssetLocator(photoAssetId: id, locatorKey: key, hasRaw: hasRaw, hasLive: hasLive)
         }
     }
 }

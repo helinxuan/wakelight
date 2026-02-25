@@ -516,21 +516,29 @@ private struct StoryNodeRowView: View {
     let node: StoryNode
     let onPreview: ([String], Int) -> Void
     @State private var timeRangeText: String?
-    @State private var coverLocatorKeys: [String] = []
+
+    private struct StoryThumbnail: Identifiable {
+        let locatorKey: String
+        let hasRaw: Bool
+        let hasLive: Bool
+        var id: String { locatorKey }
+    }
+
+    @State private var thumbnails: [StoryThumbnail] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let timeRangeText {
                 Text(timeRangeText).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
             }
-            if !coverLocatorKeys.isEmpty {
+            if !thumbnails.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
-                        ForEach(Array(coverLocatorKeys.enumerated()), id: \.element) { idx, key in
-                            ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80))
+                        ForEach(Array(thumbnails.enumerated()), id: \.element.id) { idx, thumb in
+                            ThumbnailView(locatorKey: thumb.locatorKey, size: CGSize(width: 80, height: 80), showRawBadge: thumb.hasRaw, showLiveBadge: thumb.hasLive)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .onTapGesture {
-                                    onPreview(coverLocatorKeys, idx)
+                                    onPreview(thumbnails.map { $0.locatorKey }, idx)
                                 }
                         }
                     }
@@ -551,18 +559,17 @@ private struct StoryNodeRowView: View {
 
             // 监听 cover locatorKeys，确保导入删除后 UI 自动刷新
             do {
-                for try await keys in ValueObservation
+                for try await locators in ValueObservation
                     .tracking({ db in
                         let visitLayerIds = node.subVisitLayerIds
-                        guard !visitLayerIds.isEmpty else { return [String]() }
+                        guard !visitLayerIds.isEmpty else { return [PhotoAssetLocator]() }
                         let links = try VisitLayerPhotoAsset.filter(visitLayerIds.contains(Column("visitLayerId"))).fetchAll(db)
                         if links.isEmpty { return [] }
                         let photoIds = Array(Set(links.map { $0.photoAssetId }))
-                        let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
-                        return locators.map { $0.locatorKey }
+                        return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
                     })
                     .values(in: DatabaseContainer.shared.db.reader) {
-                    self.coverLocatorKeys = Array(keys.prefix(12))
+                    self.thumbnails = Array(locators.prefix(12)).map { StoryThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
                 }
             } catch {
                 // ignore observation errors
@@ -598,7 +605,14 @@ private struct VisitLayerRowView: View {
     let locationName: String?
     let onPreview: ([String], Int) -> Void
 
-    @State private var locatorKeys: [String] = []
+    private struct VisitLayerThumbnail: Identifiable {
+        let locatorKey: String
+        let hasRaw: Bool
+        let hasLive: Bool
+        var id: String { locatorKey }
+    }
+
+    @State private var thumbnails: [VisitLayerThumbnail] = []
     @State private var draftText: String = ""
     @State private var isSaving: Bool = false
 
@@ -612,14 +626,14 @@ private struct VisitLayerRowView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text(dateRangeText(layer)).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
-                if !locatorKeys.isEmpty {
+                if !thumbnails.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
-                            ForEach(Array(locatorKeys.enumerated()), id: \.element) { idx, key in
-                                ThumbnailView(locatorKey: key, size: CGSize(width: 80, height: 80))
+                            ForEach(Array(thumbnails.enumerated()), id: \.element.id) { idx, thumb in
+                                ThumbnailView(locatorKey: thumb.locatorKey, size: CGSize(width: 80, height: 80), showRawBadge: thumb.hasRaw, showLiveBadge: thumb.hasLive)
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                                     .onTapGesture {
-                                        onPreview(locatorKeys, idx)
+                                        onPreview(thumbnails.map { $0.locatorKey }, idx)
                                     }
                             }
                         }
@@ -640,17 +654,15 @@ private struct VisitLayerRowView: View {
         .task {
             // 监听 locatorKeys，确保导入删除后 UI 自动刷新
             do {
-                for try await keys in ValueObservation
+                for try await locators in ValueObservation
                     .tracking({ db in
                         let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
-                        if links.isEmpty { return [String]() }
+                        if links.isEmpty { return [PhotoAssetLocator]() }
                         let photoIds = links.map { $0.photoAssetId }
-                        let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
-                        let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
-                        return photoIds.compactMap { locatorById[$0] }
+                        return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
                     })
                     .values(in: DatabaseContainer.shared.db.reader) {
-                    self.locatorKeys = keys
+                    self.thumbnails = locators.map { VisitLayerThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
                 }
             } catch {
                 // ignore observation errors
@@ -660,7 +672,7 @@ private struct VisitLayerRowView: View {
 
     private func generateAIText() {
         let loc = locationName ?? "这里"
-        let count = locatorKeys.count
+        let count = thumbnails.count
         let hour = Calendar.current.component(.hour, from: layer.startAt)
         var timePrefix = ""
         switch hour {
@@ -785,18 +797,18 @@ private struct VisitLayerRowView: View {
     private func loadLocatorKeys() async {
         do {
             let debugName = "IMG_2498.HEIC"
-            let keys: [String] = try await DatabaseContainer.shared.db.reader.read { db in
+            let keys: [PhotoAssetLocator] = try await DatabaseContainer.shared.db.reader.read { db in
                 // Debug: 打印 UI 读取侧的数据库物理路径与表计数（避免刷屏：每个 layer 都会调用，这里只在命中 debugName 时再打印）
                 let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
                 if links.isEmpty { return [] }
                 let photoIds = links.map { $0.photoAssetId }
                 let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
-                let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+                let locatorMap = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
 
                 // Debug: 如果某张图仍然显示某个已删除的文件名，打印其来源（visitLayerId/photoAssetId/locatorKey）
                 // 同时打印 UI 读取侧 DB 的物理路径与表计数，用于排查“导入写库”和“UI 读库”不一致。
                 for pid in photoIds {
-                    if let key = locatorById[pid], key.localizedCaseInsensitiveContains(debugName) {
+                    if let locator = locatorMap[pid], locator.locatorKey.localizedCaseInsensitiveContains(debugName) {
                         let rows = try Row.fetchAll(db, sql: "PRAGMA database_list")
                         let desc = rows.map { row in
                             let name: String = row["name"]
@@ -809,13 +821,15 @@ private struct VisitLayerRowView: View {
                         print("[MemoryPanel][DB] database_list: \(desc)")
                         print("[MemoryPanel][DB] counts: photoAsset=\(c1), remoteMediaAsset=\(c2), visitLayerPhotoAsset=\(c3)")
 
-                        print("[MemoryPanel][Debug2500] visitLayerId=\(layer.id) photoAssetId=\(pid) locatorKey=\(key)")
+                        print("[MemoryPanel][Debug2500] visitLayerId=\(layer.id) photoAssetId=\(pid) locatorKey=\(locator.locatorKey)")
                     }
                 }
 
-                return photoIds.compactMap { locatorById[$0] }
+                return photoIds.compactMap { locatorMap[$0] }
             }
-            await MainActor.run { self.locatorKeys = keys }
+            await MainActor.run {
+                self.thumbnails = keys.map { VisitLayerThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
+            }
         } catch {}
     }
 

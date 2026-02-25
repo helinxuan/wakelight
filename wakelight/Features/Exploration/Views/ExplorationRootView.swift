@@ -34,8 +34,15 @@ struct ExplorationRootView: View {
                     guard !didShowFirstLightPopupThisSession else { return }
                     didShowFirstLightPopupThisSession = true
                     popupSourcePoint = screenPoint
-                    popupCityName = cluster.cityName ?? "新地点"
-                    generateFirstLightText(for: cluster)
+                    
+                    Task {
+                        // 确保在生成文案前，城市名已被解析
+                        let resolvedCity = (try? await ResolvePlaceClusterCityNameUseCase().resolveCityName(for: cluster)) ?? cluster.cityName ?? "新地点"
+                        await MainActor.run {
+                            self.popupCityName = resolvedCity
+                            generateFirstLightText(for: cluster, resolvedCity: resolvedCity)
+                        }
+                    }
                 }
             )
             .ignoresSafeArea()
@@ -228,23 +235,27 @@ struct ExplorationRootView: View {
         }
     }
 
-    private func generateFirstLightText(for cluster: PlaceCluster) {
+    private func generateFirstLightText(for cluster: PlaceCluster, resolvedCity: String) {
         let geohash6 = String(cluster.geohash.prefix(6))
-        let city = cluster.cityName ?? "未知城市"
+        let city = resolvedCity
+
+        #if DEBUG
+        print("[FirstLight] generateFirstLightText clusterId=\(cluster.id) geohash=\(cluster.geohash) geohash6=\(geohash6) cityName=\(cluster.cityName ?? "nil") panelCityName=\(panelCityName ?? "nil") lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude)")
+        #endif
 
         let fallbackText = "光点显影成一段新的记忆"
         let cacheKey = "firstLight:\(geohash6)"
 
         let systemPrompt = """
         你是一位克制而有文化气质的城市书写者。
-        请为“地图刮开后出现的城市显影弹窗”撰写一段文字。
+        请简要撰写一段文字。
         要求：
         - 3~4段结构
         - 第一段：城市整体气质或历史基调
         - 第二段：简洁的历史或地理知识真实，不编造
         - 第三段：当地生活或文化
         - 最后一段：一段两句完整的，与城市相关的诗词。
-        整体字数 90到110字左右。
+        整体字数 90到110字。
         禁止：
         - 使用“著名”“历史悠久”“文化名城”“旅游胜地”等宣传词
         - 使用感叹号
@@ -255,6 +266,7 @@ struct ExplorationRootView: View {
         城市：\(city)
         坐标：(\(cluster.centerLatitude), \(cluster.centerLongitude))
         geohash_6：\(geohash6)
+        请简要撰写一段文字，整体字数 90到110字
         """
 
         let request = AITextRequest(
@@ -318,6 +330,8 @@ private struct FirstLightPopupInlineView: View {
                 .font(.system(size: 15, weight: .regular))
                 .foregroundStyle(.white.opacity(0.88))
                 .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(nil)
+                .multilineTextAlignment(.leading)
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 14)
@@ -356,7 +370,7 @@ private struct FirstLightPopupInlineView: View {
         case .fly:
             return target == .zero ? source : target
         default:
-            return CGPoint(x: UIScreen.main.bounds.midX, y: 140)
+            return CGPoint(x: source.x, y: 140)
         }
     }
 

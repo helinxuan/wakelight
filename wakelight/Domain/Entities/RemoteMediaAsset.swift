@@ -13,4 +13,13 @@ struct RemoteMediaAsset: Codable, FetchableRecord, PersistableRecord {
     var photoAssetId: UUID
     var indexedAt: Date
     var lastSeenAt: Date?
+
+    // Pairing info for RAW+JPG
+    var rawPath: String?
+    var hasJPG: Bool
+    var isPrimary: Bool
+
+    // Pairing info for Live Photo (HEIC + MOV/MP4/M4V)
+    var livePhotoVideoPath: String?
+    var livePhotoPhotoPath: String?
 }
