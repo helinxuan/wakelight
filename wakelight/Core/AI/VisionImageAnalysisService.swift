@@ -164,22 +164,36 @@ actor VisionImageAnalysisService {
         if key.hasPrefix("library://") {
             let localId = String(key.dropFirst("library://".count))
             return await loadFromPhotoLibrary(identifier: localId)
-        } else if key.hasPrefix("webdav://") {
-            return nil
-        } else if let url = URL(string: key), url.isFileURL {
-            return UIImage(contentsOfFile: url.path)
+        } else if key.hasPrefix("webdav://") || key.hasPrefix("file://") {
+            // 支持 WebDAV 和 本地文件通过 MediaResolver 读取
+            guard let mediaLocator = MediaLocator.parse(key) else { return nil }
+            do {
+                let resource = try await MediaResolver.shared.resolve(locator: mediaLocator)
+                switch resource {
+                case .data(let data):
+                    return UIImage(data: data)
+                case .url(let url):
+                    return UIImage(contentsOfFile: url.path)
+                case .phAsset(let asset):
+                    // 理论上 library:// 已经处理，但为了兼容性保留
+                    return await loadFromPHAsset(asset)
+                }
+            } catch {
+                print("[VisionImageAnalysis] MediaResolver failed for \(key): \(error)")
+                return nil
+            }
         }
         return nil
     }
 
     private func loadFromPhotoLibrary(identifier: String) async -> UIImage? {
-        await withCheckedContinuation { continuation in
-            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
-            guard let asset = assets.firstObject else {
-                continuation.resume(returning: nil)
-                return
-            }
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+        return await loadFromPHAsset(asset)
+    }
 
+    private func loadFromPHAsset(_ asset: PHAsset) async -> UIImage? {
+        await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
             options.isSynchronous = false

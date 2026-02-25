@@ -315,9 +315,9 @@ private struct FirstLightPopupInlineView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.yellow)
 
-                Text("第一个光点")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.92))
+                // Text("第一个光点")
+                //     .font(.system(size: 13, weight: .semibold))
+                //     .foregroundStyle(.white.opacity(0.92))
 
                 Spacer(minLength: 0)
             }
