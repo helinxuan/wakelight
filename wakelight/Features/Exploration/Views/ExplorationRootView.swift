@@ -266,7 +266,7 @@ struct ExplorationRootView: View {
         城市：\(city)
         坐标：(\(cluster.centerLatitude), \(cluster.centerLongitude))
         geohash_6：\(geohash6)
-        请简要撰写一段文字，整体字数 90到110字
+        请简要撰写一段文字，整体文字精炼，字数90到110字
         """
 
         let request = AITextRequest(

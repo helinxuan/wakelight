@@ -683,16 +683,9 @@ private struct VisitLayerRowView: View {
         default: timePrefix = "这时候的"
         }
 
-        // 现有的本地模板，作为 AI 不可用时的兜底文案。
-        let templates = [
-            "\(timePrefix)\(loc)，留下了 \(count) 个瞬间。",
-            "在这里捕捉到了 \(count) 张回忆。",
-            "\(loc) 的这段时光都在这里了。"
-        ]
-        let fallback = templates.randomElement() ?? ""
+        let fallback = "\(timePrefix)\(loc)，留下了 \(count) 个瞬间。"
 
-        // 基于地点 + 起始时间构造一个相对稳定的缓存键，
-        // 避免同一地点/时段重复生成完全不同的文案。
+        // 基于地点 + 起始时间构造一个相对稳定的缓存键
         let placeIdPart = layer.placeClusterId.uuidString
         let date = layer.startAt
         let components = Calendar.current.dateComponents([.year, .month, .day, .hour], from: date)
@@ -701,38 +694,56 @@ private struct VisitLayerRowView: View {
                               components.month ?? 0,
                               components.day ?? 0,
                               components.hour ?? 0)
-        let cacheKey = "writing:\(placeIdPart):\(bucketId)"
+        let cacheKey = "diary:\(placeIdPart):\(bucketId)"
 
         let systemPrompt = """
-        你是一位克制、真诚的回忆文案助手。
-        你的任务是把“地点 + 时间氛围 + 照片数量”写成一句像私人日记的说明。
+        你是一位克制、真诚的回忆日记写作者。
 
-        ### 写作准则：
-        1. **口吻**：自然、像本人在记录，不要广告腔。
-        2. **长度**：严格 12-28 个汉字，不要换行。
-        3. **禁用**：不要鸡汤口号（例如“治愈/温暖/浪漫/不负时光”），不要夸张修辞，不要解释。
-        4. **细节**：可以轻微提及数量或时间，但不要堆数字。
+        你要为一组照片写一段像私人日记的回忆文字。
+        输入包含：地点、时间氛围、照片数量、以及由本地视觉识别得到的照片关键词。
 
-        ### 输出格式：
-        只输出一句话，尽量不使用标点。
+        写作要求：
+        - 3~4段
+        - 总字数 140~220 字
+        - 口吻自然、像本人在记
+        - 不写旅游攻略，不写宣传语
+        - 不使用感叹号
+        - 不使用“著名”“历史悠久”“文化名城”“旅游胜地”等词
+        - 不编造具体历史事件或年份
+        - 不杜撰诗句
+        - 不要逐条罗列关键词，要把内容融化在叙述里
+        - 最后一段必须是一句真实存在、与该城市相关的诗词，单独成段
+
+        输出只包含正文内容。
         """
-
-        let userPrompt = """
-        地点：\(loc)
-        时间氛围：\(timePrefix)
-        照片数量：\(count)
-
-        生成一句可以直接放进回忆卡片的说明文字。
-        """
-
-        let request = AITextRequest(
-            systemPrompt: systemPrompt,
-            userPrompt: userPrompt,
-            cacheKey: cacheKey,
-            fallbackText: fallback
-        )
 
         Task {
+            let locators: [PhotoAssetLocator] = (try? await DatabaseContainer.shared.db.reader.read { db in
+                let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
+                if links.isEmpty { return [PhotoAssetLocator]() }
+                let photoIds = links.map { $0.photoAssetId }
+                return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            }) ?? []
+
+            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
+            let keywords = analysis.topKeywords.joined(separator: "、")
+
+            let userPrompt = """
+            地点：\(loc)
+            时间氛围：\(timePrefix)
+            照片数量：\(count)
+            照片内容关键词：\(keywords)
+
+            生成一段可以直接放进回忆卡片的日记文字。
+            """
+
+            let request = AITextRequest(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                cacheKey: cacheKey,
+                fallbackText: fallback
+            )
+
             let text = await AITextEngine.shared.generateText(for: request)
             await MainActor.run {
                 withAnimation {
