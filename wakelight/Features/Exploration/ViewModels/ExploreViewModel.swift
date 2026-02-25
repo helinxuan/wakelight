@@ -7,6 +7,7 @@ import GRDB
 final class ExploreViewModel: ObservableObject {
     @Published var clusters: [PlaceCluster] = []
     @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> locatorKey
+    @Published var storyThumbnailHasRaw: [UUID: Bool] = [:] // clusterId -> hasRaw
 
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
@@ -83,6 +84,7 @@ final class ExploreViewModel: ObservableObject {
             .tracking { db in
                 let clusters = try PlaceCluster.fetchAll(db)
                 var thumbnails: [UUID: String] = [:]
+                var hasRawByClusterId: [UUID: Bool] = [:]
 
                 for cluster in clusters where cluster.hasStory {
                     // 优化：取最新沉淀的 Story (settledAt DESC) 的第一张图
@@ -97,21 +99,23 @@ final class ExploreViewModel: ObservableObject {
                     """
                     if let photoAssetId = try UUID.fetchOne(db, sql: sql, arguments: [cluster.id]) {
                         let locators = try PhotoAsset.fetchLocators(db: db, ids: [photoAssetId])
-                        if let key = locators.first?.locatorKey {
-                            thumbnails[cluster.id] = key
+                        if let locator = locators.first {
+                            thumbnails[cluster.id] = locator.locatorKey
+                            hasRawByClusterId[cluster.id] = locator.hasRaw
                         }
                     }
                 }
-                return (clusters, thumbnails)
+                return (clusters, thumbnails, hasRawByClusterId)
             }
             .publisher(in: db.reader)
             .sink { completion in
                 if case .failure(let error) = completion {
                     print("Error observing clusters: \(error)")
                 }
-            } receiveValue: { [weak self] (clusters, thumbnails) in
+            } receiveValue: { [weak self] (clusters, thumbnails, hasRawByClusterId) in
                 self?.clusters = clusters
                 self?.storyThumbnails = thumbnails
+                self?.storyThumbnailHasRaw = hasRawByClusterId
             }
             .store(in: &cancellables)
     }

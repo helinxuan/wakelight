@@ -155,7 +155,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         // Use the placemark as a fallback since it's the most reliable way to get structured data
         // even if it's deprecated in favor of new APIs that might not be fully exposed yet.
         let placemark = item.placemark
-        let candidate = placemark.locality ?? placemark.administrativeArea
+        let candidate = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
         return candidate?.replacingOccurrences(of: "市", with: "")
     }
 
@@ -170,7 +170,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                     return
                 }
                 let placemark = placemarks?.first
-                let candidate = placemark?.locality ?? placemark?.administrativeArea
+                let candidate = placemark?.locality ?? placemark?.subAdministrativeArea ?? placemark?.administrativeArea
                 continuation.resume(returning: candidate?.replacingOccurrences(of: "市", with: ""))
             }
         }

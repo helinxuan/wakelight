@@ -60,6 +60,10 @@ public actor AITextEngine {
     ///
     /// - 注意：该方法保证**总是返回非空字符串**，调用方无需再处理错误分支。
     public func generateText(for request: AITextRequest) async -> String {
+        #if DEBUG
+        let promptSnippet = request.userPrompt.replacingOccurrences(of: "\n", with: " ")
+        log("generateText request: cacheKey=\(request.cacheKey ?? "nil"), userPrompt=\(promptSnippet)")
+        #endif
         if let key = request.cacheKey, let cached = cache[key] {
             log("cache hit for key=\(key)")
             return cached
@@ -131,7 +135,7 @@ public actor AITextEngine {
             model: "Qwen/Qwen2.5-7B-Instruct",
             messages: messages,
             temperature: 0.7,
-            max_tokens: 120
+            max_tokens: 512
         )
 
         var urlRequest = URLRequest(url: url)
