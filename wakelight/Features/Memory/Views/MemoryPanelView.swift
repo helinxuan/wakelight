@@ -477,7 +477,7 @@ private struct MergeVisitLayersSheet: View {
             let loc = placeNames.isEmpty ? "这里" : placeNames.prefix(4).joined(separator: "、")
             
             let systemPrompt = """
-            你是一位克制、真诚的回忆日记写作者。
+            你是一位极度克制、真诚、绝不夸张的私人日记文案助手。
 
             你要为一组照片写一段像私人日记的回忆文字。
             输入包含：具体地点、具体时间范围、照片数量、以及由本地视觉识别得到的照片关键词。
@@ -486,6 +486,7 @@ private struct MergeVisitLayersSheet: View {
             - 3~4段
             - 总字数 100~150 字
             - 口吻自然、像本人在记
+            - 不要僵硬的直接使用时间和地点，时间有可能的话尽量和节假日挂钩
             - 禁止使用“这些地方”“这段时间”等模糊代称，必须直接使用提供的具体地点与时间范围。
             - 不写旅游攻略，不写宣传语
             - 不使用感叹号
@@ -504,7 +505,7 @@ private struct MergeVisitLayersSheet: View {
             照片数量：\(count)
             照片内容关键词：\(keywords)
 
-            生成一段可以直接放进回忆卡片的日记文字。
+            请直接输出文案，不要加任何其他内容。
             """
 
             let request = AITextRequest(
@@ -813,7 +814,7 @@ private struct VisitLayerRowView: View {
         - 不编造具体历史事件或年份
         - 不杜撰诗句
         - 不要逐条罗列关键词，要把内容融化在叙述里
-        - 最后一段必须是一句真实存在、与该城市相关的诗词，单独成段
+        - 最后一段必须是两句连续真实存在、与该城市相关的诗词
         - 不要把每个照片的关键字都识别输出，只需要最重要的关键词，一些什么家具，工具等不要，只要有意义的关键词，比如人，风景，小孩等
         - 不要照片中，另一张照片这种描述
         - 不要说废话
