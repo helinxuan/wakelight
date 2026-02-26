@@ -774,7 +774,18 @@ final class ImportWebDAVPhotosUseCase {
     }
 
     private func isSupportedMediaPath(_ href: String) -> Bool {
-        let lower = href.lowercased()
+        let normalized = normalize(path: href)
+        let fileName = (normalized as NSString).lastPathComponent
+        let lowerName = fileName.lowercased()
+
+        // AppleDouble/metadata sidecar files from SMB/macOS archive copies, e.g. "._P1067892.JPG"
+        // are not real media content and will fail thumbnail generation.
+        if fileName.hasPrefix("._") { return false }
+
+        // Hidden/system files that should never enter media import.
+        if lowerName == ".ds_store" || lowerName == "thumbs.db" || lowerName.hasPrefix(".") { return false }
+
+        let lower = normalized.lowercased()
         let extensions = [
             // Photos
             ".jpg", ".jpeg", ".png", ".heic", ".tiff",

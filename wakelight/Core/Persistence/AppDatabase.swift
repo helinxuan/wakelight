@@ -38,6 +38,14 @@ struct AppDatabase {
                 t.column("pixelHeight", .integer)
                 t.column("duration", .double) // seconds (video only)
 
+                // Curation
+                t.column("burstGroupId", .text)
+                t.column("bestShotScore", .double)
+                t.column("selectionReason", .text)
+                t.column("curationBucket", .text)
+                t.column("isRecoverableArchived", .boolean)
+                t.column("recognizedTextConfidence", .double)
+
                 // Sync / bookkeeping
                 t.column("modificationDate", .datetime)
                 t.column("lastSeenAt", .datetime) // 用于同步删除
