@@ -160,6 +160,37 @@ final class ImportWebDAVPhotosUseCase {
                     .filter(Column("profileId") == profile.id && unchangedPaths.contains(Column("remotePath")))
                     .updateAll(db, Column("lastSeenAt").set(to: scanAt))
             }
+
+            // Backfill thumbnails for unchanged assets that were imported earlier without thumbnail generation.
+            let backfillCandidates: [(photoId: UUID, remotePath: String, mediaType: PhotoAsset.MediaType)] = try await writer.read { db in
+                var candidates: [(UUID, String, PhotoAsset.MediaType)] = []
+                candidates.reserveCapacity(unchangedItems.count)
+
+                for group in unchangedItems {
+                    let remotePath = normalize(path: group.primary.href)
+                    guard let remote = existingAssets[remotePath] else { continue }
+                    guard let asset = try PhotoAsset.fetchOne(db, key: remote.photoAssetId) else { continue }
+
+                    let hasThumbnail = !(asset.thumbnailPath?.isEmpty ?? true)
+                    if !hasThumbnail {
+                        candidates.append((asset.id, remotePath, asset.mediaType ?? inferMediaType(fromPath: remotePath)))
+                    }
+                }
+
+                return candidates
+            }
+
+            if !backfillCandidates.isEmpty {
+                print("[WebDAVImport] Backfilling thumbnails for unchanged assets: \(backfillCandidates.count)")
+                for candidate in backfillCandidates {
+                    scheduleWebDAVThumbnailGeneration(
+                        profileId: profile.id,
+                        remotePath: candidate.remotePath,
+                        photoId: candidate.photoId,
+                        mediaType: candidate.mediaType
+                    )
+                }
+            }
         }
 
         print("[WebDAVImport] Items to import: \(itemsToImport.count) (unchanged: \(unchangedItems.count), total primary: \(groupedItems.count))")
@@ -292,7 +323,8 @@ final class ImportWebDAVPhotosUseCase {
 
         func isRAW(_ path: String) -> Bool {
             let e = extLower(path)
-            let rawExts = ["rw2", "dng", "nef", "arw", "cr2", "cr3", "orf", "raf"]
+            // 常见 RAW 扩展（含通用 .raw）
+            let rawExts = ["raw", "rw2", "dng", "nef", "arw", "cr2", "cr3", "orf", "raf", "srw", "pef", "iiq", "erf", "kdc", "mos", "mrw", "rwl", "x3f", "3fr"]
             return rawExts.contains(e)
         }
 
@@ -349,21 +381,10 @@ final class ImportWebDAVPhotosUseCase {
         groups.append(contentsOf: passthrough)
 
         for (_, c) in byKey {
-            if let heic = c.heics.first, let video = c.liveVideos.first {
-                let heicPath = normalize(path: heic.href)
-                let videoPath = normalize(path: video.href)
-
-                groups.append(
-                    MediaGroup(
-                        primary: heic,
-                        rawPath: nil,
-                        hasJPG: false,
-                        livePhotoVideoPath: videoPath,
-                        livePhotoPhotoPath: heicPath
-                    )
-                )
-                continue
-            }
+            // 优先级说明：
+            // 1) JPG 存在时优先作为主图，以便 RAW+JPG 能稳定显示 RAW 标记。
+            // 2) 否则 HEIC 作为主图；若存在同名视频则标记为 Live。
+            // 3) 仅 RAW / 仅视频兜底。
 
             if let jpg = c.jpgs.first {
                 let rawPath = c.raws.first.map { normalize(path: $0.href) }
@@ -379,23 +400,26 @@ final class ImportWebDAVPhotosUseCase {
                 continue
             }
 
-            if let raw = c.raws.first {
+            if let heic = c.heics.first {
+                let heicPath = normalize(path: heic.href)
+                let videoPath = c.liveVideos.first.map { normalize(path: $0.href) }
+
                 groups.append(
                     MediaGroup(
-                        primary: raw,
+                        primary: heic,
                         rawPath: nil,
                         hasJPG: false,
-                        livePhotoVideoPath: nil,
-                        livePhotoPhotoPath: nil
+                        livePhotoVideoPath: videoPath,
+                        livePhotoPhotoPath: videoPath == nil ? nil : heicPath
                     )
                 )
                 continue
             }
 
-            if let heic = c.heics.first {
+            if let raw = c.raws.first {
                 groups.append(
                     MediaGroup(
-                        primary: heic,
+                        primary: raw,
                         rawPath: nil,
                         hasJPG: false,
                         livePhotoVideoPath: nil,
@@ -538,6 +562,13 @@ final class ImportWebDAVPhotosUseCase {
                     )
                     try record.insert(db)
 
+                    self.scheduleWebDAVThumbnailGeneration(
+                        profileId: profile.id,
+                        remotePath: remotePath,
+                        photoId: newPhotoId,
+                        mediaType: metadata.mediaType
+                    )
+
                     existing.photoAssetId = newPhotoId
                     existing.etag = item.etag
                     existing.lastModified = item.lastModified
@@ -675,6 +706,31 @@ final class ImportWebDAVPhotosUseCase {
         }
     }
 
+    private func scheduleWebDAVThumbnailGeneration(
+        profileId: UUID,
+        remotePath: String,
+        photoId: UUID,
+        mediaType: PhotoAsset.MediaType
+    ) {
+        let locator = MediaLocator.webdav(profileId: profileId.uuidString, remotePath: remotePath)
+        Task {
+            await PhotoThumbnailScheduler.shared.schedule {
+                do {
+                    let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                    try await DatabaseContainer.shared.writer.write { db in
+                        if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
+                            asset.thumbnailPath = path
+                            asset.thumbnailUpdatedAt = Date()
+                            try asset.update(db)
+                        }
+                    }
+                }catch {
+                    print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
+                }
+            }
+        }
+    }
+
     private func listRecursively(client: WebDAVClient, path: String) async throws -> [WebDAVDirectoryItem] {
         var visited = Set<String>()
         return try await listRecursively(client: client, path: path, visited: &visited)
@@ -723,11 +779,17 @@ final class ImportWebDAVPhotosUseCase {
             // Photos
             ".jpg", ".jpeg", ".png", ".heic", ".tiff",
             // RAW
-            ".rw2", ".dng", ".nef", ".arw", ".cr2", ".cr3", ".orf", ".raf",
+            ".raw", ".rw2", ".dng", ".nef", ".arw", ".cr2", ".cr3", ".orf", ".raf", ".srw", ".pef", ".iiq", ".erf", ".kdc", ".mos", ".mrw", ".rwl", ".x3f", ".3fr",
             // Videos
             ".mp4", ".mov", ".m4v"
         ]
         return extensions.contains { lower.hasSuffix($0) }
+    }
+
+    private func inferMediaType(fromPath path: String) -> PhotoAsset.MediaType {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let videoExts: Set<String> = ["mp4", "mov", "m4v"]
+        return videoExts.contains(ext) ? .video : .photo
     }
 
     private struct MediaMetadata {
