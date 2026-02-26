@@ -26,6 +26,10 @@ struct ImportProgress: Codable {
     var totalItems: Int = 0
     var processedItems: Int = 0
 
+    var meaningfulKept: Int = 0
+    var reviewBucketCount: Int = 0
+    var filteredArchivedCount: Int = 0
+
     var lastError: String?
     var lastCompletedAt: Date?
 
@@ -35,7 +39,6 @@ struct ImportProgress: Codable {
     }
 }
 
-@MainActor
 final class PhotoImportManager: ObservableObject {
     static let shared = PhotoImportManager()
 
@@ -97,12 +100,13 @@ final class PhotoImportManager: ObservableObject {
             await self.updateStatus(.importing, phase: .photos, resetCounts: true)
 
             do {
-                let photosImported = try await ImportPhotosUseCase().run(limit: nil) { processed, total in
+                let summary = try await ImportPhotosUseCase().runWithSummary(limit: nil) { processed, total in
                     Task { @MainActor in
                         PhotoImportManager.shared.reportProgress(processed: processed, total: total)
                     }
                 }
-                print("[ImportManager] Local Photos imported: \(photosImported)")
+                await self.reportSummary(summary)
+                print("[ImportManager] Local Photos imported: \(summary.totalImported), keep=\(summary.meaningfulKept), review=\(summary.reviewBucketCount), archived=\(summary.filteredArchivedCount)")
 
                 // 本地 Photos 导入完成后，继续生成聚类与 VisitLayers
                 await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
@@ -175,6 +179,9 @@ final class PhotoImportManager: ObservableObject {
         if resetCounts {
             progress.processedItems = 0
             progress.totalItems = 0
+            progress.meaningfulKept = 0
+            progress.reviewBucketCount = 0
+            progress.filteredArchivedCount = 0
         }
 
         if status == .importing {
@@ -205,7 +212,9 @@ final class PhotoImportManager: ObservableObject {
 
     /// “提示/警告”类信息：不会让导入失败，但会在导入页展示出来（复用 progress.lastError）。
     func reportNonFatalWarning(_ message: String) {
-        recordNonFatalError("提示: \(message)")
+        Task { @MainActor in
+            self.recordNonFatalError("提示: \(message)")
+        }
     }
 
     @MainActor
@@ -220,6 +229,38 @@ final class PhotoImportManager: ObservableObject {
         progress.processedItems = processed
         progress.totalItems = total
         // 不必每次都保存，减少 IO
+    }
+
+
+    @MainActor
+    func reportSummary(_ summary: ImportCurationSummary) {
+        progress.meaningfulKept = summary.meaningfulKept
+        progress.reviewBucketCount = summary.reviewBucketCount
+        progress.filteredArchivedCount = summary.filteredArchivedCount
+        saveProgress()
+    }
+
+    @MainActor
+    func refreshCurationCountsFromDatabase() {
+        Task.detached(priority: .utility) {
+            do {
+                let (keep, review, archived) = try await DatabaseContainer.shared.db.reader.read { db in
+                    let keep = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.keep.rawValue).fetchCount(db)
+                    let review = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue).fetchCount(db)
+                    let archived = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue).fetchCount(db)
+                    return (keep, review, archived)
+                }
+
+                await MainActor.run {
+                    self.progress.meaningfulKept = keep
+                    self.progress.reviewBucketCount = review
+                    self.progress.filteredArchivedCount = archived
+                    self.saveProgress()
+                }
+            } catch {
+                print("[ImportManager] refreshCurationCountsFromDatabase failed: \(error)")
+            }
+        }
     }
 
     private let progressKey = "com.wakelight.import.progress"

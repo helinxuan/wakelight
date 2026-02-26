@@ -110,21 +110,55 @@ final class PhotoThumbnailGenerator {
     }
     
     private func createImageThumbnail(from url: URL) throws -> UIImage {
+        let maxPixelSize = max(targetSize.width, targetSize.height)
+
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(targetSize.width, targetSize.height),
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             // Avoid decoding/caching full-resolution images into memory.
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldCacheImmediately: false
         ]
-        
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw NSError(domain: "PhotoThumbnailGenerator", code: -4, userInfo: [NSLocalizedDescriptionKey: "Failed to create image source from URL"])
         }
-        
-        return UIImage(cgImage: cgImage)
+
+        // Primary path: use ImageIO thumbnail API.
+        if let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return UIImage(cgImage: cgThumb)
+        }
+
+        // Fallback path for some RAW files (e.g. certain RW2) where thumbnail extraction may fail.
+        // Decode first frame and downscale in memory.
+        let fallbackOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+
+        guard let fullImage = CGImageSourceCreateImageAtIndex(source, 0, fallbackOptions as CFDictionary) else {
+            throw NSError(domain: "PhotoThumbnailGenerator", code: -4, userInfo: [NSLocalizedDescriptionKey: "Failed to create thumbnail from URL source"])
+        }
+
+        let image = UIImage(cgImage: fullImage)
+        let rendererFormat = UIGraphicsImageRendererFormat.default()
+        rendererFormat.scale = 1
+
+        let width = image.size.width
+        let height = image.size.height
+        guard width > 0, height > 0 else {
+            throw NSError(domain: "PhotoThumbnailGenerator", code: -4, userInfo: [NSLocalizedDescriptionKey: "Invalid image dimensions"])
+        }
+
+        let scale = min(maxPixelSize / width, maxPixelSize / height)
+        let resizedSize = CGSize(width: max(1, floor(width * scale)), height: max(1, floor(height * scale)))
+
+        let resized = UIGraphicsImageRenderer(size: resizedSize, format: rendererFormat).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: resizedSize))
+        }
+
+        return resized
     }
     
     private func requestPhotosThumbnail(for asset: PHAsset) async throws -> UIImage {

@@ -129,12 +129,11 @@ final class WebDAVSettingsViewModel: ObservableObject {
             testResult = "保存成功！"
             print("[WebDAV] 保存流程全部完成")
 
+            // Use a stable repository capture to avoid reader lifecycle depending on ViewModel deallocation.
+            let repo = self.repo
             let reader = WebDAVMediaReader(
-                profileProvider: { [weak self] id in
-                    guard let self = self else {
-                        throw NSError(domain: "WebDAVSettings", code: -1)
-                    }
-                    return try await self.repo.fetchProfile(id: id)
+                profileProvider: { id in
+                    try await repo.fetchProfile(id: id)
                 },
                 passwordProvider: { p in
                     try KeychainStore.shared.getString(forKey: p.passwordKey)

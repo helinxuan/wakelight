@@ -62,6 +62,37 @@ struct ImportPhotosSettingsView: View {
                     }
                 }
 
+                if importManager.progress.meaningfulKept > 0 || importManager.progress.reviewBucketCount > 0 || importManager.progress.filteredArchivedCount > 0 {
+                    HStack {
+                        Text("保留")
+                        Spacer()
+                        Text("\(importManager.progress.meaningfulKept)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    NavigationLink {
+                        ImportCurationBucketListView(filter: .review)
+                    } label: {
+                        HStack {
+                            Text("待确认")
+                            Spacer()
+                            Text("\(importManager.progress.reviewBucketCount)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    NavigationLink {
+                        ImportCurationBucketListView(filter: .archived)
+                    } label: {
+                        HStack {
+                            Text("已过滤(可恢复)")
+                            Spacer()
+                            Text("\(importManager.progress.filteredArchivedCount)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 if let last = importManager.progress.lastCompletedAt {
                     HStack {
                         Text("上次完成")
