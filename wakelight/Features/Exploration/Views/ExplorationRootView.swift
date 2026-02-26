@@ -1,8 +1,6 @@
 import SwiftUI
 
 struct ExplorationRootView: View {
-    @Environment(\.displayScale) private var displayScale
-
     @StateObject private var viewModel = ExploreViewModel()
     @State private var selectedCluster: PlaceCluster?
     @State private var awakenQueue: [PlaceCluster] = []
@@ -16,11 +14,8 @@ struct ExplorationRootView: View {
 
     @State private var didShowFirstLightPopupThisSession: Bool = false
     @State private var popupText: String? = nil
-    @State private var firstLightText: String? = nil // 独立存储生成的文案，用于持久条
     @State private var popupCityName: String = ""
-    @State private var popupSourcePoint: CGPoint = .zero
-    @State private var memoryPanelTopCenter: CGPoint = .zero
-    @State private var showPersistentFirstLight: Bool = false
+    @State private var isFirstLightPopupPresented: Bool = false
 
     var body: some View {
         ZStack {
@@ -30,11 +25,10 @@ struct ExplorationRootView: View {
                 awakenQueue: $awakenQueue,
                 isAwakenMode: $isAwakenMode,
                 revealedClusterIds: $revealedClusterIds,
-                onFirstAwakenInSession: { cluster, screenPoint in
+                onFirstAwakenInSession: { cluster, _ in
                     guard !didShowFirstLightPopupThisSession else { return }
                     didShowFirstLightPopupThisSession = true
-                    popupSourcePoint = screenPoint
-                    
+
                     Task {
                         // 确保在生成文案前，城市名已被解析
                         let resolvedCity = (try? await ResolvePlaceClusterCityNameUseCase().resolveCityName(for: cluster)) ?? cluster.cityName ?? "新地点"
@@ -47,19 +41,34 @@ struct ExplorationRootView: View {
             )
             .ignoresSafeArea()
 
-            if let popupText {
-                FirstLightPopupInlineView(
-                    cityName: popupCityName,
-                    text: popupText,
-                    source: popupSourcePoint,
-                    target: memoryPanelTopCenter
-                ) {
-                    self.popupText = nil
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                        self.showPersistentFirstLight = true
+            if isFirstLightPopupPresented, let popupText {
+                ZStack {
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                self.isFirstLightPopupPresented = false
+                                self.panelHeight = minPanelHeight
+                            }
+                        }
+
+                    VStack {
+                        FirstLightPopupInlineView(
+                            cityName: popupCityName,
+                            text: popupText
+                        )
+                        .onTapGesture {
+                            // 点击弹窗本体不关闭
+                        }
+                        .padding(.top, 90)
+
+                        Spacer()
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .zIndex(999)
+                .transition(.opacity)
             }
 
             if isAwakenMode {
@@ -110,6 +119,47 @@ struct ExplorationRootView: View {
                         let _ = 56 as CGFloat
 
                         VStack(spacing: 0) {
+                            if let popupText, !isFirstLightPopupPresented {
+                                Button(action: {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        self.isFirstLightPopupPresented = true
+                                    }
+                                }) {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.yellow)
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(popupCityName)")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+
+                                            Text(popupText)
+                                                .font(.system(size: 11, weight: .regular))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+
+                                        Spacer(minLength: 0)
+
+                                        Text("点击再看")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .fill(Color.secondary.opacity(0.12))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 12)
+                                .padding(.top, 8)
+                            }
+
                             Capsule()
                                 .fill(Color.secondary.opacity(0.45))
                                 .frame(width: 36, height: 5)
@@ -117,7 +167,6 @@ struct ExplorationRootView: View {
                                 .padding(.bottom, 8)
                         }
                         .frame(maxWidth: .infinity)
-                        .frame(height: 24)
                         .contentShape(Rectangle())
                         .background(Color(.systemBackground))
                         .task(id: awakenQueue.map(\.id)) {
@@ -126,7 +175,7 @@ struct ExplorationRootView: View {
                                 await MainActor.run {
                                     self.panelCityName = name
                                 }
-                            } else {
+                            }else {
                                 await MainActor.run {
                                     self.panelCityName = nil
                                 }
@@ -142,7 +191,7 @@ struct ExplorationRootView: View {
                                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                         if panelHeight < (defaultPanelHeight + minPanelHeight) / 2 {
                                             panelHeight = minPanelHeight
-                                        } else {
+                                        }else {
                                             panelHeight = defaultPanelHeight
                                         }
                                     }
@@ -151,40 +200,6 @@ struct ExplorationRootView: View {
 
                         // 始终保留 MemoryPanelView 以维持其内部多选状态，仅通过高度和透明度控制视觉隐藏
                         VStack(spacing: 0) {
-                            if showPersistentFirstLight, let displayText = firstLightText {
-                                Button(action: {
-                                    // 点击还原弹窗
-                                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                                        self.showPersistentFirstLight = false
-                                        self.popupText = displayText // 还原弹窗
-                                    }
-                                }) {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "sparkles")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundStyle(.yellow)
-                                        
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(popupCityName)
-                                                .font(.system(size: 13, weight: .bold))
-                                            Text(displayText)
-                                                .font(.system(size: 12))
-                                                .foregroundStyle(.secondary)
-                                                .lineLimit(1)
-                                        }
-                                        
-                                        Spacer()
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color.secondary.opacity(0.1))
-                                    .cornerRadius(12)
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 8)
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                            }
-
                             MemoryPanelView(clusters: awakenQueue, selectedClusterId: selectedCluster?.id)
                                 .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
                                 .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
@@ -199,15 +214,6 @@ struct ExplorationRootView: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 20)
                     .transition(.asymmetric(insertion: .move(edge: .bottom), removal: .opacity))
-                    .overlay {
-                        GeometryReader { geo in
-                            Color.clear
-                                .preference(
-                                    key: MemoryPanelTopCenterPreferenceKey.self,
-                                    value: CGPoint(x: geo.frame(in: .global).midX, y: geo.frame(in: .global).minY + 18)
-                                )
-                        }
-                    }
                 }
             }
             .ignoresSafeArea(edges: .bottom)
@@ -219,9 +225,6 @@ struct ExplorationRootView: View {
         .sheet(isPresented: $showBadges) {
             BadgeWallView()
         }
-        .onPreferenceChange(MemoryPanelTopCenterPreferenceKey.self) { p in
-            self.memoryPanelTopCenter = p
-        }
         .onChange(of: isAwakenMode) { _, newValue in
             // 只要离开唤醒模式，就彻底复位本次 Session 状态（白点 + 面板 + 选中项）
             guard newValue == false else { return }
@@ -232,6 +235,7 @@ struct ExplorationRootView: View {
             panelHeight = defaultPanelHeight
             didShowFirstLightPopupThisSession = false
             popupText = nil
+            popupCityName = ""
         }
     }
 
@@ -240,7 +244,9 @@ struct ExplorationRootView: View {
         let city = resolvedCity
 
         #if DEBUG
-        print("[FirstLight] generateFirstLightText clusterId=\(cluster.id) geohash=\(cluster.geohash) geohash6=\(geohash6) cityName=\(cluster.cityName ?? "nil") panelCityName=\(panelCityName ?? "nil") lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude)")
+        let debugCityName = cluster.cityName ?? "nil"
+        let debugPanelCityName = panelCityName ?? "nil"
+        print("[FirstLight] generateFirstLightText clusterId=\(cluster.id) geohash=\(cluster.geohash) geohash6=\(geohash6) cityName=\(debugCityName) panelCityName=\(debugPanelCityName) lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude)")
         #endif
 
         let fallbackText = "光点显影成一段新的记忆"
@@ -266,6 +272,7 @@ struct ExplorationRootView: View {
         城市：\(city)
         坐标：(\(cluster.centerLatitude), \(cluster.centerLongitude))
         geohash_6：\(geohash6)
+        如果坐标在名胜古迹等景点附近，那么就着重介绍景点，不要介绍城市
         请简要撰写一段文字，整体文字精炼，字数90到110字
         """
 
@@ -280,33 +287,17 @@ struct ExplorationRootView: View {
             let text = await AITextEngine.shared.generateText(for: request)
             await MainActor.run {
                 self.popupText = text
-                self.firstLightText = text
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.isFirstLightPopupPresented = true
+                }
             }
         }
-    }
-}
-
-private struct MemoryPanelTopCenterPreferenceKey: PreferenceKey {
-    static var defaultValue: CGPoint = .zero
-    static func reduce(value: inout CGPoint, nextValue: () -> CGPoint) {
-        value = nextValue()
     }
 }
 
 private struct FirstLightPopupInlineView: View {
     let cityName: String
     let text: String
-    let source: CGPoint
-    let target: CGPoint
-    let onFinished: () -> Void
-
-    @State private var phase: Phase = .appear
-
-    private enum Phase {
-        case appear
-        case stay
-        case fly
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -314,10 +305,6 @@ private struct FirstLightPopupInlineView: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.yellow)
-
-                // Text("第一个光点")
-                //     .font(.system(size: 13, weight: .semibold))
-                //     .foregroundStyle(.white.opacity(0.92))
 
                 Spacer(minLength: 0)
             }
@@ -335,7 +322,7 @@ private struct FirstLightPopupInlineView: View {
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 14)
-        .frame(width: 280)
+        .frame(width: 300)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -345,49 +332,6 @@ private struct FirstLightPopupInlineView: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
-        .scaleEffect(scale)
-        .opacity(opacity)
-        .position(position)
-        .allowsHitTesting(false)
-        .onAppear {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) {
-                phase = .stay
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                withAnimation(.easeInOut(duration: 0.55)) {
-                    phase = .fly
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    onFinished()
-                }
-            }
-        }
-    }
-
-    private var position: CGPoint {
-        switch phase {
-        case .fly:
-            return target == .zero ? source : target
-        default:
-            return CGPoint(x: source.x, y: 140)
-        }
-    }
-
-    private var scale: CGFloat {
-        switch phase {
-        case .appear: return 0.2
-        case .stay: return 1.0
-        case .fly: return 0.2
-        }
-    }
-
-    private var opacity: Double {
-        switch phase {
-        case .appear: return 0
-        case .stay: return 1
-        case .fly: return 0
-        }
     }
 }
 
