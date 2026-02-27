@@ -97,16 +97,6 @@ struct ImportCurationBucketListView: View {
                                             Text("同组对比（保留/待确认/归档）")
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
-
-                                            if isTextTriggeredGroup(siblings) {
-                                                Text("TEXT")
-                                                    .font(.system(size: 9, weight: .bold))
-                                                    .padding(.horizontal, 5)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color.orange.opacity(0.2))
-                                                    .foregroundStyle(.orange)
-                                                    .clipShape(Capsule())
-                                            }
                                         }
                                         ScrollView(.horizontal, showsIndicators: false) {
                                             HStack(spacing: 8) {
