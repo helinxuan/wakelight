@@ -103,6 +103,12 @@ struct ImportPhotosSettingsView: View {
                     }
                 }
 
+                if let notice = importManager.progress.lastNotice, !notice.isEmpty {
+                    Text("完成提示: \(notice)")
+                        .foregroundStyle(.green)
+                        .textSelection(.enabled)
+                }
+
                 if let err = importManager.progress.lastError, !err.isEmpty {
                     Text("错误/提示: \(err)")
                         .foregroundStyle(.red)

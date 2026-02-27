@@ -250,6 +250,78 @@ final class ImportPhotosUseCase {
     func run(limit: Int? = 200, onProgress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> Int {
         try await runWithSummary(limit: limit, onProgress: onProgress).totalImported
     }
+
+    func reprocessImportedPhotos(
+        onPreprocessProgress: (@MainActor (Int, Int) -> Void)? = nil
+    ) async throws -> ImportCurationSummary {
+        let status = await permissionService.requestAuthorization()
+        switch status {
+        case .authorized, .limited:
+            break
+        case .denied, .restricted, .notDetermined:
+            throw ImportPhotosError.permissionDenied
+        }
+
+        let localIds: [String] = try await writer.read { db in
+            try PhotoAsset
+                .filter(Column("localIdentifier") != nil)
+                .fetchAll(db)
+                .compactMap { $0.localIdentifier }
+        }
+
+        let dedupedIds = Array(Set(localIds)).filter { !$0.isEmpty }
+        guard !dedupedIds.isEmpty else {
+            await onPreprocessProgress?(0, 0)
+            return ImportCurationSummary(
+                totalImported: 0,
+                meaningfulKept: 0,
+                reviewBucketCount: 0,
+                filteredArchivedCount: 0,
+                decisions: []
+            )
+        }
+
+        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: dedupedIds, options: nil)
+        var assets: [PHAsset] = []
+        assets.reserveCapacity(fetchResult.count)
+        fetchResult.enumerateObjects { asset, _, _ in
+            assets.append(asset)
+        }
+
+        let decisions = await curationService.curate(assets: assets) { processed, total in
+            await MainActor.run {
+                onPreprocessProgress?(processed, total)
+            }
+        }
+
+        let decisionsByLocalId = Dictionary(uniqueKeysWithValues: decisions.map { ($0.localIdentifier, $0) })
+
+        if !decisionsByLocalId.isEmpty {
+            try await writer.write { db in
+                for (localId, decision) in decisionsByLocalId {
+                    _ = try PhotoAsset
+                        .filter(Column("localIdentifier") == localId)
+                        .updateAll(
+                            db,
+                            Column("burstGroupId").set(to: decision.groupId),
+                            Column("bestShotScore").set(to: decision.score),
+                            Column("selectionReason").set(to: decision.reason.rawValue),
+                            Column("curationBucket").set(to: decision.bucket.rawValue),
+                            Column("isRecoverableArchived").set(to: decision.bucket == .archived),
+                            Column("recognizedTextConfidence").set(to: decision.recognizedTextConfidence)
+                        )
+                }
+            }
+        }
+
+        return ImportCurationSummary(
+            totalImported: decisions.count,
+            meaningfulKept: decisions.filter { $0.bucket == .keep }.count,
+            reviewBucketCount: decisions.filter { $0.bucket == .review }.count,
+            filteredArchivedCount: decisions.filter { $0.bucket == .archived }.count,
+            decisions: decisions
+        )
+    }
 }
 
 enum ImportPhotosError: Error {
