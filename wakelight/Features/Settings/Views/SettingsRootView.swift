@@ -15,7 +15,7 @@ struct SettingsRootView: View {
                         WebDAVSettingsView(viewModel: WebDAVSettingsViewModel(repo: repo))
                     }
 
-                    NavigationLink("Import Photos") {
+                    NavigationLink("照片导入") {
                         ImportPhotosSettingsView()
                     }
                 }
