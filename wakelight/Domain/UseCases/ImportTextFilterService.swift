@@ -34,13 +34,17 @@ actor ImportTextFilterService {
     private let minTextCount: Int = 3
     private let minTextAreaRatio: Double = 0.02
     private let minAssetsWithText: Int = 2
+    private let minPerAssetTextCount: Int = 2
+    private let minPerAssetTextAreaRatio: Double = 0.01
 
     private init() {}
 
     func evaluate(group: [TextFilterEvidence]) -> GroupTextDecision {
         let totalCount = group.reduce(0) { $0 + $1.textCount }
         let totalAreaRatio = group.reduce(0) { $0 + $1.textAreaRatio }
-        let assetsWithText = group.reduce(0) { $0 + (($1.textCount > 0 && $1.textAreaRatio > 0) ? 1 : 0) }
+        let assetsWithText = group.reduce(0) {
+            $0 + (($1.textCount >= minPerAssetTextCount && $1.textAreaRatio >= minPerAssetTextAreaRatio) ? 1 : 0)
+        }
         let assetCount = group.count
         let assetsWithFace = group.reduce(0) { $0 + ($1.hasFace ? 1 : 0) }
         let avgScreenshotScore = assetCount > 0
