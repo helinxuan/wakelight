@@ -26,11 +26,21 @@ actor ImportCurationService {
         self.textFilterService = textFilterService
     }
 
-    func curate(assets: [PHAsset]) async -> [ImportAssetDecision] {
-        guard !assets.isEmpty else { return [] }
+    func curate(
+        assets: [PHAsset],
+        onProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async -> [ImportAssetDecision] {
+        guard !assets.isEmpty else {
+            await onProgress?(0, 0)
+            return []
+        }
 
         let groups = await groupByScene(assets: assets)
         var results: [ImportAssetDecision] = []
+        let total = assets.count
+        var processed = 0
+
+        await onProgress?(0, total)
 
         for group in groups {
             let scored = await score(group: group)
@@ -55,16 +65,10 @@ actor ImportCurationService {
                 for item in scored {
                     results.append(item.toDecision(bucket: .archived, reason: archiveReason))
                 }
-                continue
-            }
-
-            if scored.count == 1 {
+            } else if scored.count == 1 {
                 debugLogDecision(groupId: best.groupId, label: "KEEP_SINGLE", scored: scored, delta: delta, textSummary: textDecision.summary)
                 results.append(best.toDecision(bucket: .keep, reason: .autoKeep))
-                continue
-            }
-
-            if delta >= 8 {
+            } else if delta >= 8 {
                 debugLogDecision(groupId: best.groupId, label: "KEEP_PLUS_DUP", scored: scored, delta: delta, textSummary: textDecision.summary)
                 results.append(best.toDecision(bucket: .keep, reason: .autoKeep))
                 for item in scored.dropFirst() {
@@ -76,6 +80,9 @@ actor ImportCurationService {
                     results.append(item.toDecision(bucket: .review, reason: .needsReview))
                 }
             }
+
+            processed += group.count
+            await onProgress?(min(processed, total), total)
         }
 
         return results

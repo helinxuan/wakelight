@@ -12,7 +12,10 @@ final class GeneratePlaceClustersUseCase {
 
     func run() async throws -> Int {
         try await writer.write { db in
-            let photos = try PhotoAsset.fetchAll(db)
+            // 仅使用“保留/未标注”照片参与地图聚类；已归档过滤的不应再生成光点
+            let photos = try PhotoAsset
+                .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
+                .fetchAll(db)
 
             // (key -> [photo]) 聚合
             var buckets: [String: [PhotoAsset]] = [:]

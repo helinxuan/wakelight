@@ -198,7 +198,11 @@ final class ImportPhotosUseCase {
         return try await upsert(assets: assets, scanAt: scanAt, importedAt: scanAt, onProgress: onProgress)
     }
 
-    func runWithSummary(limit: Int? = 200, onProgress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> ImportCurationSummary {
+    func runWithSummary(
+        limit: Int? = 200,
+        onPreprocessProgress: (@MainActor (Int, Int) -> Void)? = nil,
+        onProgress: (@MainActor (Int, Int) -> Void)? = nil
+    ) async throws -> ImportCurationSummary {
         let status = await permissionService.requestAuthorization()
         switch status {
         case .authorized, .limited:
@@ -208,7 +212,11 @@ final class ImportPhotosUseCase {
         }
 
         let assets = try await importService.fetchAssets(limit: limit)
-        let decisions = await curationService.curate(assets: assets)
+        let decisions = await curationService.curate(assets: assets) { processed, total in
+            await MainActor.run {
+                onPreprocessProgress?(processed, total)
+            }
+        }
         let decisionsByLocalId = Dictionary(uniqueKeysWithValues: decisions.map { ($0.localIdentifier, $0) })
 
         let scanAt = Date()
