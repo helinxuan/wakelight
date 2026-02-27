@@ -207,7 +207,7 @@ struct ImportCurationBucketListView: View {
         } message: { err in
             Text(err.message)
         }
-        .sheet(isPresented: $isShowingPreview) {
+        .fullScreenCover(isPresented: $isShowingPreview) {
             GroupPreviewSheet(items: previewItems, selection: $previewSelection) { rowId, bucket in
                 await applyFromPreview(rowId: rowId, bucket: bucket)
             }
@@ -356,6 +356,14 @@ struct ImportCurationBucketListView: View {
 
         previewItems = sorted
         previewSelection = row.localIdentifier
+
+        // 预热首屏，减少首次打开黑屏等待
+        let key = ImportCurationBucketListViewHelper.locatorKey(for: row.localIdentifier)
+        Task(priority: .userInitiated) {
+            _ = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: key, size: CGSize(width: 1200, height: 1200))
+            _ = await PhotoThumbnailLoader.shared.loadFullImage(locatorKey: key)
+        }
+
         isShowingPreview = true
     }
 
@@ -566,7 +574,6 @@ private struct GroupPreviewSheet: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(.ultraThinMaterial)
                 }
             }
             .toolbar {
