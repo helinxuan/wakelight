@@ -1,5 +1,6 @@
 import SwiftUI
 import GRDB
+import Photos
 
 struct ImportCurationBucketListView: View {
     enum BucketFilter: String {
@@ -50,9 +51,12 @@ struct ImportCurationBucketListView: View {
     @State private var successToast: String?
     @State private var errorAlert: ErrorMessage?
 
+    @Environment(\.editMode) private var editMode
+
     @State private var previewItems: [Row] = []
     @State private var previewSelection: String?
     @State private var isShowingPreview = false
+    @State private var displayNameMap: [String: String] = [:]
 
     private var batchOptions: [ActionTarget] {
         switch filter {
@@ -73,25 +77,37 @@ struct ImportCurationBucketListView: View {
                                 Button {
                                     openPreview(for: row, in: nil)
                                 } label: {
-                                    ThumbnailView(locatorKey: locatorKey(for: row.localIdentifier), size: CGSize(width: 62, height: 62))
+                                    ThumbnailView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: row.localIdentifier), size: CGSize(width: 62, height: 62))
                                 }
                                 .buttonStyle(.plain)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(row.localIdentifier)
+                                    Text(displayName(for: row.localIdentifier))
                                         .font(.caption)
                                         .lineLimit(1)
 
-                                    Text("reason: \(row.selectionReason ?? "-") · score: \(Int(row.bestShotScore ?? 0))")
+                                    Text("分类: \(ImportCurationBucketListViewHelper.userCategoryText(bucket: row.curationBucket, reason: row.selectionReason, groupId: row.burstGroupId)) · 分数: \(Int(row.bestShotScore ?? 0))")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
 
                                     if let groupId = row.burstGroupId,
                                        let siblings = groupedRows[groupId],
                                        siblings.count > 1 {
-                                        Text("同组对比（保留/待确认/归档）")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
+                                        HStack(spacing: 6) {
+                                            Text("同组对比（保留/待确认/归档）")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+
+                                            if isTextTriggeredGroup(siblings) {
+                                                Text("TEXT")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.orange.opacity(0.2))
+                                                    .foregroundStyle(.orange)
+                                                    .clipShape(Capsule())
+                                            }
+                                        }
                                         ScrollView(.horizontal, showsIndicators: false) {
                                             HStack(spacing: 8) {
                                                 ForEach(siblings) { item in
@@ -99,7 +115,7 @@ struct ImportCurationBucketListView: View {
                                                         openPreview(for: item, in: siblings)
                                                     } label: {
                                                         VStack(spacing: 4) {
-                                                            ThumbnailView(locatorKey: locatorKey(for: item.localIdentifier), size: CGSize(width: 48, height: 48))
+                                                            ThumbnailView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: item.localIdentifier), size: CGSize(width: 48, height: 48))
                                                                 .overlay {
                                                                     RoundedRectangle(cornerRadius: 6)
                                                                         .stroke(
@@ -107,7 +123,7 @@ struct ImportCurationBucketListView: View {
                                                                             lineWidth: item.id == row.id ? 2 : 0
                                                                         )
                                                                 }
-                                                            Text(bucketTag(item.curationBucket))
+                                                            Text(ImportCurationBucketListViewHelper.bucketTag(item.curationBucket))
                                                                 .font(.system(size: 9, weight: .semibold))
                                                                 .padding(.horizontal, 4)
                                                                 .padding(.vertical, 2)
@@ -134,6 +150,18 @@ struct ImportCurationBucketListView: View {
         }
         .navigationTitle(filter.title)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                if editMode?.wrappedValue.isEditing == true {
+                    Button(selectedIds.count == rows.count ? "取消全选" : "全选") {
+                        if selectedIds.count == rows.count {
+                            selectedIds.removeAll()
+                        } else {
+                            selectedIds = Set(rows.map(\.id))
+                        }
+                    }
+                }
+            }
+
             ToolbarItem(placement: .topBarTrailing) {
                 EditButton()
             }
@@ -258,9 +286,13 @@ struct ImportCurationBucketListView: View {
                 grouped[gid, default: []].append(item)
             }
 
+            let allIdentifiers = Array(Set((fetched + groupRows).map(\.localIdentifier)))
+            let names = await resolveDisplayNames(localIdentifiers: allIdentifiers)
+
             await MainActor.run {
                 rows = fetched
                 groupedRows = grouped
+                displayNameMap.merge(names) { _, new in new }
                 selectedIds = selectedIds.intersection(Set(fetched.map(\.id)))
                 isLoading = false
             }
@@ -375,6 +407,57 @@ struct ImportCurationBucketListView: View {
         }
     }
 
+    private func displayName(for localIdentifier: String) -> String {
+        if let name = displayNameMap[localIdentifier], !name.isEmpty {
+            return name
+        }
+        return fallbackName(for: localIdentifier)
+    }
+
+    private func resolveDisplayNames(localIdentifiers: [String]) async -> [String: String] {
+        guard !localIdentifiers.isEmpty else { return [:] }
+
+        var result: [String: String] = [:]
+        for id in localIdentifiers {
+            let name = await resolveDisplayName(localIdentifier: id)
+            result[id] = name
+        }
+        return result
+    }
+
+    private func resolveDisplayName(localIdentifier: String) async -> String {
+        if localIdentifier.hasPrefix("webdav://") {
+            return fallbackName(for: localIdentifier)
+        }
+
+        let pureId: String
+        if localIdentifier.hasPrefix("library://") {
+            pureId = String(localIdentifier.dropFirst("library://".count))
+        } else {
+            pureId = localIdentifier
+        }
+
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [pureId], options: nil)
+        if let asset = fetch.firstObject {
+            let resources = PHAssetResource.assetResources(for: asset)
+            if let original = resources.first(where: { !$0.originalFilename.isEmpty }) {
+                return original.originalFilename
+            }
+            if let first = resources.first, !first.originalFilename.isEmpty {
+                return first.originalFilename
+            }
+        }
+
+        return fallbackName(for: localIdentifier)
+    }
+
+    private func fallbackName(for localIdentifier: String) -> String {
+        if localIdentifier.hasPrefix("webdav://") {
+            return localIdentifier.split(separator: "/").last.map(String.init) ?? localIdentifier
+        }
+        return localIdentifier
+    }
+
     private func actionLabel(_ target: ActionTarget) -> String {
         switch target {
         case .keep: return "保留"
@@ -383,18 +466,28 @@ struct ImportCurationBucketListView: View {
         }
     }
 
-    private func bucketTag(_ bucket: String?) -> String {
-        switch bucket {
-        case ImportDecisionBucket.keep.rawValue: return "保留"
-        case ImportDecisionBucket.review.rawValue: return "待确认"
-        case ImportDecisionBucket.archived.rawValue: return "归档"
-        default: return "-"
+    private func isTextTriggeredGroup(_ items: [Row]) -> Bool {
+        items.contains {
+            $0.selectionReason == ImportDecisionReason.filteredText.rawValue ||
+            $0.selectionReason == ImportDecisionReason.filteredTextHighConfidence.rawValue ||
+            $0.selectionReason == ImportDecisionReason.filteredTextPossible.rawValue
         }
     }
 
-    private func locatorKey(for localIdentifier: String) -> String {
-        if localIdentifier.contains("://") { return localIdentifier }
-        return "library://\(localIdentifier)"
+    @ViewBuilder
+    private func actionChip(title: String, isPrimary: Bool, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(isPrimary ? Color.white : Color.accentColor)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(isPrimary ? Color.accentColor : Color.black.opacity(0.45))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || isPrimary)
+        .opacity((disabled || isPrimary) ? 0.7 : 1)
     }
 }
 
@@ -422,22 +515,26 @@ private struct GroupPreviewSheet: View {
                     )) {
                         ForEach(items) { item in
                             VStack(spacing: 12) {
-                                FullImageView(locatorKey: locatorKey(for: item.localIdentifier))
+                                FullImageView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: item.localIdentifier))
                                     .background(Color.black)
 
                                 HStack(spacing: 8) {
-                                    Text(bucketTag(item.curationBucket))
+                                    Text(ImportCurationBucketListViewHelper.bucketTag(item.curationBucket))
                                         .font(.caption)
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 4)
                                         .background(.ultraThinMaterial)
                                         .clipShape(Capsule())
 
-                                    Text("score \(Int(item.bestShotScore ?? 0))")
+                                    Text("分数 \(Int(item.bestShotScore ?? 0))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 .foregroundStyle(.white)
+
+                                Text("分类：\(ImportCurationBucketListViewHelper.userCategoryText(bucket: item.curationBucket, reason: item.selectionReason, groupId: item.burstGroupId))")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.9))
                             }
                             .tag(item.localIdentifier as String?)
                             .padding(.bottom, 18)
@@ -448,39 +545,37 @@ private struct GroupPreviewSheet: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if let current = currentItem {
+                    let keepPrimary = current.curationBucket == ImportDecisionBucket.keep.rawValue
+                    let reviewPrimary = current.curationBucket == ImportDecisionBucket.review.rawValue
+                    let archivedPrimary = current.curationBucket == ImportDecisionBucket.archived.rawValue
+
                     HStack(spacing: 8) {
-                        Button("保留") {
+                        actionChip(title: "保留", isPrimary: keepPrimary, disabled: isApplying) {
                             Task {
                                 isApplying = true
                                 await onApply(current.id, .keep)
                                 isApplying = false
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isApplying)
 
-                        Button("待确认") {
+                        actionChip(title: "待确认", isPrimary: reviewPrimary, disabled: isApplying) {
                             Task {
                                 isApplying = true
                                 await onApply(current.id, .review)
                                 isApplying = false
                             }
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(isApplying)
 
-                        Button("归档") {
+                        actionChip(title: "归档", isPrimary: archivedPrimary, disabled: isApplying) {
                             Task {
                                 isApplying = true
                                 await onApply(current.id, .archived)
                                 isApplying = false
                             }
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(isApplying)
                     }
-                    .padding(.horizontal)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(.ultraThinMaterial)
                 }
             }
@@ -492,7 +587,38 @@ private struct GroupPreviewSheet: View {
         }
     }
 
-    private func bucketTag(_ bucket: String?) -> String {
+    @ViewBuilder
+    private func actionChip(title: String, isPrimary: Bool, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(isPrimary ? Color.white : Color.accentColor)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(isPrimary ? Color.accentColor : Color.black.opacity(0.45))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || isPrimary)
+        .opacity((disabled || isPrimary) ? 0.7 : 1)
+    }
+}
+
+private enum ImportCurationBucketListViewHelper {
+    static func userCategoryText(bucket: String?, reason: String?, groupId: String?) -> String {
+        if bucket == ImportDecisionBucket.keep.rawValue {
+            return "已保留"
+        }
+
+        if reason == ImportDecisionReason.needsReview.rawValue,
+           groupId != nil {
+            return "重复照片（待确认）"
+        }
+
+        return reasonText(reason)
+    }
+
+    static func bucketTag(_ bucket: String?) -> String {
         switch bucket {
         case ImportDecisionBucket.keep.rawValue: return "保留"
         case ImportDecisionBucket.review.rawValue: return "待确认"
@@ -501,7 +627,29 @@ private struct GroupPreviewSheet: View {
         }
     }
 
-    private func locatorKey(for localIdentifier: String) -> String {
+    static func reasonText(_ reason: String?) -> String {
+        switch reason {
+        case ImportDecisionReason.duplicateNearTime.rawValue:
+            return "重复照片"
+        case ImportDecisionReason.filteredTextHighConfidence.rawValue:
+            return "文本图片（高置信）"
+        case ImportDecisionReason.filteredTextPossible.rawValue:
+            return "文本图片（可能）"
+        case ImportDecisionReason.filteredText.rawValue:
+            return "文本图片"
+        case ImportDecisionReason.needsReview.rawValue,
+             ImportDecisionReason.missingCriticalMetadata.rawValue:
+            return "待人工判断"
+        case ImportDecisionReason.autoKeep.rawValue:
+            return "保留"
+        case .none:
+            return "-"
+        default:
+            return reason ?? "-"
+        }
+    }
+
+    static func locatorKey(for localIdentifier: String) -> String {
         if localIdentifier.contains("://") { return localIdentifier }
         return "library://\(localIdentifier)"
     }

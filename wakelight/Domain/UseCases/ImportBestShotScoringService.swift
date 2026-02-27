@@ -11,6 +11,12 @@ struct BestShotScoreBreakdown: Sendable {
     let faceFrontness: Double
     let sharpness: Double
     let recognizedTextConfidence: Double?
+    let recognizedTextCount: Int
+    let recognizedTextAreaRatio: Double
+    let recognizedTextMaxConfidence: Double?
+    let sceneScreenshotScore: Double
+    let scenePersonScore: Double
+    let hasFace: Bool
 }
 
 actor ImportBestShotScoringService {
@@ -27,7 +33,13 @@ actor ImportBestShotScoringService {
                 smileExpression: 0,
                 faceFrontness: 0,
                 sharpness: 0,
-                recognizedTextConfidence: nil
+                recognizedTextConfidence: nil,
+                recognizedTextCount: 0,
+                recognizedTextAreaRatio: 0,
+                recognizedTextMaxConfidence: nil,
+                sceneScreenshotScore: 0,
+                scenePersonScore: 0,
+                hasFace: false
             )
         }
 
@@ -49,17 +61,27 @@ actor ImportBestShotScoringService {
             smileExpression: smile,
             faceFrontness: frontness,
             sharpness: sharp,
-            recognizedTextConfidence: metrics.textConfidence
+            recognizedTextConfidence: metrics.textAvgConfidence,
+            recognizedTextCount: metrics.textCount,
+            recognizedTextAreaRatio: metrics.textAreaRatio,
+            recognizedTextMaxConfidence: metrics.textMaxConfidence,
+            sceneScreenshotScore: metrics.screenshotScore,
+            scenePersonScore: 0,
+            hasFace: metrics.faceConfidence > 0
         )
     }
 
-    private func analyze(cgImage: CGImage) async -> (faceConfidence: Double, eyeOpenness: Double?, smile: Double?, frontness: Double?, textConfidence: Double?) {
+    private func analyze(cgImage: CGImage) async -> (faceConfidence: Double, eyeOpenness: Double?, smile: Double?, frontness: Double?, textAvgConfidence: Double?, textMaxConfidence: Double?, textCount: Int, textAreaRatio: Double, screenshotScore: Double) {
         await withCheckedContinuation { continuation in
             var faceConfidence: Double = 0
             var eyeOpenness: Double?
             var smile: Double?
             var frontness: Double?
-            var textConfidence: Double?
+            var textAvgConfidence: Double?
+            var textMaxConfidence: Double?
+            var textCount = 0
+            var textAreaRatio: Double = 0
+            var screenshotScore: Double = 0
 
             let faceRequest = VNDetectFaceLandmarksRequest { request, _ in
                 guard let faces = request.results as? [VNFaceObservation], let face = faces.first else { return }
@@ -85,22 +107,72 @@ actor ImportBestShotScoringService {
 
             let textRequest = VNRecognizeTextRequest { request, _ in
                 guard let observations = request.results as? [VNRecognizedTextObservation], !observations.isEmpty else { return }
-                let confs = observations.compactMap { $0.topCandidates(1).first.map { Double($0.confidence) } }
-                if !confs.isEmpty { textConfidence = confs.reduce(0, +) / Double(confs.count) }
+
+                let recognized: [(confidence: Double, area: Double)] = observations.compactMap { observation -> (confidence: Double, area: Double)? in
+                    guard let candidate = observation.topCandidates(1).first else { return nil }
+
+                    let normalized = candidate.string
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let bbox = observation.boundingBox
+                    let area = max(0, Double(bbox.width * bbox.height))
+                    let aspectRatio = bbox.height > 0 ? Double(bbox.width / bbox.height) : 0
+                    let confidence = Double(candidate.confidence)
+
+                    // 过滤明显误检：极短文本、低置信、非文本形状框、无有效字符
+                    guard normalized.count >= 2,
+                          confidence >= 0.35,
+                          aspectRatio >= 1.1,
+                          self.containsLikelyTextCharacters(normalized) else {
+                        return nil
+                    }
+
+                    return (confidence, area)
+                }
+
+                guard !recognized.isEmpty else { return }
+                textCount = recognized.count
+                textAreaRatio = recognized.reduce(0) { $0 + $1.area }
+
+                let confs = recognized.map(\.confidence)
+                textAvgConfidence = confs.reduce(0, +) / Double(confs.count)
+                textMaxConfidence = confs.max()
             }
-            textRequest.recognitionLevel = .fast
-            textRequest.usesLanguageCorrection = false
+            textRequest.recognitionLevel = .accurate
+            textRequest.usesLanguageCorrection = true
+            textRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+            textRequest.minimumTextHeight = 0.01
+
+            let classifyRequest = VNClassifyImageRequest { request, _ in
+                guard let observations = request.results as? [VNClassificationObservation], !observations.isEmpty else { return }
+                screenshotScore = self.estimateScreenshotScore(observations: observations)
+            }
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    try handler.perform([faceRequest, textRequest])
+                    try handler.perform([faceRequest, textRequest, classifyRequest])
                 } catch {
                     // ignore and return defaults
                 }
-                continuation.resume(returning: (faceConfidence, eyeOpenness, smile, frontness, textConfidence))
+                continuation.resume(returning: (faceConfidence, eyeOpenness, smile, frontness, textAvgConfidence, textMaxConfidence, textCount, textAreaRatio, screenshotScore))
             }
         }
+    }
+
+    private func estimateScreenshotScore(observations: [VNClassificationObservation]) -> Double {
+        let top = observations.prefix(20)
+        var score: Double = 0
+
+        for obs in top {
+            let label = obs.identifier.lowercased()
+            let confidence = Double(obs.confidence)
+
+            if label.contains("screenshot") || label.contains("screen") || label.contains("display") || label.contains("web site") || label.contains("monitor") {
+                score = max(score, confidence)
+            }
+        }
+
+        return clamp01(score)
     }
 
     private func eyeOpenness(points: [CGPoint]) -> Double {
@@ -149,6 +221,14 @@ actor ImportBestShotScoringService {
         guard count > 0 else { return 0.5 }
         let avg = totalGrad / Double(count)
         return clamp01(avg / 50.0)
+    }
+
+    private func containsLikelyTextCharacters(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+
+        // 至少包含一个字母、数字或中文字符
+        let pattern = "[A-Za-z0-9\\u4E00-\\u9FFF]"
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 
     private func clamp01(_ v: Double) -> Double { max(0, min(1, v)) }

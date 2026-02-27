@@ -6,15 +6,24 @@ import UIKit
 actor ImportCurationService {
     static let shared = ImportCurationService()
 
+    #if DEBUG
+    private let curationDebugLogEnabled = true
+    #else
+    private let curationDebugLogEnabled = false
+    #endif
+
     private let hashService: ImportPerceptualHashService
     private let scoringService: ImportBestShotScoringService
+    private let textFilterService: ImportTextFilterService
 
     init(
         hashService: ImportPerceptualHashService = .shared,
-        scoringService: ImportBestShotScoringService = .shared
+        scoringService: ImportBestShotScoringService = .shared,
+        textFilterService: ImportTextFilterService = .shared
     ) {
         self.hashService = hashService
         self.scoringService = scoringService
+        self.textFilterService = textFilterService
     }
 
     func curate(assets: [PHAsset]) async -> [ImportAssetDecision] {
@@ -27,35 +36,42 @@ actor ImportCurationService {
             let scored = await score(group: group)
             guard let best = scored.first else { continue }
 
+            let second = scored.dropFirst().first
+            let delta = best.score - (second?.score ?? 0)
+            let textEvidence = scored.map {
+                TextFilterEvidence(
+                    avgConfidence: $0.textAvgConfidence,
+                    maxConfidence: $0.textMaxConfidence,
+                    textCount: $0.textCount,
+                    textAreaRatio: $0.textAreaRatio,
+                    screenshotScore: $0.screenshotScore,
+                    hasFace: $0.hasFace
+                )
+            }
+            let textDecision = await textFilterService.evaluate(group: textEvidence)
+
+            if let archiveReason = textDecision.archiveReason {
+                debugLogDecision(groupId: best.groupId, label: textDecision.debugLabel, scored: scored, delta: delta, textSummary: textDecision.summary)
+                for item in scored {
+                    results.append(item.toDecision(bucket: .archived, reason: archiveReason))
+                }
+                continue
+            }
+
             if scored.count == 1 {
+                debugLogDecision(groupId: best.groupId, label: "KEEP_SINGLE", scored: scored, delta: delta, textSummary: textDecision.summary)
                 results.append(best.toDecision(bucket: .keep, reason: .autoKeep))
                 continue
             }
 
-            let second = scored.dropFirst().first
-            let delta = best.score - (second?.score ?? 0)
-
-            if best.textConfidence ?? 0 >= 0.92 {
-                for item in scored {
-                    results.append(item.toDecision(bucket: .archived, reason: .filteredTextHighConfidence))
-                }
-                continue
-            }
-
-            if best.textConfidence ?? 0 >= 0.85 {
-                results.append(best.toDecision(bucket: .review, reason: .filteredTextPossible))
-                for item in scored.dropFirst() {
-                    results.append(item.toDecision(bucket: .archived, reason: .duplicateNearTime))
-                }
-                continue
-            }
-
             if delta >= 8 {
+                debugLogDecision(groupId: best.groupId, label: "KEEP_PLUS_DUP", scored: scored, delta: delta, textSummary: textDecision.summary)
                 results.append(best.toDecision(bucket: .keep, reason: .autoKeep))
                 for item in scored.dropFirst() {
                     results.append(item.toDecision(bucket: .archived, reason: .duplicateNearTime))
                 }
             } else {
+                debugLogDecision(groupId: best.groupId, label: "REVIEW", scored: scored, delta: delta, textSummary: textDecision.summary)
                 for item in scored {
                     results.append(item.toDecision(bucket: .review, reason: .needsReview))
                 }
@@ -132,6 +148,34 @@ actor ImportCurationService {
         return true
     }
 
+    private func debugLogDecision(groupId: String, label: String, scored: [ScoredAsset], delta: Double, textSummary: GroupTextSummary) {
+        guard curationDebugLogEnabled else { return }
+
+        let details = scored.map { item in
+            let avgText = String(format: "%.2f", item.textAvgConfidence ?? 0)
+            let maxText = String(format: "%.2f", item.textMaxConfidence ?? 0)
+            let area = String(format: "%.4f", item.textAreaRatio)
+            let shot = String(format: "%.2f", item.screenshotScore)
+            let filename = debugFilename(for: item.asset)
+            return "file=\(filename) id=\(item.asset.localIdentifier) s=\(Int(item.score)) shot=\(shot) face=\(item.hasFace ? 1 : 0) txtAvg=\(avgText) txtMax=\(maxText) txtCnt=\(item.textCount) txtArea=\(area)"
+        }.joined(separator: " | ")
+
+        let deltaText = String(format: "%.2f", delta)
+        let avgText = String(format: "%.2f", textSummary.avgConfidence ?? 0)
+        let maxText = String(format: "%.2f", textSummary.maxConfidence ?? 0)
+        let areaText = String(format: "%.4f", textSummary.totalAreaRatio)
+        let shotText = String(format: "%.2f", textSummary.avgScreenshotScore)
+        print("[Curation][\(label)] gid=\(groupId) cnt=\(scored.count) delta=\(deltaText) textAssets=\(textSummary.assetsWithText)/\(textSummary.assetCount) faceAssets=\(textSummary.assetsWithFace) avgShot=\(shotText) textCount=\(textSummary.totalCount) textAreaRatio=\(areaText) textAvgConfidence=\(avgText) textMaxConfidence=\(maxText) \(details)")
+    }
+
+    private func debugFilename(for asset: PHAsset) -> String {
+        let resources = PHAssetResource.assetResources(for: asset)
+        if let name = resources.first?.originalFilename, !name.isEmpty {
+            return name
+        }
+        return "-"
+    }
+
     private func score(group: [PHAsset]) async -> [ScoredAsset] {
         var scored: [ScoredAsset] = []
         scored.reserveCapacity(group.count)
@@ -140,7 +184,7 @@ actor ImportCurationService {
         for asset in group {
             guard let image = await loadImage(asset: asset) else {
                 scored.append(
-                    ScoredAsset(asset: asset, groupId: groupId, score: 0, textConfidence: nil)
+                    ScoredAsset(asset: asset, groupId: groupId, score: 0, textAvgConfidence: nil, textMaxConfidence: nil, textCount: 0, textAreaRatio: 0, screenshotScore: 0, hasFace: false)
                 )
                 continue
             }
@@ -151,7 +195,12 @@ actor ImportCurationService {
                     asset: asset,
                     groupId: groupId,
                     score: breakdown.total,
-                    textConfidence: breakdown.recognizedTextConfidence
+                    textAvgConfidence: breakdown.recognizedTextConfidence,
+                    textMaxConfidence: breakdown.recognizedTextMaxConfidence,
+                    textCount: breakdown.recognizedTextCount,
+                    textAreaRatio: breakdown.recognizedTextAreaRatio,
+                    screenshotScore: breakdown.sceneScreenshotScore,
+                    hasFace: breakdown.hasFace
                 )
             )
         }
@@ -168,13 +217,13 @@ actor ImportCurationService {
     private func loadImage(asset: PHAsset) async -> UIImage? {
         await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
-            options.deliveryMode = .fastFormat
-            options.resizeMode = .fast
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .exact
             options.isSynchronous = false
             options.isNetworkAccessAllowed = true
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: 512, height: 512),
+                targetSize: CGSize(width: 1024, height: 1024),
                 contentMode: .aspectFit,
                 options: options
             ) { image, _ in
@@ -188,7 +237,12 @@ private struct ScoredAsset {
     let asset: PHAsset
     let groupId: String
     let score: Double
-    let textConfidence: Double?
+    let textAvgConfidence: Double?
+    let textMaxConfidence: Double?
+    let textCount: Int
+    let textAreaRatio: Double
+    let screenshotScore: Double
+    let hasFace: Bool
 
     func toDecision(bucket: ImportDecisionBucket, reason: ImportDecisionReason) -> ImportAssetDecision {
         ImportAssetDecision(
@@ -196,7 +250,7 @@ private struct ScoredAsset {
             bucket: bucket,
             reason: reason,
             score: score,
-            recognizedTextConfidence: textConfidence,
+            recognizedTextConfidence: textAvgConfidence,
             groupId: groupId
         )
     }
