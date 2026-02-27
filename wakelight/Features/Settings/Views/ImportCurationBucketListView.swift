@@ -344,6 +344,11 @@ struct ImportCurationBucketListView: View {
                     Column("isRecoverableArchived").set(to: target.isRecoverableArchived)
                 )
         }
+
+        // 过滤状态变化后立即重算光点与访次，保证地图/记忆面板及时一致
+        await MainActor.run {
+            PhotoImportManager.shared.scheduleRecluster(reason: "curation-bucket-updated")
+        }
     }
 
     private func openPreview(for row: Row, in siblings: [Row]?) {

@@ -20,8 +20,10 @@ final class GenerateVisitLayersUseCase {
             var totalCreatedOrUpdated = 0
 
             for cluster in clusters {
-                // 修正：从数据库中取出所有有坐标的照片，并过滤出属于当前 Cluster 的
-                let allPhotos = try PhotoAsset.fetchAll(db)
+                // 仅使用“保留/未标注”照片生成 VisitLayer；已归档过滤的不参与分层
+                let allPhotos = try PhotoAsset
+                    .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
+                    .fetchAll(db)
                 let bucketPhotos = allPhotos.filter { p in
                     guard let lat = p.latitude, let lon = p.longitude else { return false }
                     return GeoGrid.key(latitude: lat, longitude: lon) == cluster.geohash

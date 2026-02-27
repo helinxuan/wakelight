@@ -16,7 +16,8 @@ struct ImportPhotosSettingsView: View {
     private var phaseText: String {
         switch importManager.progress.phase {
         case .idle: return "-"
-        case .photos: return "本地 Photos"
+        case .preprocess: return "预处理中（筛选照片/生成光点）"
+        case .photos: return "写入本地照片"
         case .webdav: return "WebDAV"
         case .generateClusters: return "生成聚类"
         case .generateVisitLayers: return "生成 Visit Layers"

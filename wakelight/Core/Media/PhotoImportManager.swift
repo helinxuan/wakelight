@@ -12,6 +12,7 @@ enum ImportStatus: String, Codable {
 
 enum ImportPhase: String, Codable {
     case idle
+    case preprocess
     case photos
     case webdav
     case generateClusters
@@ -97,14 +98,22 @@ final class PhotoImportManager: ObservableObject {
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
 
-            await self.updateStatus(.importing, phase: .photos, resetCounts: true)
+            await self.updateStatus(.importing, phase: .preprocess, resetCounts: true)
 
             do {
-                let summary = try await ImportPhotosUseCase().runWithSummary(limit: nil) { processed, total in
-                    Task { @MainActor in
-                        PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                let summary = try await ImportPhotosUseCase().runWithSummary(
+                    limit: nil,
+                    onPreprocessProgress: { processed, total in
+                        Task { @MainActor in
+                            PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .preprocess)
+                        }
+                    },
+                    onProgress: { processed, total in
+                        Task { @MainActor in
+                            PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .photos)
+                        }
                     }
-                }
+                )
                 await self.reportSummary(summary)
                 print("[ImportManager] Local Photos imported: \(summary.totalImported), keep=\(summary.meaningfulKept), review=\(summary.reviewBucketCount), archived=\(summary.filteredArchivedCount)")
 
@@ -225,7 +234,10 @@ final class PhotoImportManager: ObservableObject {
     }
 
     @MainActor
-    func reportProgress(processed: Int, total: Int) {
+    func reportProgress(processed: Int, total: Int, phase: ImportPhase? = nil) {
+        if let phase {
+            progress.phase = phase
+        }
         progress.processedItems = processed
         progress.totalItems = total
         // 不必每次都保存，减少 IO
