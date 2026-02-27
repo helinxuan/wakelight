@@ -31,6 +31,7 @@ struct ImportProgress: Codable {
     var reviewBucketCount: Int = 0
     var filteredArchivedCount: Int = 0
 
+    var lastNotice: String?
     var lastError: String?
     var lastCompletedAt: Date?
 
@@ -124,7 +125,50 @@ final class PhotoImportManager: ObservableObject {
                 await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
-                await self.completeImport()
+                await self.completeImport(
+                    notice: "导入完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
+                )
+            } catch {
+                await self.failImport(error: error.localizedDescription)
+            }
+
+            await MainActor.run {
+                self.isRunning = false
+                self.runningTask = nil
+            }
+        }
+    }
+
+    /// 手动触发：重跑已导入照片的预处理（筛选/分桶），不重新导入资源
+    func startPreprocessImportedPhotos(reason: String) {
+        guard !isRunning else { return }
+        isRunning = true
+
+        print("[ImportManager] Starting preprocess for imported photos. reason=\(reason)")
+
+        runningTask = Task.detached(priority: .background) { [weak self] in
+            guard let self else { return }
+
+            do {
+                await self.updateStatus(.importing, phase: .preprocess, resetCounts: true)
+
+                let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
+                    Task { @MainActor in
+                        PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .preprocess)
+                    }
+                }
+
+                await self.reportSummary(summary)
+
+                await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
+                _ = try await GeneratePlaceClustersUseCase().run()
+
+                await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                _ = try await GenerateVisitLayersUseCase().run()
+
+                await self.completeImport(
+                    notice: "预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
+                )
             } catch {
                 await self.failImport(error: error.localizedDescription)
             }
@@ -168,7 +212,7 @@ final class PhotoImportManager: ObservableObject {
                 await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
-                await self.completeImport()
+                await self.completeImport(notice: "WebDAV 导入完成：已导入 \(result.importedCount) 项")
             } catch {
                 await self.failImport(error: error.localizedDescription)
             }
@@ -195,16 +239,18 @@ final class PhotoImportManager: ObservableObject {
 
         if status == .importing {
             progress.lastError = nil
+            progress.lastNotice = nil
         }
 
         saveProgress()
     }
 
     @MainActor
-    private func completeImport() {
+    private func completeImport(notice: String? = nil) {
         progress.status = .completed
         progress.phase = .done
         progress.lastCompletedAt = Date()
+        progress.lastNotice = notice
         saveProgress()
     }
 
