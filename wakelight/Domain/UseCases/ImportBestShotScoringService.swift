@@ -24,7 +24,7 @@ actor ImportBestShotScoringService {
 
     private init() {}
 
-    func score(asset: PHAsset, image: UIImage) async -> BestShotScoreBreakdown {
+    func score(image: UIImage) async -> BestShotScoreBreakdown {
         guard let cgImage = image.cgImage else {
             return BestShotScoreBreakdown(
                 total: 0,

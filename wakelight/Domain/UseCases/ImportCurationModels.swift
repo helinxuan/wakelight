@@ -17,7 +17,8 @@ enum ImportDecisionReason: String, Codable, Sendable {
 }
 
 struct ImportAssetDecision: Sendable {
-    let localIdentifier: String
+    let photoAssetId: UUID?
+    let localIdentifier: String?
     let bucket: ImportDecisionBucket
     let reason: ImportDecisionReason
     let score: Double

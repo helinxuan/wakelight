@@ -217,7 +217,12 @@ final class ImportPhotosUseCase {
                 onPreprocessProgress?(processed, total)
             }
         }
-        let decisionsByLocalId = Dictionary(uniqueKeysWithValues: decisions.map { ($0.localIdentifier, $0) })
+        let decisionsByLocalId: [String: ImportAssetDecision] = Dictionary(
+            uniqueKeysWithValues: decisions.compactMap { decision in
+                guard let localIdentifier = decision.localIdentifier else { return nil }
+                return (localIdentifier, decision)
+            }
+        )
 
         let scanAt = Date()
         let imported = try await upsert(
@@ -254,23 +259,11 @@ final class ImportPhotosUseCase {
     func reprocessImportedPhotos(
         onPreprocessProgress: (@MainActor (Int, Int) -> Void)? = nil
     ) async throws -> ImportCurationSummary {
-        let status = await permissionService.requestAuthorization()
-        switch status {
-        case .authorized, .limited:
-            break
-        case .denied, .restricted, .notDetermined:
-            throw ImportPhotosError.permissionDenied
+        let allImportedAssets: [PhotoAsset] = try await writer.read { db in
+            try PhotoAsset.fetchAll(db)
         }
 
-        let localIds: [String] = try await writer.read { db in
-            try PhotoAsset
-                .filter(Column("localIdentifier") != nil)
-                .fetchAll(db)
-                .compactMap { $0.localIdentifier }
-        }
-
-        let dedupedIds = Array(Set(localIds)).filter { !$0.isEmpty }
-        guard !dedupedIds.isEmpty else {
+        guard !allImportedAssets.isEmpty else {
             await onPreprocessProgress?(0, 0)
             return ImportCurationSummary(
                 totalImported: 0,
@@ -281,35 +274,57 @@ final class ImportPhotosUseCase {
             )
         }
 
-        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: dedupedIds, options: nil)
-        var assets: [PHAsset] = []
-        assets.reserveCapacity(fetchResult.count)
-        fetchResult.enumerateObjects { asset, _, _ in
-            assets.append(asset)
+        let hasLocalAssets = allImportedAssets.contains { asset in
+            if let localId = asset.localIdentifier {
+                return !localId.isEmpty
+            }
+            return false
         }
 
-        let decisions = await curationService.curate(assets: assets) { processed, total in
+        if hasLocalAssets {
+            let status = await permissionService.requestAuthorization()
+            switch status {
+            case .authorized, .limited:
+                break
+            case .denied, .restricted, .notDetermined:
+                throw ImportPhotosError.permissionDenied
+            }
+        }
+
+        let decisions = await curationService.curateImportedPhotos(records: allImportedAssets) { processed, total in
             await MainActor.run {
                 onPreprocessProgress?(processed, total)
             }
         }
 
-        let decisionsByLocalId = Dictionary(uniqueKeysWithValues: decisions.map { ($0.localIdentifier, $0) })
-
-        if !decisionsByLocalId.isEmpty {
+        if !decisions.isEmpty {
             try await writer.write { db in
-                for (localId, decision) in decisionsByLocalId {
-                    _ = try PhotoAsset
-                        .filter(Column("localIdentifier") == localId)
-                        .updateAll(
-                            db,
-                            Column("burstGroupId").set(to: decision.groupId),
-                            Column("bestShotScore").set(to: decision.score),
-                            Column("selectionReason").set(to: decision.reason.rawValue),
-                            Column("curationBucket").set(to: decision.bucket.rawValue),
-                            Column("isRecoverableArchived").set(to: decision.bucket == .archived),
-                            Column("recognizedTextConfidence").set(to: decision.recognizedTextConfidence)
-                        )
+                for decision in decisions {
+                    if let photoAssetId = decision.photoAssetId {
+                        _ = try PhotoAsset
+                            .filter(Column("id") == photoAssetId)
+                            .updateAll(
+                                db,
+                                Column("burstGroupId").set(to: decision.groupId),
+                                Column("bestShotScore").set(to: decision.score),
+                                Column("selectionReason").set(to: decision.reason.rawValue),
+                                Column("curationBucket").set(to: decision.bucket.rawValue),
+                                Column("isRecoverableArchived").set(to: decision.bucket == .archived),
+                                Column("recognizedTextConfidence").set(to: decision.recognizedTextConfidence)
+                            )
+                    } else if let localId = decision.localIdentifier, !localId.isEmpty {
+                        _ = try PhotoAsset
+                            .filter(Column("localIdentifier") == localId)
+                            .updateAll(
+                                db,
+                                Column("burstGroupId").set(to: decision.groupId),
+                                Column("bestShotScore").set(to: decision.score),
+                                Column("selectionReason").set(to: decision.reason.rawValue),
+                                Column("curationBucket").set(to: decision.bucket.rawValue),
+                                Column("isRecoverableArchived").set(to: decision.bucket == .archived),
+                                Column("recognizedTextConfidence").set(to: decision.recognizedTextConfidence)
+                            )
+                    }
                 }
             }
         }
