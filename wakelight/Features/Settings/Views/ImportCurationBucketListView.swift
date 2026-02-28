@@ -54,9 +54,11 @@ struct ImportCurationBucketListView: View {
     @Environment(\.editMode) private var editMode
 
     @State private var previewItems: [Row] = []
-    @State private var previewSelection: String?
+    @State private var previewSelection: UUID?
     @State private var isShowingPreview = false
+
     @State private var displayNameMap: [String: String] = [:]
+    @State private var locatorKeyMap: [UUID: String] = [:]
 
     private var batchOptions: [ActionTarget] {
         switch filter {
@@ -77,12 +79,12 @@ struct ImportCurationBucketListView: View {
                                 Button {
                                     openPreview(for: row, in: nil)
                                 } label: {
-                                    ThumbnailView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: row.localIdentifier), size: CGSize(width: 62, height: 62))
+                                    ThumbnailView(locatorKey: locatorKey(for: row), size: CGSize(width: 62, height: 62))
                                 }
                                 .buttonStyle(.plain)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(displayName(for: row.localIdentifier))
+                                    Text(displayName(for: row))
                                         .font(.caption)
                                         .lineLimit(1)
 
@@ -105,7 +107,7 @@ struct ImportCurationBucketListView: View {
                                                         openPreview(for: item, in: siblings)
                                                     } label: {
                                                         VStack(spacing: 4) {
-                                                            ThumbnailView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: item.localIdentifier), size: CGSize(width: 48, height: 48))
+                                                            ThumbnailView(locatorKey: locatorKey(for: item), size: CGSize(width: 48, height: 48))
                                                                 .overlay {
                                                                     RoundedRectangle(cornerRadius: 6)
                                                                         .stroke(
@@ -201,14 +203,16 @@ struct ImportCurationBucketListView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: successToast)
         .alert("操作失败", isPresented: .constant(errorAlert != nil), presenting: errorAlert) { _ in
-            Button("我知道了", role: .cancel) {
-                errorAlert = nil
-            }
+            Button("我知道了", role: .cancel) { errorAlert = nil }
         } message: { err in
             Text(err.message)
         }
         .fullScreenCover(isPresented: $isShowingPreview) {
-            GroupPreviewSheet(items: previewItems, selection: $previewSelection) { rowId, bucket in
+            GroupPreviewSheet(
+                items: previewItems,
+                selection: $previewSelection,
+                locatorKeyForRow: { row in locatorKey(for: row) }
+            ) { rowId, bucket in
                 await applyFromPreview(rowId: rowId, bucket: bucket)
             }
         }
@@ -223,29 +227,21 @@ struct ImportCurationBucketListView: View {
         switch filter {
         case .archived:
             HStack(spacing: 8) {
-                Button("恢复到待确认") {
-                    Task { await applySingle(row: row, target: .review) }
-                }
-                .buttonStyle(.bordered)
+                Button("恢复到待确认") { Task { await applySingle(row: row, target: .review) } }
+                    .buttonStyle(.bordered)
 
-                Button("恢复到保留") {
-                    Task { await applySingle(row: row, target: .keep) }
-                }
-                .buttonStyle(.borderedProminent)
+                Button("恢复到保留") { Task { await applySingle(row: row, target: .keep) } }
+                    .buttonStyle(.borderedProminent)
             }
             .font(.caption2)
 
         case .review:
             HStack(spacing: 8) {
-                Button("确认保留") {
-                    Task { await applySingle(row: row, target: .keep) }
-                }
-                .buttonStyle(.borderedProminent)
+                Button("确认保留") { Task { await applySingle(row: row, target: .keep) } }
+                    .buttonStyle(.borderedProminent)
 
-                Button("归档过滤") {
-                    Task { await applySingle(row: row, target: .archived) }
-                }
-                .buttonStyle(.bordered)
+                Button("归档过滤") { Task { await applySingle(row: row, target: .archived) } }
+                    .buttonStyle(.bordered)
             }
             .font(.caption2)
         }
@@ -257,7 +253,6 @@ struct ImportCurationBucketListView: View {
             let fetched: [Row] = try await DatabaseContainer.shared.db.reader.read { db in
                 try Row
                     .filter(Column("curationBucket") == filter.rawValue)
-                    .filter(Column("localIdentifier") != nil)
                     .order(Column("bestShotScore").desc)
                     .fetchAll(db)
             }
@@ -277,13 +272,16 @@ struct ImportCurationBucketListView: View {
                 grouped[gid, default: []].append(item)
             }
 
-            let allIdentifiers = Array(Set((fetched + groupRows).map(\.localIdentifier)))
-            let names = await resolveDisplayNames(localIdentifiers: allIdentifiers)
+            let allRows = fetched + groupRows
+            let allIds = Array(Set(allRows.map(\.id)))
+            let locators = await loadLocatorMap(photoIds: allIds)
+            let names = await resolveDisplayNames(rows: allRows, locatorMap: locators)
 
             await MainActor.run {
                 rows = fetched
                 groupedRows = grouped
-                displayNameMap.merge(names) { _, new in new }
+                locatorKeyMap = locators
+                displayNameMap = names
                 selectedIds = selectedIds.intersection(Set(fetched.map(\.id)))
                 isLoading = false
             }
@@ -291,10 +289,34 @@ struct ImportCurationBucketListView: View {
             await MainActor.run {
                 rows = []
                 groupedRows = [:]
+                locatorKeyMap = [:]
+                displayNameMap = [:]
                 selectedIds.removeAll()
                 isLoading = false
             }
         }
+    }
+
+    private func loadLocatorMap(photoIds: [UUID]) async -> [UUID: String] {
+        guard !photoIds.isEmpty else { return [:] }
+        do {
+            let locators = try await DatabaseContainer.shared.db.reader.read { db in
+                try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            }
+            return Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+        } catch {
+            return [:]
+        }
+    }
+
+    private func locatorKey(for row: Row) -> String {
+        if let key = locatorKeyMap[row.id], !key.isEmpty {
+            return key
+        }
+        if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
+            return ImportCurationBucketListViewHelper.locatorKey(for: localIdentifier)
+        }
+        return ""
     }
 
     private func applySingle(row: Row, target: ActionTarget) async {
@@ -346,7 +368,6 @@ struct ImportCurationBucketListView: View {
                 )
         }
 
-        // 过滤状态变化后立即重算光点与访次，保证地图/记忆面板及时一致
         await MainActor.run {
             PhotoImportManager.shared.scheduleRecluster(reason: "curation-bucket-updated")
         }
@@ -361,10 +382,9 @@ struct ImportCurationBucketListView: View {
         }
 
         previewItems = sorted
-        previewSelection = row.localIdentifier
+        previewSelection = row.id
 
-        // 预热首屏，减少首次打开黑屏等待
-        let key = ImportCurationBucketListViewHelper.locatorKey(for: row.localIdentifier)
+        let key = locatorKey(for: row)
         Task(priority: .userInitiated) {
             _ = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: key, size: CGSize(width: 1200, height: 1200))
             _ = await PhotoThumbnailLoader.shared.loadFullImage(locatorKey: key)
@@ -411,55 +431,73 @@ struct ImportCurationBucketListView: View {
         }
     }
 
-    private func displayName(for localIdentifier: String) -> String {
-        if let name = displayNameMap[localIdentifier], !name.isEmpty {
+    private func displayName(for row: Row) -> String {
+        if let key = locatorKeyMap[row.id], let name = displayNameMap[key], !name.isEmpty {
             return name
         }
-        return fallbackName(for: localIdentifier)
+
+        if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
+            let fallbackKey = ImportCurationBucketListViewHelper.locatorKey(for: localIdentifier)
+            if let name = displayNameMap[fallbackKey], !name.isEmpty {
+                return name
+            }
+            return fallbackName(for: fallbackKey)
+        }
+
+        return "未命名媒体"
     }
 
-    private func resolveDisplayNames(localIdentifiers: [String]) async -> [String: String] {
-        guard !localIdentifiers.isEmpty else { return [:] }
+    private func resolveDisplayNames(rows: [Row], locatorMap: [UUID: String]) async -> [String: String] {
+        let keys = Array(Set(rows.compactMap { row in
+            if let key = locatorMap[row.id], !key.isEmpty {
+                return key
+            }
+            if let localId = row.localIdentifier, !localId.isEmpty {
+                return ImportCurationBucketListViewHelper.locatorKey(for: localId)
+            }
+            return nil
+        }))
+
+        guard !keys.isEmpty else { return [:] }
 
         var result: [String: String] = [:]
-        for id in localIdentifiers {
-            let name = await resolveDisplayName(localIdentifier: id)
-            result[id] = name
+        for key in keys {
+            result[key] = await resolveDisplayName(locatorKey: key)
         }
         return result
     }
 
-    private func resolveDisplayName(localIdentifier: String) async -> String {
-        if localIdentifier.hasPrefix("webdav://") {
-            return fallbackName(for: localIdentifier)
+    private func resolveDisplayName(locatorKey: String) async -> String {
+        if locatorKey.hasPrefix("webdav://") {
+            return fallbackName(for: locatorKey)
         }
 
-        let pureId: String
-        if localIdentifier.hasPrefix("library://") {
-            pureId = String(localIdentifier.dropFirst("library://".count))
-        } else {
-            pureId = localIdentifier
-        }
-
-        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [pureId], options: nil)
-        if let asset = fetch.firstObject {
-            let resources = PHAssetResource.assetResources(for: asset)
-            if let original = resources.first(where: { !$0.originalFilename.isEmpty }) {
-                return original.originalFilename
+        if locatorKey.hasPrefix("library://") {
+            let pureId = String(locatorKey.dropFirst("library://".count))
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [pureId], options: nil)
+            if let asset = fetch.firstObject {
+                let resources = PHAssetResource.assetResources(for: asset)
+                if let original = resources.first(where: { !$0.originalFilename.isEmpty }) {
+                    return original.originalFilename
+                }
+                if let first = resources.first, !first.originalFilename.isEmpty {
+                    return first.originalFilename
+                }
             }
-            if let first = resources.first, !first.originalFilename.isEmpty {
-                return first.originalFilename
-            }
+            return fallbackName(for: locatorKey)
         }
 
-        return fallbackName(for: localIdentifier)
+        return fallbackName(for: locatorKey)
     }
 
-    private func fallbackName(for localIdentifier: String) -> String {
-        if localIdentifier.hasPrefix("webdav://") {
-            return localIdentifier.split(separator: "/").last.map(String.init) ?? localIdentifier
+    private func fallbackName(for locatorKey: String) -> String {
+        if locatorKey.hasPrefix("webdav://") {
+            return locatorKey.split(separator: "/").last.map(String.init) ?? locatorKey
         }
-        return localIdentifier
+        if locatorKey.hasPrefix("library://") {
+            return String(locatorKey.dropFirst("library://".count))
+        }
+        return locatorKey
     }
 
     private func actionLabel(_ target: ActionTarget) -> String {
@@ -469,42 +507,19 @@ struct ImportCurationBucketListView: View {
         case .archived: return "归档"
         }
     }
-
-    private func isTextTriggeredGroup(_ items: [Row]) -> Bool {
-        items.contains {
-            $0.selectionReason == ImportDecisionReason.filteredText.rawValue ||
-            $0.selectionReason == ImportDecisionReason.filteredTextHighConfidence.rawValue ||
-            $0.selectionReason == ImportDecisionReason.filteredTextPossible.rawValue
-        }
-    }
-
-    @ViewBuilder
-    private func actionChip(title: String, isPrimary: Bool, disabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(isPrimary ? Color.white : Color.accentColor)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(isPrimary ? Color.accentColor : Color.black.opacity(0.45))
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled || isPrimary)
-        .opacity((disabled || isPrimary) ? 0.7 : 1)
-    }
 }
 
 private struct GroupPreviewSheet: View {
     let items: [Row]
-    @Binding var selection: String?
+    @Binding var selection: UUID?
+    let locatorKeyForRow: (Row) -> String
     let onApply: @Sendable (UUID, ImportDecisionBucket) async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var isApplying = false
 
     private var currentItem: Row? {
         guard let sel = selection else { return items.first }
-        return items.first(where: { $0.localIdentifier == sel }) ?? items.first
+        return items.first(where: { $0.id == sel }) ?? items.first
     }
 
     var body: some View {
@@ -514,12 +529,12 @@ private struct GroupPreviewSheet: View {
 
                 if !items.isEmpty {
                     TabView(selection: Binding(
-                        get: { selection ?? items.first?.localIdentifier },
+                        get: { selection ?? items.first?.id },
                         set: { selection = $0 }
                     )) {
                         ForEach(items) { item in
                             VStack(spacing: 12) {
-                                FullImageView(locatorKey: ImportCurationBucketListViewHelper.locatorKey(for: item.localIdentifier))
+                                FullImageView(locatorKey: locatorKeyForRow(item))
                                     .background(Color.black)
 
                                 HStack(spacing: 8) {
@@ -540,7 +555,7 @@ private struct GroupPreviewSheet: View {
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.9))
                             }
-                            .tag(item.localIdentifier as String?)
+                            .tag(item.id as UUID?)
                             .padding(.bottom, 18)
                         }
                     }
@@ -613,8 +628,7 @@ private enum ImportCurationBucketListViewHelper {
             return "已保留"
         }
 
-        if reason == ImportDecisionReason.needsReview.rawValue,
-           groupId != nil {
+        if reason == ImportDecisionReason.needsReview.rawValue, groupId != nil {
             return "重复照片（待确认）"
         }
 
@@ -662,7 +676,7 @@ private struct Row: Identifiable, FetchableRecord, TableRecord, Decodable {
     static let databaseTableName = "photoAsset"
 
     var id: UUID
-    var localIdentifier: String
+    var localIdentifier: String?
     var bestShotScore: Double?
     var selectionReason: String?
     var curationBucket: String?
