@@ -257,6 +257,7 @@ struct ImportCurationBucketListView: View {
             let fetched: [Row] = try await DatabaseContainer.shared.db.reader.read { db in
                 try Row
                     .filter(Column("curationBucket") == filter.rawValue)
+                    .filter(Column("localIdentifier") != nil)
                     .order(Column("bestShotScore").desc)
                     .fetchAll(db)
             }

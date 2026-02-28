@@ -10,9 +10,8 @@ enum ImportStatus: String, Codable {
     case cancelled
 }
 
-enum ImportPhase: String, Codable {
+enum SyncPhase: String, Codable {
     case idle
-    case preprocess
     case photos
     case webdav
     case generateClusters
@@ -20,9 +19,34 @@ enum ImportPhase: String, Codable {
     case done
 }
 
-struct ImportProgress: Codable {
+enum CurationPhase: String, Codable {
+    case idle
+    case preprocess
+    case generateClusters
+    case generateVisitLayers
+    case done
+}
+
+struct SyncProgress: Codable {
     var status: ImportStatus = .idle
-    var phase: ImportPhase = .idle
+    var phase: SyncPhase = .idle
+
+    var totalItems: Int = 0
+    var processedItems: Int = 0
+
+    var lastNotice: String?
+    var lastError: String?
+    var lastCompletedAt: Date?
+
+    var progress: Double {
+        guard totalItems > 0 else { return 0 }
+        return Double(processedItems) / Double(totalItems)
+    }
+}
+
+struct CurationProgress: Codable {
+    var status: ImportStatus = .idle
+    var phase: CurationPhase = .idle
 
     var totalItems: Int = 0
     var processedItems: Int = 0
@@ -44,258 +68,289 @@ struct ImportProgress: Codable {
 final class PhotoImportManager: ObservableObject {
     static let shared = PhotoImportManager()
 
-    @Published private(set) var progress = ImportProgress()
+    @Published private(set) var syncProgress = SyncProgress()
+    @Published private(set) var curationProgress = CurationProgress()
 
-    @Published private(set) var isRunning = false
+    @Published private(set) var isSyncRunning = false
+    @Published private(set) var isCurationRunning = false
+
+    var isRunning: Bool { isSyncRunning || isCurationRunning }
+
+    private enum RunningTaskType {
+        case sync
+        case curation
+    }
+
+    private var runningTaskType: RunningTaskType?
     private var runningTask: Task<Void, Never>?
-
-    // MARK: - Photos Change Observer (Incremental Sync)
 
     private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
     private var photosChangeDebounceTask: Task<Void, Never>?
-
-    // MARK: - Incremental Reclustering (Strict Consistency)
     private var pendingReclusterTask: Task<Void, Never>?
 
     private init() {
         loadProgress()
     }
 
-    /// 停止当前正在运行的导入任务
     func cancelImport() {
         guard isRunning else { return }
-        print("[ImportManager] Cancelling import...")
         runningTask?.cancel()
         runningTask = nil
-        isRunning = false
-        progress.status = .cancelled
-        progress.phase = .idle
-        progress.lastError = "已手动停止导入"
-        saveProgress()
+
+        switch runningTaskType {
+        case .sync:
+            isSyncRunning = false
+            syncProgress.status = .cancelled
+            syncProgress.phase = .idle
+            syncProgress.lastError = "已手动停止同步"
+            saveSyncProgress()
+        case .curation:
+            isCurationRunning = false
+            curationProgress.status = .cancelled
+            curationProgress.phase = .idle
+            curationProgress.lastError = "已手动停止整理"
+            saveCurationProgress()
+        case .none:
+            break
+        }
+
+        runningTaskType = nil
     }
 
-    /// 非阻塞 UI：用 Task 在后台执行（但仍在 app 进程内运行，不用 BGTaskScheduler）
     func startImportIfNeeded(reason: String) {
-        guard !isRunning else {
-            print("[ImportManager] Skip startImport (already running). reason=\(reason)")
-            return
-        }
+        guard !isRunning else { return }
         startImport(reason: reason)
     }
 
-    /// 默认导入：只同步系统 Photos（用于自动触发：App 启动 / 设置保存等）。
-    /// WebDAV 由于可能全量扫描、耗时且耗电，默认不自动触发。
     func startImport(reason: String) {
         startLocalPhotosImport(reason: reason)
     }
 
-    /// 仅导入系统 Photos（推荐 & 自动触发的默认行为）
     func startLocalPhotosImport(reason: String) {
         guard !isRunning else { return }
-        isRunning = true
-
-        print("[ImportManager] Starting LOCAL photos import. reason=\(reason)")
+        isSyncRunning = true
+        runningTaskType = .sync
 
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
 
-            await self.updateStatus(.importing, phase: .preprocess, resetCounts: true)
+            await self.updateSyncStatus(.importing, phase: .photos, resetCounts: true)
 
             do {
-                let summary = try await ImportPhotosUseCase().runWithSummary(
+                let imported = try await ImportPhotosUseCase().runSyncOnly(
                     limit: nil,
-                    onPreprocessProgress: { processed, total in
-                        Task { @MainActor in
-                            PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .preprocess)
-                        }
-                    },
                     onProgress: { processed, total in
                         Task { @MainActor in
-                            PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .photos)
+                            PhotoImportManager.shared.reportSyncProgress(processed: processed, total: total, phase: .photos)
                         }
                     }
                 )
-                await self.reportSummary(summary)
-                print("[ImportManager] Local Photos imported: \(summary.totalImported), keep=\(summary.meaningfulKept), review=\(summary.reviewBucketCount), archived=\(summary.filteredArchivedCount)")
 
-                // 本地 Photos 导入完成后，继续生成聚类与 VisitLayers
-                await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
+                await self.updateSyncStatus(.importing, phase: .generateClusters, resetCounts: false)
                 _ = try await GeneratePlaceClustersUseCase().run()
 
-                await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                await self.updateSyncStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
-                await self.completeImport(
-                    notice: "导入完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
-                )
+                await self.completeSync(notice: "同步完成：本地照片增量已更新（共处理 \(imported) 项）")
             } catch {
-                await self.failImport(error: error.localizedDescription)
+                await self.failSync(error: error.localizedDescription)
             }
 
             await MainActor.run {
-                self.isRunning = false
+                self.isSyncRunning = false
                 self.runningTask = nil
+                self.runningTaskType = nil
             }
         }
     }
 
-    /// 手动触发：重跑已导入照片的预处理（筛选/分桶），不重新导入资源
     func startPreprocessImportedPhotos(reason: String) {
         guard !isRunning else { return }
-        isRunning = true
-
-        print("[ImportManager] Starting preprocess for imported photos. reason=\(reason)")
+        isCurationRunning = true
+        runningTaskType = .curation
 
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
 
             do {
-                await self.updateStatus(.importing, phase: .preprocess, resetCounts: true)
+                await self.updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
 
                 let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
                     Task { @MainActor in
-                        PhotoImportManager.shared.reportProgress(processed: processed, total: total, phase: .preprocess)
+                        PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
                     }
                 }
 
-                await self.reportSummary(summary)
+                await self.reportCurationSummary(summary)
 
-                await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
+                await self.updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
                 _ = try await GeneratePlaceClustersUseCase().run()
 
-                await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                await self.updateCurationStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
-                await self.completeImport(
+                await self.completeCuration(
                     notice: "预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
                 )
             } catch {
-                await self.failImport(error: error.localizedDescription)
+                await self.failCuration(error: error.localizedDescription)
             }
 
             await MainActor.run {
-                self.isRunning = false
+                self.isCurationRunning = false
                 self.runningTask = nil
+                self.runningTaskType = nil
             }
         }
     }
 
-    /// 手动触发：WebDAV 导入（可能全量扫描，耗时/耗电）
     func startWebDAVImport(reason: String) {
         guard !isRunning else { return }
-        isRunning = true
-
-        print("[ImportManager] Starting WebDAV import (manual). reason=\(reason)")
+        isSyncRunning = true
+        runningTaskType = .sync
 
         runningTask = Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
 
             do {
-                await self.updateStatus(.importing, phase: .webdav, resetCounts: true)
+                await self.updateSyncStatus(.importing, phase: .webdav, resetCounts: true)
 
                 let result = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
                     Task { @MainActor in
-                        PhotoImportManager.shared.reportProgress(processed: processed, total: total)
+                        PhotoImportManager.shared.reportSyncProgress(processed: processed, total: total)
                     }
                 }
-                print("[ImportManager] WebDAV imported: \(result.importedCount), deleted: \(result.deletedPhotoIds.count)")
 
-                // Perform shared cleanup for deleted WebDAV photos
                 if !result.deletedPhotoIds.isEmpty {
                     try await self.cleanupDeletedPhotoAssets(photoIds: result.deletedPhotoIds)
                 }
 
-                // WebDAV 导入完成后，生成聚类与 VisitLayers
-                await self.updateStatus(.importing, phase: .generateClusters, resetCounts: false)
+                await self.updateSyncStatus(.importing, phase: .generateClusters, resetCounts: false)
                 _ = try await GeneratePlaceClustersUseCase().run()
 
-                await self.updateStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                await self.updateSyncStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
                 _ = try await GenerateVisitLayersUseCase().run()
 
-                await self.completeImport(notice: "WebDAV 导入完成：已导入 \(result.importedCount) 项")
+                await self.completeSync(notice: "WebDAV 同步完成：已导入 \(result.importedCount) 项")
             } catch {
-                await self.failImport(error: error.localizedDescription)
+                await self.failSync(error: error.localizedDescription)
             }
 
             await MainActor.run {
-                self.isRunning = false
+                self.isSyncRunning = false
                 self.runningTask = nil
+                self.runningTaskType = nil
             }
         }
     }
 
     @MainActor
-    private func updateStatus(_ status: ImportStatus, phase: ImportPhase, resetCounts: Bool) {
-        progress.status = status
-        progress.phase = phase
+    private func updateSyncStatus(_ status: ImportStatus, phase: SyncPhase, resetCounts: Bool) {
+        syncProgress.status = status
+        syncProgress.phase = phase
 
         if resetCounts {
-            progress.processedItems = 0
-            progress.totalItems = 0
-            progress.meaningfulKept = 0
-            progress.reviewBucketCount = 0
-            progress.filteredArchivedCount = 0
+            syncProgress.processedItems = 0
+            syncProgress.totalItems = 0
         }
 
         if status == .importing {
-            progress.lastError = nil
-            progress.lastNotice = nil
+            syncProgress.lastError = nil
+            syncProgress.lastNotice = nil
         }
 
-        saveProgress()
+        saveSyncProgress()
     }
 
     @MainActor
-    private func completeImport(notice: String? = nil) {
-        progress.status = .completed
-        progress.phase = .done
-        progress.lastCompletedAt = Date()
-        progress.lastNotice = notice
-        saveProgress()
+    private func updateCurationStatus(_ status: ImportStatus, phase: CurationPhase, resetCounts: Bool) {
+        curationProgress.status = status
+        curationProgress.phase = phase
+
+        if resetCounts {
+            curationProgress.processedItems = 0
+            curationProgress.totalItems = 0
+            curationProgress.meaningfulKept = 0
+            curationProgress.reviewBucketCount = 0
+            curationProgress.filteredArchivedCount = 0
+        }
+
+        if status == .importing {
+            curationProgress.lastError = nil
+            curationProgress.lastNotice = nil
+        }
+
+        saveCurationProgress()
     }
 
     @MainActor
-    private func recordNonFatalError(_ message: String) {
-        // 宽松模式：记录但不中断整体任务
-        if let existing = progress.lastError, !existing.isEmpty {
-            progress.lastError = existing + "\n" + message
-        } else {
-            progress.lastError = message
-        }
-        saveProgress()
+    private func completeSync(notice: String? = nil) {
+        syncProgress.status = .completed
+        syncProgress.phase = .done
+        syncProgress.lastCompletedAt = Date()
+        syncProgress.lastNotice = notice
+        saveSyncProgress()
     }
 
-    /// “提示/警告”类信息：不会让导入失败，但会在导入页展示出来（复用 progress.lastError）。
+    @MainActor
+    private func completeCuration(notice: String? = nil) {
+        curationProgress.status = .completed
+        curationProgress.phase = .done
+        curationProgress.lastCompletedAt = Date()
+        curationProgress.lastNotice = notice
+        saveCurationProgress()
+    }
+
+    @MainActor
+    private func failSync(error: String) {
+        syncProgress.status = .failed
+        syncProgress.lastError = error
+        saveSyncProgress()
+    }
+
+    @MainActor
+    private func failCuration(error: String) {
+        curationProgress.status = .failed
+        curationProgress.lastError = error
+        saveCurationProgress()
+    }
+
     func reportNonFatalWarning(_ message: String) {
         Task { @MainActor in
-            self.recordNonFatalError("提示: \(message)")
+            if let existing = syncProgress.lastError, !existing.isEmpty {
+                syncProgress.lastError = existing + "\n" + "提示: \(message)"
+            } else {
+                syncProgress.lastError = "提示: \(message)"
+            }
+            saveSyncProgress()
         }
     }
 
     @MainActor
-    private func failImport(error: String) {
-        progress.status = .failed
-        progress.lastError = error
-        saveProgress()
-    }
-
-    @MainActor
-    func reportProgress(processed: Int, total: Int, phase: ImportPhase? = nil) {
+    func reportSyncProgress(processed: Int, total: Int, phase: SyncPhase? = nil) {
         if let phase {
-            progress.phase = phase
+            syncProgress.phase = phase
         }
-        progress.processedItems = processed
-        progress.totalItems = total
-        // 不必每次都保存，减少 IO
+        syncProgress.processedItems = processed
+        syncProgress.totalItems = total
     }
 
+    @MainActor
+    func reportCurationProgress(processed: Int, total: Int, phase: CurationPhase? = nil) {
+        if let phase {
+            curationProgress.phase = phase
+        }
+        curationProgress.processedItems = processed
+        curationProgress.totalItems = total
+    }
 
     @MainActor
-    func reportSummary(_ summary: ImportCurationSummary) {
-        progress.meaningfulKept = summary.meaningfulKept
-        progress.reviewBucketCount = summary.reviewBucketCount
-        progress.filteredArchivedCount = summary.filteredArchivedCount
-        saveProgress()
+    func reportCurationSummary(_ summary: ImportCurationSummary) {
+        curationProgress.meaningfulKept = summary.meaningfulKept
+        curationProgress.reviewBucketCount = summary.reviewBucketCount
+        curationProgress.filteredArchivedCount = summary.filteredArchivedCount
+        saveCurationProgress()
     }
 
     @MainActor
@@ -310,10 +365,10 @@ final class PhotoImportManager: ObservableObject {
                 }
 
                 await MainActor.run {
-                    self.progress.meaningfulKept = keep
-                    self.progress.reviewBucketCount = review
-                    self.progress.filteredArchivedCount = archived
-                    self.saveProgress()
+                    self.curationProgress.meaningfulKept = keep
+                    self.curationProgress.reviewBucketCount = review
+                    self.curationProgress.filteredArchivedCount = archived
+                    self.saveCurationProgress()
                 }
             } catch {
                 print("[ImportManager] refreshCurationCountsFromDatabase failed: \(error)")
@@ -321,21 +376,34 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 
-    private let progressKey = "com.wakelight.import.progress"
+    private let syncProgressKey = "com.wakelight.import.sync.progress"
+    private let curationProgressKey = "com.wakelight.import.curation.progress"
 
-    private func saveProgress() {
-        if let data = try? JSONEncoder().encode(progress) {
-            UserDefaults.standard.set(data, forKey: progressKey)
+    private func saveSyncProgress() {
+        if let data = try? JSONEncoder().encode(syncProgress) {
+            UserDefaults.standard.set(data, forKey: syncProgressKey)
         }
     }
 
-    // MARK: - Incremental Photos Handling
+    private func saveCurationProgress() {
+        if let data = try? JSONEncoder().encode(curationProgress) {
+            UserDefaults.standard.set(data, forKey: curationProgressKey)
+        }
+    }
 
-    /// Called by `PhotosLibraryObserver` (on main actor) when the Photos library changes.
-    /// We debounce the incoming changes to avoid thrashing when the system reports many small updates.
+    private func loadProgress() {
+        if let data = UserDefaults.standard.data(forKey: syncProgressKey),
+           let saved = try? JSONDecoder().decode(SyncProgress.self, from: data) {
+            self.syncProgress = saved
+        }
+
+        if let data = UserDefaults.standard.data(forKey: curationProgressKey),
+           let saved = try? JSONDecoder().decode(CurationProgress.self, from: data) {
+            self.curationProgress = saved
+        }
+    }
+
     func handlePhotosLibraryChange(_ change: PhotosLibraryObserver.ChangeSet) {
-        print("[ImportManager] handlePhotosLibraryChange inserted=\(change.insertedLocalIdentifiers.count) changed=\(change.changedLocalIdentifiers.count) removed=\(change.removedLocalIdentifiers.count)")
-        // Merge into pending set
         if var existing = pendingPhotosChange {
             existing.insertedLocalIdentifiers.append(contentsOf: change.insertedLocalIdentifiers)
             existing.changedLocalIdentifiers.append(contentsOf: change.changedLocalIdentifiers)
@@ -347,20 +415,17 @@ final class PhotoImportManager: ObservableObject {
 
         photosChangeDebounceTask?.cancel()
         photosChangeDebounceTask = Task { [weak self] in
-            // Simple debounce: wait a short delay to merge bursts of changes.
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            try? await Task.sleep(nanoseconds: 500_000_000)
             await self?.processPendingPhotosChange()
         }
     }
 
     func scheduleRecluster(reason: String) {
-        // Avoid overlapping with a full import.
         guard !isRunning else { return }
 
         pendingReclusterTask?.cancel()
         pendingReclusterTask = Task.detached(priority: .background) {
-            // Debounce to avoid frequent heavy recomputation when the system emits bursts of changes.
-            try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
 
             do {
                 _ = try await GeneratePlaceClustersUseCase().run()
@@ -376,18 +441,15 @@ final class PhotoImportManager: ObservableObject {
         guard let change = pendingPhotosChange else { return }
         pendingPhotosChange = nil
 
-        // Avoid overlapping with a full import; if a full import is running, we skip incremental.
         if isRunning { return }
 
         let insertedOrChanged = Array(Set(change.insertedLocalIdentifiers + change.changedLocalIdentifiers))
         let removed = Array(Set(change.removedLocalIdentifiers))
 
-        // Incremental upsert for inserted/changed assets
         if !insertedOrChanged.isEmpty {
             Task.detached(priority: .background) {
                 do {
                     _ = try await ImportPhotosUseCase().run(localIdentifiers: insertedOrChanged, onProgress: nil)
-                    print("[ImportManager] Incremental Photos upsert: \(insertedOrChanged.count) assets")
                     await MainActor.run {
                         PhotoImportManager.shared.scheduleRecluster(reason: "incremental-upsert")
                     }
@@ -397,24 +459,19 @@ final class PhotoImportManager: ObservableObject {
             }
         }
 
-        // Deletion cleanup for removed assets
         if !removed.isEmpty {
             Task.detached(priority: .background) {
                 do {
-                    // 1) Find PhotoAsset ids for the removed localIdentifiers
                     let photoIds: [UUID] = try await DatabaseContainer.shared.db.reader.read { db in
                         try PhotoAsset
                             .filter(removed.contains(Column("localIdentifier")))
                             .fetchAll(db)
                             .map { $0.id }
                     }
-                    
-                    guard !photoIds.isEmpty else { return }
 
-                    // 2) Run shared cleanup
+                    guard !photoIds.isEmpty else { return }
                     try await self.cleanupDeletedPhotoAssets(photoIds: photoIds)
-                    
-                    // 3) Recluster
+
                     await MainActor.run {
                         PhotoImportManager.shared.scheduleRecluster(reason: "incremental-delete")
                     }
@@ -425,30 +482,24 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 
-    /// Shared cleanup logic used by both Photos incremental sync and WebDAV sync deletions.
-    /// This handles: VisitLayerPhotoAsset links, empty VisitLayers, StoryNode covers/deletion, and PlaceCluster.hasStory consistency.
     func cleanupDeletedPhotoAssets(photoIds: [UUID]) async throws {
         guard !photoIds.isEmpty else { return }
-        
+
         try await DatabaseContainer.shared.writer.write { db in
-            // 1) Find affected VisitLayers BEFORE deleting links
             let affectedVisitLayerIds = try VisitLayerPhotoAsset
                 .filter(photoIds.contains(Column("photoAssetId")))
                 .fetchAll(db)
                 .map { $0.visitLayerId }
-            
-            // 2) Find localIdentifiers for StoryNode cover matching (if any)
+
             let removedLocalIds = try PhotoAsset
                 .filter(photoIds.contains(Column("id")))
                 .fetchAll(db)
                 .compactMap { $0.localIdentifier }
 
-            // 3) Delete VisitLayerPhotoAsset links referencing these photos
             let deletedLinksCount = try VisitLayerPhotoAsset
                 .filter(photoIds.contains(Column("photoAssetId")))
                 .deleteAll(db)
 
-            // 4) Clean up empty VisitLayers
             var deletedVisitLayerCount = 0
             if !affectedVisitLayerIds.isEmpty {
                 for layerId in Set(affectedVisitLayerIds) {
@@ -462,9 +513,6 @@ final class PhotoImportManager: ObservableObject {
                 }
             }
 
-            // 5) Handle StoryNode covers and empty stories
-            // Note: We match by coverPhotoId which could be a localIdentifier or a locatorKey.
-            // First, find stories that might be affected by deleted photoIds (by checking their locatorKeys)
             let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
             let removedLocatorKeys = locators.map { $0.locatorKey }
             let allMatchKeys = Set(removedLocalIds + removedLocatorKeys)
@@ -486,11 +534,10 @@ final class PhotoImportManager: ObservableObject {
                     continue
                 }
 
-                // Find remaining photos for this story's visit layers
                 let remainingPhotoLinks = try VisitLayerPhotoAsset
                     .filter(visitLayerIds.contains(Column("visitLayerId")))
                     .fetchAll(db)
-                
+
                 let remainingPhotoIds = remainingPhotoLinks.map(\.photoAssetId)
 
                 if remainingPhotoIds.isEmpty {
@@ -500,7 +547,6 @@ final class PhotoImportManager: ObservableObject {
                     continue
                 }
 
-                // Pick a new cover from remaining photos
                 let candidates = try PhotoAsset
                     .filter(remainingPhotoIds.contains(Column("id")))
                     .fetchAll(db)
@@ -508,8 +554,7 @@ final class PhotoImportManager: ObservableObject {
                 if let newCover = candidates
                     .sorted(by: { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) })
                     .first {
-                    
-                    // Fetch the locatorKey for the new cover
+
                     let newLocators = try PhotoAsset.fetchLocators(db: db, ids: [newCover.id])
                     if let newCoverKey = newLocators.first?.locatorKey {
                         story.coverPhotoId = newCoverKey
@@ -528,7 +573,6 @@ final class PhotoImportManager: ObservableObject {
                 }
             }
 
-            // 6) Sync PlaceCluster.hasStory
             if !affectedPlaceClusterIds.isEmpty {
                 for clusterId in affectedPlaceClusterIds {
                     let remainingStoryCount = try StoryNode
@@ -543,7 +587,6 @@ final class PhotoImportManager: ObservableObject {
                 }
             }
 
-            // 7) Delete PhotoAsset rows
             let deletedPhotosCount = try PhotoAsset
                 .filter(photoIds.contains(Column("id")))
                 .deleteAll(db)
@@ -551,11 +594,5 @@ final class PhotoImportManager: ObservableObject {
             print("[Cleanup] Deleted: photos=\(deletedPhotosCount), links=\(deletedLinksCount), layers=\(deletedVisitLayerCount), storiesDel=\(deletedStoryCount), storiesUpd=\(updatedStoryCount)")
         }
     }
-
-    private func loadProgress() {
-        if let data = UserDefaults.standard.data(forKey: progressKey),
-           let saved = try? JSONDecoder().decode(ImportProgress.self, from: data) {
-            self.progress = saved
-        }
-    }
 }
+

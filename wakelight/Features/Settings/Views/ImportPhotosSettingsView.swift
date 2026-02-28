@@ -4,30 +4,32 @@ struct ImportPhotosSettingsView: View {
     @StateObject private var importManager = PhotoImportManager.shared
 
     private var statusText: String {
-        switch importManager.progress.status {
+        switch importManager.syncProgress.status {
         case .idle: return "空闲"
-        case .importing: return "导入中"
+        case .importing: return "同步中"
         case .completed: return "完成"
         case .failed: return "失败"
         case .cancelled: return "已停止"
         }
     }
 
-    private var phaseText: String {
-        switch importManager.progress.phase {
+    private var syncPhaseText: String {
+        switch importManager.syncProgress.phase {
         case .idle: return "-"
-        case .preprocess: return "预处理中（筛选照片/生成光点）"
-        case .photos: return "写入本地照片"
-        case .webdav: return "WebDAV"
-        case .generateClusters: return "生成聚类"
-        case .generateVisitLayers: return "生成 Visit Layers"
-        case .done: return "Done"
+        case .photos: return "本地增量同步"
+        case .webdav: return "WebDAV 扫描"
+        case .generateClusters, .generateVisitLayers: return "同步收尾中"
+        case .done: return "完成"
         }
     }
 
     var body: some View {
         Form {
-            Section("导入") {
+            Section("数据同步") {
+                Text("本页只负责数据同步（系统相册增量 / WebDAV 扫描），不包含智能整理。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
                 Text("系统相册导入会在 App 启动或检测到变化时自动在后台运行（不阻塞 UI）。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -37,7 +39,7 @@ struct ImportPhotosSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("进度") {
+            Section("同步状态") {
                 HStack {
                     Text("状态")
                     Spacer()
@@ -48,14 +50,14 @@ struct ImportPhotosSettingsView: View {
                 HStack {
                     Text("阶段")
                     Spacer()
-                    Text(phaseText)
+                    Text(syncPhaseText)
                         .foregroundStyle(.secondary)
                 }
 
-                if importManager.progress.status == .importing {
-                    if importManager.progress.totalItems > 0 {
-                        ProgressView(value: importManager.progress.progress) {
-                            Text("\(importManager.progress.processedItems) / \(importManager.progress.totalItems)")
+                if importManager.syncProgress.status == .importing {
+                    if importManager.syncProgress.totalItems > 0 {
+                        ProgressView(value: importManager.syncProgress.progress) {
+                            Text("\(importManager.syncProgress.processedItems) / \(importManager.syncProgress.totalItems)")
                         }
                     } else {
                         ProgressView()
@@ -63,53 +65,22 @@ struct ImportPhotosSettingsView: View {
                     }
                 }
 
-                if importManager.progress.meaningfulKept > 0 || importManager.progress.reviewBucketCount > 0 || importManager.progress.filteredArchivedCount > 0 {
+                if let last = importManager.syncProgress.lastCompletedAt {
                     HStack {
-                        Text("保留")
-                        Spacer()
-                        Text("\(importManager.progress.meaningfulKept)")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    NavigationLink {
-                        ImportCurationBucketListView(filter: .review)
-                    } label: {
-                        HStack {
-                            Text("待确认")
-                            Spacer()
-                            Text("\(importManager.progress.reviewBucketCount)")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    NavigationLink {
-                        ImportCurationBucketListView(filter: .archived)
-                    } label: {
-                        HStack {
-                            Text("已过滤(可恢复)")
-                            Spacer()
-                            Text("\(importManager.progress.filteredArchivedCount)")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if let last = importManager.progress.lastCompletedAt {
-                    HStack {
-                        Text("上次完成")
+                        Text("上次同步")
                         Spacer()
                         Text(last.formatted(date: .numeric, time: .standard))
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                if let notice = importManager.progress.lastNotice, !notice.isEmpty {
-                    Text("完成提示: \(notice)")
+                if let notice = importManager.syncProgress.lastNotice, !notice.isEmpty {
+                    Text("结果提示: \(notice)")
                         .foregroundStyle(.green)
                         .textSelection(.enabled)
                 }
 
-                if let err = importManager.progress.lastError, !err.isEmpty {
+                if let err = importManager.syncProgress.lastError, !err.isEmpty {
                     Text("错误/提示: \(err)")
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
@@ -142,19 +113,19 @@ struct ImportPhotosSettingsView: View {
                 }
                 .disabled(importManager.isRunning)
 
-                if importManager.isRunning {
+                if importManager.isSyncRunning {
                     Button(role: .destructive) {
                         importManager.cancelImport()
                     } label: {
                         HStack {
                             Image(systemName: "stop.circle.fill")
-                            Text("停止导入")
+                            Text("停止同步")
                         }
                     }
                 }
             }
         }
-        .navigationTitle("Import Photos")
+        .navigationTitle("照片导入")
     }
 }
 
