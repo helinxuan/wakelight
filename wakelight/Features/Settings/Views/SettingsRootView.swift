@@ -34,12 +34,20 @@ struct SettingsRootView: View {
 struct SmartPhotoCurationSettingsView: View {
     @StateObject private var importManager = PhotoImportManager.shared
 
+    private var statusText: String {
+        switch importManager.curationProgress.status {
+        case .idle: return "空闲"
+        case .importing: return "处理中"
+        case .completed: return "完成"
+        case .failed: return "失败"
+        case .cancelled: return "已停止"
+        }
+    }
+
     private var phaseText: String {
-        switch importManager.progress.phase {
+        switch importManager.curationProgress.phase {
         case .idle: return "-"
-        case .preprocess: return "预处理中（筛选照片/生成光点）"
-        case .photos: return "写入本地照片"
-        case .webdav: return "WebDAV"
+        case .preprocess: return "预处理中（筛选 / 分桶 / 评分）"
         case .generateClusters: return "生成聚类"
         case .generateVisitLayers: return "生成 Visit Layers"
         case .done: return "完成"
@@ -49,12 +57,23 @@ struct SmartPhotoCurationSettingsView: View {
     var body: some View {
         Form {
             Section("功能说明") {
-                Text("对已导入的系统照片重跑智能筛选，更新保留/待确认/已过滤分桶，不会重复导入照片文件。")
+                Text("智能照片整理统一负责预处理：筛选、分桶、评分与聚类触发。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Text("此页的手动执行不会重复导入文件，只会对已入库照片重跑预处理并更新统计。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
             Section("处理进度") {
+                HStack {
+                    Text("状态")
+                    Spacer()
+                    Text(statusText)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Text("阶段")
                     Spacer()
@@ -62,10 +81,10 @@ struct SmartPhotoCurationSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if importManager.progress.status == .importing {
-                    if importManager.progress.totalItems > 0 {
-                        ProgressView(value: importManager.progress.progress) {
-                            Text("\(importManager.progress.processedItems) / \(importManager.progress.totalItems)")
+                if importManager.curationProgress.status == .importing {
+                    if importManager.curationProgress.totalItems > 0 {
+                        ProgressView(value: importManager.curationProgress.progress) {
+                            Text("\(importManager.curationProgress.processedItems) / \(importManager.curationProgress.totalItems)")
                         }
                     } else {
                         ProgressView()
@@ -76,27 +95,51 @@ struct SmartPhotoCurationSettingsView: View {
                 HStack {
                     Text("保留")
                     Spacer()
-                    Text("\(importManager.progress.meaningfulKept)")
+                    Text("\(importManager.curationProgress.meaningfulKept)")
                         .foregroundStyle(.secondary)
                 }
 
-                HStack {
-                    Text("待确认")
-                    Spacer()
-                    Text("\(importManager.progress.reviewBucketCount)")
-                        .foregroundStyle(.secondary)
+                NavigationLink {
+                    ImportCurationBucketListView(filter: .review)
+                } label: {
+                    HStack {
+                        Text("待确认")
+                        Spacer()
+                        Text("\(importManager.curationProgress.reviewBucketCount)")
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                HStack {
-                    Text("已过滤")
-                    Spacer()
-                    Text("\(importManager.progress.filteredArchivedCount)")
-                        .foregroundStyle(.secondary)
+                NavigationLink {
+                    ImportCurationBucketListView(filter: .archived)
+                } label: {
+                    HStack {
+                        Text("已过滤(可恢复)")
+                        Spacer()
+                        Text("\(importManager.curationProgress.filteredArchivedCount)")
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                if let notice = importManager.progress.lastNotice, !notice.isEmpty {
+                if let last = importManager.curationProgress.lastCompletedAt {
+                    HStack {
+                        Text("上次完成")
+                        Spacer()
+                        Text(last.formatted(date: .numeric, time: .standard))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let notice = importManager.curationProgress.lastNotice, !notice.isEmpty {
                     Text("完成提示: \(notice)")
                         .foregroundStyle(.green)
+                        .textSelection(.enabled)
+                }
+
+                if let err = importManager.curationProgress.lastError, !err.isEmpty {
+                    Text("错误/提示: \(err)")
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
                 }
             }
 
@@ -110,9 +153,23 @@ struct SmartPhotoCurationSettingsView: View {
                     }
                 }
                 .disabled(importManager.isRunning)
+
+                if importManager.isCurationRunning {
+                    Button(role: .destructive) {
+                        importManager.cancelImport()
+                    } label: {
+                        HStack {
+                            Image(systemName: "stop.circle.fill")
+                            Text("停止处理")
+                        }
+                    }
+                }
             }
         }
         .navigationTitle("智能照片整理")
+        .onAppear {
+            importManager.refreshCurationCountsFromDatabase()
+        }
     }
 }
 
@@ -137,7 +194,7 @@ struct ThumbnailCacheSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("缓存上限: \(String(format: "%.1f", cacheLimitGB)) GB")
                     .font(.subheadline)
-                
+
                 Picker("上限", selection: $cacheLimitGB) {
                     ForEach(limitOptions, id: \.self) { option in
                         Text("\(String(format: "%.1f", option)) GB").tag(option)
@@ -146,7 +203,6 @@ struct ThumbnailCacheSettingsView: View {
                 .pickerStyle(.segmented)
                 .onChange(of: cacheLimitGB) { newValue in
                     MediaCache.shared.thumbnailCacheLimitBytes = UInt64(newValue * 1_073_741_824.0)
-                    // 修改上限后，立即尝试修剪一次
                     try? MediaCache.shared.trimThumbnailsIfNeeded()
                     refreshUsage()
                 }

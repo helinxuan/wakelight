@@ -198,6 +198,40 @@ final class ImportPhotosUseCase {
         return try await upsert(assets: assets, scanAt: scanAt, importedAt: scanAt, onProgress: onProgress)
     }
 
+    func runSyncOnly(
+        limit: Int? = 200,
+        onProgress: (@MainActor (Int, Int) -> Void)? = nil
+    ) async throws -> Int {
+        let status = await permissionService.requestAuthorization()
+        switch status {
+        case .authorized, .limited:
+            break
+        case .denied, .restricted, .notDetermined:
+            throw ImportPhotosError.permissionDenied
+        }
+
+        let assets = try await importService.fetchAssets(limit: limit)
+        let scanAt = Date()
+        let imported = try await upsert(
+            assets: assets,
+            scanAt: scanAt,
+            importedAt: scanAt,
+            onProgress: onProgress
+        )
+
+        if !assets.isEmpty {
+            try await writer.write { db in
+                _ = try PhotoAsset
+                    .filter(Column("localIdentifier") != nil && (Column("lastSeenAt") < scanAt || Column("lastSeenAt") == nil))
+                    .deleteAll(db)
+            }
+        } else {
+            await onProgress?(0, 0)
+        }
+
+        return imported
+    }
+
     func runWithSummary(
         limit: Int? = 200,
         onPreprocessProgress: (@MainActor (Int, Int) -> Void)? = nil,
