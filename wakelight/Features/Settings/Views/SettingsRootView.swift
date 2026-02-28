@@ -21,7 +21,7 @@ struct SettingsRootView: View {
                 }
 
                 Section("智能整理") {
-                    NavigationLink("智能照片精选") {
+                    NavigationLink("智能照片整理") {
                         SmartPhotoCurationSettingsView()
                     }
                 }
@@ -106,13 +106,13 @@ struct SmartPhotoCurationSettingsView: View {
                 } label: {
                     HStack {
                         Image(systemName: "wand.and.stars")
-                        Text("开始智能照片精选")
+                        Text("重跑照片预处理")
                     }
                 }
                 .disabled(importManager.isRunning)
             }
         }
-        .navigationTitle("智能照片精选")
+        .navigationTitle("智能照片整理")
     }
 }
 
