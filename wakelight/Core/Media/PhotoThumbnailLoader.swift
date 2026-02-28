@@ -7,9 +7,30 @@ import GRDB
 final class PhotoThumbnailLoader {
     static let shared = PhotoThumbnailLoader()
 
+    private actor BackfillRegistry {
+        private var inFlight = Set<String>()
+
+        func begin(_ key: String) -> Bool {
+            if inFlight.contains(key) { return false }
+            inFlight.insert(key)
+            return true
+        }
+
+        func end(_ key: String) {
+            inFlight.remove(key)
+        }
+    }
+
+    private struct ThumbnailAssetLookup {
+        let photoId: UUID
+        let mediaType: PhotoAsset.MediaType
+        let thumbnailPath: String?
+    }
+
     private let imageManager = PHImageManager.default()
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let fullImageCache = NSCache<NSString, UIImage>()
+    private let backfillRegistry = BackfillRegistry()
 
     private init() {
         thumbnailCache.countLimit = 200 // 缓存最近的 200 张缩略图
@@ -18,45 +39,116 @@ final class PhotoThumbnailLoader {
 
     // MARK: - Public
 
-    /// 加载缩略图，优先从磁盘缓存读取，失败则即时加载并异步补齐磁盘缓存。
+    /// 加载缩略图，优先从数据库记录的磁盘缓存读取，失败则即时加载并异步补齐磁盘缓存。
     func loadThumbnailWithDiskCache(locatorKey: String, size: CGSize) async -> UIImage? {
-        // 1. 优先尝试从数据库查找已缓存的缩略图路径
-        if let cachedPath = try? await DatabaseContainer.shared.db.reader.read({ db in
-            try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.thumbnailPath
-        }), let cachedImage = UIImage(contentsOfFile: cachedPath) {
+        // 1. 通过 locatorKey 解析到对应 PhotoAsset（兼容 library:// 与 webdav://）
+        let lookup = try? await lookupAsset(for: locatorKey)
+
+        // 2. 优先读取已落盘缩略图
+        if let cachedPath = lookup?.thumbnailPath,
+           let cachedImage = UIImage(contentsOfFile: cachedPath) {
+            print("[ThumbLoader] source=disk-hit locator=\(locatorKey) path=\(cachedPath)")
             return cachedImage
         }
 
-        // 2. 没找到磁盘缓存，走内存缓存/即时加载老路
-        let image = await loadThumbnail(locatorKey: locatorKey, size: size)
+        if let cachedPath = lookup?.thumbnailPath {
+            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) path=\(cachedPath) exists=\(FileManager.default.fileExists(atPath: cachedPath))")
+        } else {
+            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) reason=no-thumbnailPath")
+        }
 
-        // 3. 异步触发后台补齐（将该图落盘，下次就快了）
-        if let image = image, let locator = MediaLocator.parse(locatorKey) {
+        // 3. 没找到磁盘缓存，走内存缓存/即时加载
+        let image = await loadThumbnail(locatorKey: locatorKey, size: size)
+        print("[ThumbLoader] source=fallback-loader locator=\(locatorKey) success=\(image != nil)")
+
+        // 4. 异步触发后台补齐（将该图落盘，下次就快）
+        if image != nil, let locator = MediaLocator.parse(locatorKey) {
             triggerBackfill(locator: locator, locatorKey: locatorKey)
         }
 
         return image
     }
 
-    /// 触发后台补齐缩略图缓存
+    /// 触发后台补齐缩略图缓存（同一 locatorKey 去重）
     private func triggerBackfill(locator: MediaLocator, locatorKey: String) {
         Task.detached(priority: .background) {
-            do {
-                // 查一下 mediaType 辅助生成
-                let mediaType = try await DatabaseContainer.shared.db.reader.read { db in
-                    try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db)?.mediaType ?? .photo
+            let shouldStart = await self.backfillRegistry.begin(locatorKey)
+            guard shouldStart else { return }
+            defer {
+                Task {
+                    await self.backfillRegistry.end(locatorKey)
                 }
-                let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+            }
+
+            do {
+                guard let lookup = try await self.lookupAsset(for: locatorKey) else {
+                    print("[ThumbLoader] Backfill skipped (asset not found): \(locatorKey)")
+                    return
+                }
+
+                if let existingPath = lookup.thumbnailPath,
+                   !existingPath.isEmpty,
+                   FileManager.default.fileExists(atPath: existingPath) {
+                    return
+                }
+
+                let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: lookup.mediaType)
+
                 try await DatabaseContainer.shared.writer.write { db in
-                    if var asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                    if var asset = try PhotoAsset.fetchOne(db, key: lookup.photoId) {
                         asset.thumbnailPath = path
                         asset.thumbnailUpdatedAt = Date()
                         try asset.update(db)
                     }
                 }
+
                 print("[ThumbLoader] Backfill success: \(locatorKey)")
             } catch {
                 print("[ThumbLoader] Backfill failed: \(error)")
+            }
+        }
+    }
+
+    private func lookupAsset(for locatorKey: String) async throws -> ThumbnailAssetLookup? {
+        try await DatabaseContainer.shared.db.reader.read { db in
+            if let asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                return ThumbnailAssetLookup(
+                    photoId: asset.id,
+                    mediaType: asset.mediaType ?? .photo,
+                    thumbnailPath: asset.thumbnailPath
+                )
+            }
+
+            guard let locator = MediaLocator.parse(locatorKey) else { return nil }
+
+            switch locator {
+            case .library(let localIdentifier):
+                if let asset = try PhotoAsset.filter(Column("localIdentifier") == localIdentifier).fetchOne(db) {
+                    return ThumbnailAssetLookup(
+                        photoId: asset.id,
+                        mediaType: asset.mediaType ?? .photo,
+                        thumbnailPath: asset.thumbnailPath
+                    )
+                }
+                return nil
+
+            case .webdav(let profileIdRaw, let remotePath):
+                guard let profileId = UUID(uuidString: profileIdRaw) else { return nil }
+                guard let remote = try RemoteMediaAsset
+                    .filter(Column("profileId") == profileId && Column("remotePath") == remotePath)
+                    .fetchOne(db) else {
+                    return nil
+                }
+
+                guard let asset = try PhotoAsset.fetchOne(db, key: remote.photoAssetId) else { return nil }
+                return ThumbnailAssetLookup(
+                    photoId: asset.id,
+                    mediaType: asset.mediaType ?? .photo,
+                    thumbnailPath: asset.thumbnailPath
+                )
+
+            case .file:
+                return nil
             }
         }
     }
@@ -73,6 +165,7 @@ final class PhotoThumbnailLoader {
 
         let cacheKey = "thumb-\(locator.stableKey)-\(Int(size.width))x\(Int(size.height))" as NSString
         if let cached = thumbnailCache.object(forKey: cacheKey) {
+            print("[ThumbLoader] source=memory-hit locator=\(locator.stableKey)")
             return cached
         }
 
@@ -111,13 +204,18 @@ final class PhotoThumbnailLoader {
                 let resource = try await MediaResolver.shared.resolve(locator: locator)
                 switch resource {
                 case .data(let data):
+                    print("[ThumbLoader] fallback-resource=data-bytes locator=\(locator.stableKey) bytes=\(data.count)")
                     return UIImage(data: data)
                 case .url(let url):
+                    let isLocal = url.isFileURL
+                    print("[ThumbLoader] fallback-resource=url locator=\(locator.stableKey) isFileURL=\(isLocal) path=\(url.path)")
                     return UIImage(contentsOfFile: url.path)
                 case .phAsset(let asset):
+                    print("[ThumbLoader] fallback-resource=phAsset locator=\(locator.stableKey) localIdentifier=\(asset.localIdentifier)")
                     return await requestImage(for: asset, targetSize: size, contentMode: .aspectFill, delivery: .opportunistic)
                 }
             } catch {
+                print("[ThumbLoader] fallback-resource=resolve-failed locator=\(locator.stableKey) error=\(error)")
                 return nil
             }
         }
