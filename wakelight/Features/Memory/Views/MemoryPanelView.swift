@@ -419,12 +419,22 @@ struct MemoryPanelView: View {
                 storyNodeId: story.id,
                 visitLayerIds: Array(selectedVisitLayerIds)
             )
+
+            let refreshedStory = try await DatabaseContainer.shared.db.reader.read { db in
+                try StoryNode.fetchOne(db, key: story.id)
+            }
+
             await MainActor.run {
                 selectedVisitLayerIds.removeAll()
                 isMultiSelectMode = false
                 editingStoryTarget = nil
                 appendErrorMessage = nil
                 filterMode = .story
+                if let refreshedStory {
+                    selectedDetailItem = .story(refreshedStory)
+                } else {
+                    selectedDetailItem = .story(story)
+                }
             }
         } catch {
             await MainActor.run {
