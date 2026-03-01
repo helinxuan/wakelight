@@ -23,6 +23,7 @@ struct MemoryDetailSheet: View {
 
     let item: MemoryDetailItem
     let clusterNames: [UUID: String]
+    let onRequestAddFromUnhandled: ((StoryNode) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
@@ -33,12 +34,18 @@ struct MemoryDetailSheet: View {
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var selectedPhotoIndex: Int?
+    @State private var currentStoryLayerIds: [UUID] = []
 
     private let gridColumns: [GridItem] = [
         GridItem(.flexible(), spacing: 2),
         GridItem(.flexible(), spacing: 2),
         GridItem(.flexible(), spacing: 2)
     ]
+
+    private var isStoryItem: Bool {
+        if case .story = item { return true }
+        return false
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,6 +83,11 @@ struct MemoryDetailSheet: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 16)
+
+                    if isStoryItem {
+                        storyCompositionSection
+                            .padding(.horizontal, 16)
+                    }
 
                     ForEach(photoGroups) { group in
                         VStack(alignment: .leading, spacing: 8) {
@@ -140,6 +152,60 @@ struct MemoryDetailSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var storyCompositionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("故事片段")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if case .story(let node) = item {
+                    Button {
+                        onRequestAddFromUnhandled?(node)
+                        dismiss()
+                    } label: {
+                        Label("去未加入故事添加", systemImage: "plus")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if currentStoryLayerIds.isEmpty {
+                Text("请至少保留一个片段")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(currentStoryLayerIds, id: \.self) { id in
+                    if let group = photoGroups.first(where: { $0.id == id }) {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.title)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundColor(.primary)
+                                if let location = group.location {
+                                    Text(location)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                currentStoryLayerIds.removeAll { $0 == id }
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.08)))
+    }
+
     private func generateSmartText() {
         let location = photoGroups.first?.location ?? "这里"
         let count = flattenedLocatorKeys.count
@@ -202,6 +268,7 @@ struct MemoryDetailSheet: View {
                     if let minStart, let maxEnd {
                         self.summaryTitle = Self.dateRangeText(startAt: minStart, endAt: maxEnd)
                     }
+                    self.currentStoryLayerIds = node.subVisitLayerIds
                     self.photoGroups = groups
                     self.flattenedLocatorKeys = groups.flatMap { $0.photoLocatorKeys }
                 }
@@ -217,8 +284,6 @@ struct MemoryDetailSheet: View {
         let visitLayerIds = node.subVisitLayerIds
         guard !visitLayerIds.isEmpty else { return [] }
 
-        // 注意：GRDB 的 reader.read 需要同步闭包，不能在里面 await。
-        // 所以这里先同步读出需要的数据，再在闭包外生成 title（用 MainActor 格式化）。
         let layersData: [(layer: VisitLayer, locationName: String, locatorKeys: [String])] = try await DatabaseContainer.shared.db.reader.read { db in
             let layers = try VisitLayer
                 .filter(visitLayerIds.contains(Column("id")))
@@ -278,20 +343,20 @@ struct MemoryDetailSheet: View {
         Task {
             do {
                 let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-                try await DatabaseContainer.shared.writer.write { db in
-                    switch currentItem {
-                    case .unhandled(let layer):
+                switch currentItem {
+                case .unhandled(let layer):
+                    try await DatabaseContainer.shared.writer.write { db in
                         if var current = try VisitLayer.fetchOne(db, key: layer.id) {
                             current.userText = trimmed.isEmpty ? nil : trimmed
                             try current.update(db)
                         }
-                    case .story(let node):
-                        if var current = try StoryNode.fetchOne(db, key: node.id) {
-                            current.mainSummary = trimmed.isEmpty ? nil : trimmed
-                            current.updatedAt = Date()
-                            try current.update(db)
-                        }
                     }
+                case .story(let node):
+                    try await UpdateStoryCompositionUseCase().run(
+                        storyNodeId: node.id,
+                        orderedVisitLayerIds: currentStoryLayerIds,
+                        summaryText: trimmed
+                    )
                 }
                 await MainActor.run {
                     isSaving = false

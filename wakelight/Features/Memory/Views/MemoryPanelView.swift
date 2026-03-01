@@ -54,6 +54,8 @@ struct MemoryPanelView: View {
     private func exitMultiSelect() {
         isMultiSelectMode = false
         selectedVisitLayerIds.removeAll()
+        editingStoryTarget = nil
+        appendErrorMessage = nil
     }
 
     @State private var isMultiSelectMode: Bool = false
@@ -63,6 +65,8 @@ struct MemoryPanelView: View {
     @State private var mergeDraftSummary: String = ""
     @State private var isMerging: Bool = false
     @State private var mergeErrorMessage: String?
+    @State private var editingStoryTarget: StoryNode?
+    @State private var appendErrorMessage: String?
 
     init(
         clusters: [PlaceCluster],
@@ -103,7 +107,19 @@ struct MemoryPanelView: View {
                 Spacer()
 
                 if filterMode == .unhandled {
-                    if isMultiSelectMode {
+                    if let target = editingStoryTarget {
+                        Button(action: {
+                            Task {
+                                await appendSelectedLayersToStory(target)
+                            }
+                        }) {
+                            Text(selectedVisitLayerIds.isEmpty ? "加入" : "加入 (\(selectedVisitLayerIds.count))")
+                                .fontWeight(.bold)
+                                .foregroundColor(selectedVisitLayerIds.isEmpty ? .secondary : .blue)
+                        }
+                        .disabled(selectedVisitLayerIds.isEmpty)
+                        .frame(width: 80, alignment: .trailing)
+                    } else if isMultiSelectMode {
                         Button(action: {
                             mergeDraftSummary = ""
                             isPresentingMergeSheet = true
@@ -113,7 +129,7 @@ struct MemoryPanelView: View {
                                 .foregroundColor(selectedVisitLayerIds.count < 2 ? .secondary : .blue)
                         }
                         .disabled(selectedVisitLayerIds.count < 2)
-                        .frame(width: 60, alignment: .trailing)
+                        .frame(width: 80, alignment: .trailing)
                     } else {
                         Button("多选") {
                             withAnimation {
@@ -121,10 +137,10 @@ struct MemoryPanelView: View {
                             }
                         }
                         .font(.system(size: 15))
-                        .frame(width: 60, alignment: .trailing)
+                        .frame(width: 80, alignment: .trailing)
                     }
                 } else {
-                    Spacer().frame(width: 60)
+                    Spacer().frame(width: 80)
                 }
             }
             .padding(.horizontal, 16)
@@ -151,6 +167,27 @@ struct MemoryPanelView: View {
                 .listSectionSeparator(.hidden)
                 .onTapGesture {
                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+
+                if let target = editingStoryTarget, filterMode == .unhandled {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("正在为当前故事添加片段")
+                                .font(.subheadline.weight(.semibold))
+                            if let summary = target.mainSummary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                            if let appendErrorMessage {
+                                Text(appendErrorMessage)
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
 
                 switch filterMode {
@@ -259,15 +296,36 @@ struct MemoryPanelView: View {
                                 .padding(.vertical, 8)
                             ) {
                                 ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
-                                    StoryNodeRowView(node: node, onPreview: { keys, index in
-                                        previewLocatorKeys = keys
-                                        previewStartIndex = index
-                                    })
-                                        .padding(.vertical, 6)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
+                                    StoryNodeRowView(
+                                        node: node,
+                                        onPreview: { keys, index in
+                                            previewLocatorKeys = keys
+                                            previewStartIndex = index
+                                        },
+                                        onEdit: {
                                             selectedDetailItem = .story(node)
                                         }
+                                    )
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedDetailItem = .story(node)
+                                    }
+                                    .contextMenu {
+                                        Button {
+                                            selectedDetailItem = .story(node)
+                                        } label: {
+                                            Label("编辑故事", systemImage: "pencil")
+                                        }
+                                    }
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button {
+                                            selectedDetailItem = .story(node)
+                                        } label: {
+                                            Label("编辑", systemImage: "pencil")
+                                        }
+                                        .tint(.blue)
+                                    }
                                 }
                             }
                         }
@@ -279,9 +337,24 @@ struct MemoryPanelView: View {
                 if newValue == .story {
                     exitMultiSelect()
                 }
+                if newValue == .unhandled, editingStoryTarget != nil {
+                    isMultiSelectMode = true
+                }
             }
             .sheet(item: $selectedDetailItem) { item in
-                MemoryDetailSheet(item: item, clusterNames: viewModel.clusterNames)
+                NavigationStack {
+                    MemoryDetailSheet(
+                        item: item,
+                        clusterNames: viewModel.clusterNames,
+                        onRequestAddFromUnhandled: { story in
+                            editingStoryTarget = story
+                            filterMode = .unhandled
+                            isMultiSelectMode = true
+                            selectedVisitLayerIds.removeAll()
+                            appendErrorMessage = nil
+                        }
+                    )
+                }
             }
             .fullScreenCover(item: Binding(get: {
                 if let idx = previewStartIndex {
@@ -335,6 +408,28 @@ struct MemoryPanelView: View {
         }
         .onChange(of: selectedClusterId) { _, newValue in
             viewModel.selectedClusterId = newValue
+        }
+    }
+
+    private func appendSelectedLayersToStory(_ story: StoryNode) async {
+        guard !selectedVisitLayerIds.isEmpty else { return }
+
+        do {
+            try await AppendVisitLayersToStoryUseCase().run(
+                storyNodeId: story.id,
+                visitLayerIds: Array(selectedVisitLayerIds)
+            )
+            await MainActor.run {
+                selectedVisitLayerIds.removeAll()
+                isMultiSelectMode = false
+                editingStoryTarget = nil
+                appendErrorMessage = nil
+                filterMode = .story
+            }
+        } catch {
+            await MainActor.run {
+                appendErrorMessage = "加入失败，请重试"
+            }
         }
     }
 }
@@ -668,6 +763,7 @@ final class MemoryPanelViewModel: ObservableObject {
 private struct StoryNodeRowView: View {
     let node: StoryNode
     let onPreview: ([String], Int) -> Void
+    let onEdit: () -> Void
     @State private var timeRangeText: String?
 
     private struct StoryThumbnail: Identifiable {
@@ -681,9 +777,23 @@ private struct StoryNodeRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let timeRangeText {
-                Text(timeRangeText).font(.subheadline.weight(.medium)).foregroundColor(.secondary)
+            HStack(alignment: .center, spacing: 8) {
+                if let timeRangeText {
+                    Text(timeRangeText)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Button(action: onEdit) {
+                    Label("编辑", systemImage: "pencil")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
             }
+
             if !thumbnails.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
@@ -724,6 +834,13 @@ private struct StoryNodeRowView: View {
                     self.thumbnails = Array(locators.prefix(12)).map { StoryThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
                 }
             } catch {
+            }
+        }
+        .contextMenu {
+            Button {
+                onEdit()
+            } label: {
+                Label("编辑故事", systemImage: "pencil")
             }
         }
     }
