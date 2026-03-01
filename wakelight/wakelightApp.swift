@@ -24,6 +24,9 @@ struct wakelightApp: App {
                         print("[PhotosObserver] change inserted=\(change.insertedLocalIdentifiers.count) changed=\(change.changedLocalIdentifiers.count) removed=\(change.removedLocalIdentifiers.count)")
                         PhotoImportManager.shared.handlePhotosLibraryChange(change)
                     }
+
+                    // Resume interrupted thumbnail generation jobs (e.g. app terminated during WebDAV import).
+                    PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
                 }
         }
     }

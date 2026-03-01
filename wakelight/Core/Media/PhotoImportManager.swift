@@ -92,6 +92,60 @@ final class PhotoImportManager: ObservableObject {
         loadProgress()
     }
 
+    func resumeThumbnailBackfillIfNeeded(limit: Int = 300) {
+        Task.detached(priority: .background) {
+            do {
+                let pending = try await DatabaseContainer.shared.db.reader.read { db in
+                    let assets = try PhotoAsset
+                        .filter((Column("thumbnailPath") == nil) || (Column("thumbnailPath") == ""))
+                        .order(Column("importedAt").desc)
+                        .limit(limit)
+                        .fetchAll(db)
+
+                    let ids = assets.map(\.id)
+                    let locators = try PhotoAsset.fetchLocators(db: db, ids: ids)
+                    let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
+
+                    return assets.compactMap { asset -> (UUID, String, PhotoAsset.MediaType)? in
+                        guard let locator = locatorById[asset.id] else { return nil }
+                        let mediaType = asset.mediaType ?? .photo
+                        return (asset.id, locator.locatorKey, mediaType)
+                    }
+                }
+
+                guard !pending.isEmpty else {
+                    print("[ThumbBackfill] no pending assets")
+                    return
+                }
+
+                print("[ThumbBackfill] resume pending=\(pending.count)")
+
+                for (photoId, locatorKey, mediaType) in pending {
+                    guard let locator = MediaLocator.parse(locatorKey) else { continue }
+                    await PhotoThumbnailScheduler.shared.schedule {
+                        do {
+                            let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                            try await DatabaseContainer.shared.writer.write { db in
+                                if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
+                                    let alreadyHas = !(asset.thumbnailPath?.isEmpty ?? true)
+                                    if !alreadyHas {
+                                        asset.thumbnailPath = path
+                                        asset.thumbnailUpdatedAt = Date()
+                                        try asset.update(db)
+                                    }
+                                }
+                            }
+                        } catch {
+                            print("[ThumbBackfill] failed locator=\(locatorKey) error=\(error)")
+                        }
+                    }
+                }
+            } catch {
+                print("[ThumbBackfill] resume failed: \(error)")
+            }
+        }
+    }
+
     func cancelImport() {
         guard isRunning else { return }
         runningTask?.cancel()
