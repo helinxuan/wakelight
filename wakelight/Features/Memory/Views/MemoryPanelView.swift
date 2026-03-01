@@ -12,6 +12,8 @@ struct MemoryPanelView: View {
 
     let clusters: [PlaceCluster]
     let selectedClusterId: UUID?
+    let onHeaderDragChanged: ((DragGesture.Value) -> Void)?
+    let onHeaderDragEnded: ((DragGesture.Value) -> Void)?
 
     @StateObject private var viewModel: MemoryPanelViewModel
 
@@ -62,9 +64,16 @@ struct MemoryPanelView: View {
     @State private var isMerging: Bool = false
     @State private var mergeErrorMessage: String?
 
-    init(clusters: [PlaceCluster], selectedClusterId: UUID? = nil) {
+    init(
+        clusters: [PlaceCluster],
+        selectedClusterId: UUID? = nil,
+        onHeaderDragChanged: ((DragGesture.Value) -> Void)? = nil,
+        onHeaderDragEnded: ((DragGesture.Value) -> Void)? = nil
+    ) {
         self.clusters = clusters
         self.selectedClusterId = selectedClusterId
+        self.onHeaderDragChanged = onHeaderDragChanged
+        self.onHeaderDragEnded = onHeaderDragEnded
         _viewModel = StateObject(wrappedValue: MemoryPanelViewModel(clusters: clusters, selectedClusterId: selectedClusterId))
     }
 
@@ -121,7 +130,13 @@ struct MemoryPanelView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+            .contentShape(Rectangle())
             .background(Color(.systemBackground))
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                    .onChanged { value in onHeaderDragChanged?(value) }
+                    .onEnded { value in onHeaderDragEnded?(value) }
+            )
 
             List {
                 Section {
