@@ -22,6 +22,37 @@ final class PhotoThumbnailLoader {
         }
     }
 
+    private actor FallbackLoadLimiter {
+        private let maxConcurrent: Int
+        private var running: Int = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(maxConcurrent: Int) {
+            self.maxConcurrent = max(1, maxConcurrent)
+        }
+
+        func acquire() async {
+            if running < maxConcurrent {
+                running += 1
+                return
+            }
+
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+            running += 1
+        }
+
+        func release() {
+            if !waiters.isEmpty {
+                let next = waiters.removeFirst()
+                next.resume()
+            } else {
+                running = max(0, running - 1)
+            }
+        }
+    }
+
     private struct ThumbnailAssetLookup {
         let photoId: UUID
         let mediaType: PhotoAsset.MediaType
@@ -32,6 +63,7 @@ final class PhotoThumbnailLoader {
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let fullImageCache = NSCache<NSString, UIImage>()
     private let backfillRegistry = BackfillRegistry()
+    private let fallbackLoadLimiter = FallbackLoadLimiter(maxConcurrent: 3)
 
     private init() {
         thumbnailCache.countLimit = 200 // 缓存最近的 200 张缩略图
@@ -58,8 +90,13 @@ final class PhotoThumbnailLoader {
             print("[ThumbLoader] source=disk-miss locator=\(locatorKey) reason=no-thumbnailPath")
         }
 
-        // 3. 没找到磁盘缓存，走内存缓存/即时加载
-        let image = await loadThumbnail(locatorKey: locatorKey, size: size)
+        // 3. 没找到磁盘缓存，走受限并发的 fallback（避免首轮解码洪峰）
+        await fallbackLoadLimiter.acquire()
+        let image: UIImage?
+        do {
+            image = await loadThumbnail(locatorKey: locatorKey, size: size)
+        }
+        await fallbackLoadLimiter.release()
         print("[ThumbLoader] source=fallback-loader locator=\(locatorKey) success=\(image != nil)")
 
         // 4. 异步触发后台补齐（将该图落盘，下次就快）
