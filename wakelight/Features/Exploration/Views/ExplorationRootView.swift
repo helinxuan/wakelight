@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import AVFoundation
+import Combine
 
 struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
@@ -22,6 +24,8 @@ struct ExplorationRootView: View {
     @State private var popupText: String? = nil
     @State private var popupCityName: String = ""
     @State private var isFirstLightPopupPresented: Bool = false
+    @State private var blowUnlockSignal: Int = 0
+    @StateObject private var blowDetector = BlowDetector()
 
     var body: some View {
         ZStack {
@@ -31,6 +35,7 @@ struct ExplorationRootView: View {
                 awakenQueue: $awakenQueue,
                 isAwakenMode: $isAwakenMode,
                 revealedClusterIds: $revealedClusterIds,
+                blowUnlockSignal: $blowUnlockSignal,
                 onFirstAwakenInSession: { cluster, _ in
                     guard !didShowFirstLightPopupThisSession else { return }
                     didShowFirstLightPopupThisSession = true
@@ -211,11 +216,19 @@ struct ExplorationRootView: View {
             .ignoresSafeArea(edges: .bottom)
         }
         .animation(.easeInOut(duration: 0.22), value: awakenQueue.map(\.id))
+        .task {
+            await blowDetector.startIfNeeded()
+        }
         .onTapGesture {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
         .sheet(isPresented: $showBadges) {
             BadgeWallView()
+        }
+        .onReceive(blowDetector.$didDetectBlow.removeDuplicates()) { didDetect in
+            guard didDetect, isAwakenMode else { return }
+            blowUnlockSignal += 1
+            blowDetector.consumeDetection()
         }
         .onChange(of: isAwakenMode) { _, newValue in
             // 只要离开唤醒模式，就彻底复位本次 Session 状态（白点 + 面板 + 选中项）
@@ -228,6 +241,7 @@ struct ExplorationRootView: View {
             didShowFirstLightPopupThisSession = false
             popupText = nil
             popupCityName = ""
+            blowDetector.consumeDetection()
         }
     }
 
@@ -395,5 +409,105 @@ private struct FirstLightPopupInlineView: View {
 struct ExplorationRootView_Previews: PreviewProvider {
     static var previews: some View {
         ExplorationRootView()
+    }
+}
+
+@MainActor
+final class BlowDetector: NSObject, ObservableObject, AVAudioRecorderDelegate {
+    @Published private(set) var didDetectBlow: Bool = false
+
+    private var recorder: AVAudioRecorder?
+    private var meterTimer: Timer?
+    private var isStarted: Bool = false
+    private var didRequestPermission: Bool = false
+    private var baselineDb: Float = -60
+    private var consecutiveHits: Int = 0
+
+    func startIfNeeded() async {
+        guard !isStarted else { return }
+        isStarted = true
+
+        let granted = await requestPermissionIfNeeded()
+        guard granted else { return }
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+            try session.setActive(true, options: [])
+
+            let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("blow_detector_temp.caf")
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatAppleIMA4,
+                AVSampleRateKey: 22050,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 12800,
+                AVLinearPCMBitDepthKey: 16,
+                AVEncoderAudioQualityKey: AVAudioQuality.low.rawValue
+            ]
+
+            recorder = try AVAudioRecorder(url: url, settings: settings)
+            recorder?.isMeteringEnabled = true
+            recorder?.delegate = self
+            recorder?.prepareToRecord()
+            recorder?.record()
+
+            startMeteringLoop()
+        } catch {
+            print("[BlowDetector] failed to start: \(error)")
+        }
+    }
+
+    func consumeDetection() {
+        didDetectBlow = false
+    }
+
+    private func requestPermissionIfNeeded() async -> Bool {
+        if didRequestPermission {
+            return AVAudioSession.sharedInstance().recordPermission == .granted
+        }
+        didRequestPermission = true
+
+        return await withCheckedContinuation { continuation in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    private func startMeteringLoop() {
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            self?.sampleMeter()
+        }
+        RunLoop.main.add(meterTimer!, forMode: .common)
+    }
+
+    private func sampleMeter() {
+        guard let recorder else { return }
+        recorder.updateMeters()
+
+        let level = recorder.averagePower(forChannel: 0)
+
+        if level < -5 {
+            baselineDb = baselineDb * 0.92 + level * 0.08
+        }
+
+        let dynamicThreshold = max(-22, baselineDb + 15)
+
+        if level > dynamicThreshold {
+            consecutiveHits += 1
+        } else {
+            consecutiveHits = max(0, consecutiveHits - 1)
+        }
+
+        if consecutiveHits >= 3 {
+            didDetectBlow = true
+            consecutiveHits = 0
+        }
+    }
+
+    deinit {
+        meterTimer?.invalidate()
+        recorder?.stop()
     }
 }

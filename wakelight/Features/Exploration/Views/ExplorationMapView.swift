@@ -9,6 +9,7 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var awakenQueue: [PlaceCluster]
     @Binding var isAwakenMode: Bool
     @Binding var revealedClusterIds: Set<UUID>
+    @Binding var blowUnlockSignal: Int
 
     var onFirstAwakenInSession: ((PlaceCluster, CGPoint) -> Void)?
 
@@ -26,6 +27,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
         private var didTriggerFirstAwakenCallbackInSession: Bool = false
         private let firstAwakenPanelDelay: TimeInterval = 0.18
+        private var lastHandledBlowUnlockSignal: Int = 0
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -176,6 +178,63 @@ struct ExplorationMapView: UIViewRepresentable {
             mapView.addAnnotations(annotations)
         }
 
+        func handleBlowUnlockIfNeeded(on mapView: MKMapView) {
+            guard parent.blowUnlockSignal != lastHandledBlowUnlockSignal else { return }
+            lastHandledBlowUnlockSignal = parent.blowUnlockSignal
+            guard parent.isAwakenMode else { return }
+
+            let visibleRect = mapView.bounds
+            guard !visibleRect.isEmpty else { return }
+
+            var visibleClusters: [PlaceCluster] = []
+            visibleClusters.reserveCapacity(currentAnnotations.count)
+
+            for annotation in currentAnnotations {
+                let p = mapView.convert(annotation.coordinate, toPointTo: mapView)
+                if visibleRect.contains(p) {
+                    visibleClusters.append(annotation.cluster)
+                }
+            }
+
+            guard !visibleClusters.isEmpty else { return }
+
+            didTriggerFirstAwakenCallbackInSession = false
+            let firstCluster = visibleClusters[0]
+            let firstCoordinate = CLLocationCoordinate2D(latitude: firstCluster.centerLatitude, longitude: firstCluster.centerLongitude)
+            let firstPoint = mapView.convert(firstCoordinate, toPointTo: mapView)
+
+            Task { @MainActor in
+                for cluster in visibleClusters {
+                    parent.revealedClusterIds.insert(cluster.id)
+
+                    if !parent.awakenQueue.contains(where: { $0.id == cluster.id }) {
+                        parent.awakenQueue.append(cluster)
+                    }
+
+                    if let annotation = currentAnnotations.first(where: { $0.cluster.id == cluster.id }),
+                       let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                        view.isStoryPoint = cluster.hasStory
+                        view.isHalfRevealed = true
+                        view.updateStyle()
+                    }
+
+                    fogScreenView?.triggerDiffusion(for: cluster.id)
+                }
+
+                if parent.selectedCluster == nil || !visibleClusters.contains(where: { $0.id == parent.selectedCluster?.id }) {
+                    parent.selectedCluster = firstCluster
+                }
+
+                if !didTriggerFirstAwakenCallbackInSession {
+                    didTriggerFirstAwakenCallbackInSession = true
+                    parent.onFirstAwakenInSession?(firstCluster, firstPoint)
+                }
+
+                HapticPlayer.play(forCount: max(3, hitStreakCount + 1))
+                SystemSoundPlayer.playTick()
+            }
+        }
+
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation { return nil }
             guard let clusterAnnotation = annotation as? ClusterAnnotation else { return nil }
@@ -279,6 +338,8 @@ struct ExplorationMapView: UIViewRepresentable {
         if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
             context.coordinator.applyAnnotations(to: mapView)
         }
+
+        context.coordinator.handleBlowUnlockIfNeeded(on: mapView)
 
         for annotation in context.coordinator.currentAnnotations {
             guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
