@@ -25,6 +25,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
 
         private var didTriggerFirstAwakenCallbackInSession: Bool = false
+        private let firstAwakenPanelDelay: TimeInterval = 0.18
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -103,12 +104,13 @@ struct ExplorationMapView: UIViewRepresentable {
 
                     // 2. 业务逻辑
                     if !isAlreadyInQueue {
-                        if !didTriggerFirstAwakenCallbackInSession {
+                        let shouldTriggerFirstCallback = !didTriggerFirstAwakenCallbackInSession
+                        if shouldTriggerFirstCallback {
                             didTriggerFirstAwakenCallbackInSession = true
-                            parent.onFirstAwakenInSession?(hitCluster, point)
                         }
+
                         Task { @MainActor in
-                            parent.awakenQueue.append(hitCluster)
+                            // 先做本地 UI 响应，让光晕扩散立刻可见
                             parent.revealedClusterIds.insert(hitCluster.id)
 
                             if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
@@ -117,13 +119,36 @@ struct ExplorationMapView: UIViewRepresentable {
                                 view.updateStyle()
                             }
 
-                            // 通知屏幕层启动扩散动画
                             fogScreenView?.triggerDiffusion(for: hitCluster.id)
                             parent.selectedCluster = hitCluster
+
+                            // 首次唤醒：延后面板/AI，避免与首帧视觉反馈抢资源
+                            if shouldTriggerFirstCallback {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + self.firstAwakenPanelDelay) {
+                                    if !self.parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
+                                        self.parent.awakenQueue.append(hitCluster)
+                                    }
+                                    self.parent.onFirstAwakenInSession?(hitCluster, point)
+                                }
+                            } else {
+                                if !parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
+                                    parent.awakenQueue.append(hitCluster)
+                                }
+                            }
                         }
                     } else {
-                        if parent.selectedCluster?.id != hitCluster.id {
-                            Task { @MainActor in
+                        Task { @MainActor in
+                            if !parent.revealedClusterIds.contains(hitCluster.id) {
+                                parent.revealedClusterIds.insert(hitCluster.id)
+                                if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                                    view.isStoryPoint = hitCluster.hasStory
+                                    view.isHalfRevealed = true
+                                    view.updateStyle()
+                                }
+                                fogScreenView?.triggerDiffusion(for: hitCluster.id)
+                            }
+
+                            if parent.selectedCluster?.id != hitCluster.id {
                                 parent.selectedCluster = hitCluster
                             }
                         }

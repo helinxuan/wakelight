@@ -81,7 +81,6 @@ struct MemoryPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Unified Single-line Toolbar
             HStack(alignment: .center) {
                 if isMultiSelectMode {
                     Button("取消") {
@@ -294,10 +293,6 @@ struct MemoryPanelView: View {
             })) { preview in
                 PhotoPreviewPager(locatorKeys: previewLocatorKeys, startIndex: preview.index)
             }
-            
-            // Helper type for fullScreenCover(item:)
-            
-
         }
         .background(Color(.systemBackground))
         .sheet(isPresented: $isPresentingMergeSheet) {
@@ -351,6 +346,7 @@ private struct MergeVisitLayersSheet: View {
     @Binding var isMerging: Bool
     @Binding var errorMessage: String?
     @State private var isGeneratingAI: Bool = false
+    @State private var hasTriggeredInitialAI: Bool = false
     let onConfirm: () -> Void
     let onCancel: () -> Void
     @State private var localSummaryText: String
@@ -394,13 +390,20 @@ private struct MergeVisitLayersSheet: View {
                             .font(.caption.weight(.medium))
                             .foregroundColor(.secondary)
                             .padding(.leading, 4)
-                        
+
                         Spacer()
-                        
-                        Button(action: generateAIText) {
+
+                        Button(action: {
+                            generateAIText(showSkeleton: true)
+                        }) {
                             HStack(spacing: 4) {
-                                Image(systemName: "sparkles")
-                                Text("AI 润色")
+                                if isGeneratingAI {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                } else {
+                                    Image(systemName: "sparkles")
+                                }
+                                Text(isGeneratingAI ? "生成中" : "AI 润色")
                             }
                             .font(.caption.weight(.bold))
                             .foregroundColor(.blue)
@@ -408,19 +411,41 @@ private struct MergeVisitLayersSheet: View {
                             .padding(.vertical, 4)
                             .background(Capsule().fill(Color.blue.opacity(0.1)))
                         }
+                        .disabled(isGeneratingAI)
                     }
 
-                    TextEditor(text: $localSummaryText)
-                        .frame(minHeight: 120)
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(Color.secondary.opacity(0.08))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                        )
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(text: $localSummaryText)
+                            .frame(minHeight: 120)
+                            .padding(12)
+                            .opacity(isGeneratingAI ? 0.65 : 1)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(Color.secondary.opacity(0.08))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                            )
+
+                        if isGeneratingAI, localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.18))
+                                    .frame(height: 12)
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.16))
+                                    .frame(height: 12)
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.12))
+                                    .frame(width: 180, height: 12)
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 22)
+                            .redacted(reason: .placeholder)
+                            .allowsHitTesting(false)
+                        }
+                    }
                 }
 
                 if let errorMessage {
@@ -462,15 +487,28 @@ private struct MergeVisitLayersSheet: View {
                     Button("取消") { onCancel() }
                 }
             }
+            .task {
+                guard !hasTriggeredInitialAI else { return }
+                hasTriggeredInitialAI = true
+
+                if localSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    generateAIText(showSkeleton: true)
+                }
+            }
         }
     }
 
-    private func generateAIText() {
-        guard !visitLayers.isEmpty else { return }
+    private func generateAIText(showSkeleton: Bool = false) {
+        guard !visitLayers.isEmpty, !isGeneratingAI else { return }
+
+        if showSkeleton {
+            withAnimation(.easeOut(duration: 0.15)) {
+                localSummaryText = ""
+            }
+        }
         isGeneratingAI = true
-        
+
         Task {
-            // 1. 获取所有照片 Locator
             let allLocators: [PhotoAssetLocator] = (try? await DatabaseContainer.shared.db.reader.read { db in
                 let layerIds = visitLayers.map { $0.id }
                 let links = try VisitLayerPhotoAsset.filter(layerIds.contains(Column("visitLayerId"))).fetchAll(db)
@@ -478,19 +516,16 @@ private struct MergeVisitLayersSheet: View {
                 let photoIds = Array(Set(links.map { $0.photoAssetId }))
                 return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
             }) ?? []
-            
-            // 2. Vision 分析 (最多分析 15 张，合并场景多取几张)
+
             let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: allLocators, maxPhotos: 15)
             let keywords = analysis.topKeywords.joined(separator: "、")
-            
-            // 3. 准备 Prompt 属性
+
             let count = allLocators.count
             let timeRange = timeRangeText(visitLayers) ?? ""
-
             let uniquePlaces = Array(Set(visitLayers.map { $0.placeClusterId }))
             let placeNames = uniquePlaces.compactMap { clusterNames[$0] }.filter { !$0.isEmpty }
             let loc = placeNames.isEmpty ? "这里" : placeNames.prefix(4).joined(separator: "、")
-            
+
             let systemPrompt = """
             你是一位极度克制、真诚、绝不夸张的私人日记文案助手。
 
@@ -675,7 +710,6 @@ private struct StoryNodeRowView: View {
         .task(id: node.id) {
             await loadTimeRange()
 
-            // 监听 cover locatorKeys，确保导入删除后 UI 自动刷新
             do {
                 for try await locators in ValueObservation
                     .tracking({ db in
@@ -690,7 +724,6 @@ private struct StoryNodeRowView: View {
                     self.thumbnails = Array(locators.prefix(12)).map { StoryThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
                 }
             } catch {
-                // ignore observation errors
             }
         }
     }
@@ -770,7 +803,6 @@ private struct VisitLayerRowView: View {
         .buttonStyle(.plain)
         .onAppear { draftText = layer.userText ?? "" }
         .task {
-            // 监听 locatorKeys，确保导入删除后 UI 自动刷新
             do {
                 for try await locators in ValueObservation
                     .tracking({ db in
@@ -783,7 +815,6 @@ private struct VisitLayerRowView: View {
                     self.thumbnails = locators.map { VisitLayerThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
                 }
             } catch {
-                // ignore observation errors
             }
         }
     }
@@ -803,7 +834,6 @@ private struct VisitLayerRowView: View {
 
         let fallback = "\(timePrefix)\(loc)，留下了 \(count) 个瞬间。"
 
-        // 基于地点 + 起始时间构造一个相对稳定的缓存键
         let placeIdPart = layer.placeClusterId.uuidString
         let date = layer.startAt
         let components = Calendar.current.dateComponents([.year, .month, .day, .hour], from: date)
@@ -890,7 +920,7 @@ private struct VisitLayerRowView: View {
                             RoundedRectangle(cornerRadius: 12)
                                 .fill(Color.secondary.opacity(0.1))
                         )
-                    
+
                     Button(action: onSmartFill) {
                         Image(systemName: "sparkles")
                             .font(.system(size: 14, weight: .semibold))
@@ -899,7 +929,7 @@ private struct VisitLayerRowView: View {
                             .background(Circle().fill(Color.blue.opacity(0.1)))
                     }
                 }
-                
+
                 Button(action: onSave) {
                     HStack(spacing: 4) {
                         if isSaving {
@@ -923,45 +953,6 @@ private struct VisitLayerRowView: View {
             }
             .padding(4)
         }
-    }
-
-    private func loadLocatorKeys() async {
-        do {
-            let debugName = "IMG_2498.HEIC"
-            let keys: [PhotoAssetLocator] = try await DatabaseContainer.shared.db.reader.read { db in
-                // Debug: 打印 UI 读取侧的数据库物理路径与表计数（避免刷屏：每个 layer 都会调用，这里只在命中 debugName 时再打印）
-                let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
-                if links.isEmpty { return [] }
-                let photoIds = links.map { $0.photoAssetId }
-                let locators = try PhotoAsset.fetchLocators(db: db, ids: photoIds)
-                let locatorMap = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
-
-                // Debug: 如果某张图仍然显示某个已删除的文件名，打印其来源（visitLayerId/photoAssetId/locatorKey）
-                // 同时打印 UI 读取侧 DB 的物理路径与表计数，用于排查“导入写库”和“UI 读库”不一致。
-                for pid in photoIds {
-                    if let locator = locatorMap[pid], locator.locatorKey.localizedCaseInsensitiveContains(debugName) {
-                        let rows = try Row.fetchAll(db, sql: "PRAGMA database_list")
-                        let desc = rows.map { row in
-                            let name: String = row["name"]
-                            let file: String = row["file"]
-                            return "\(name)=\(file)"
-                        }.joined(separator: ", ")
-                        let c1 = try PhotoAsset.fetchCount(db)
-                        let c2 = try RemoteMediaAsset.fetchCount(db)
-                        let c3 = try VisitLayerPhotoAsset.fetchCount(db)
-                        print("[MemoryPanel][DB] database_list: \(desc)")
-                        print("[MemoryPanel][DB] counts: photoAsset=\(c1), remoteMediaAsset=\(c2), visitLayerPhotoAsset=\(c3)")
-
-                        print("[MemoryPanel][Debug2500] visitLayerId=\(layer.id) photoAssetId=\(pid) locatorKey=\(locator.locatorKey)")
-                    }
-                }
-
-                return photoIds.compactMap { locatorMap[$0] }
-            }
-            await MainActor.run {
-                self.thumbnails = keys.map { VisitLayerThumbnail(locatorKey: $0.locatorKey, hasRaw: $0.hasRaw, hasLive: $0.hasLive) }
-            }
-        } catch {}
     }
 
     private func save() {

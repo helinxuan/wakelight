@@ -29,19 +29,19 @@ enum StardustEmitter {
 
         let cell = CAEmitterCell()
         cell.contents = cachedDotImage?.cgImage
-        // 收短粒子可见时长，避免“拖尾停留太久”的观感
-        cell.birthRate = 135
-        cell.lifetime = 0.26
-        cell.lifetimeRange = 0.08
-        cell.velocity = 115
-        cell.velocityRange = 45
+        // 适当拉回可见时间，保证“看得见但不拖尾”
+        cell.birthRate = 120
+        cell.lifetime = 0.34
+        cell.lifetimeRange = 0.10
+        cell.velocity = 108
+        cell.velocityRange = 42
         cell.emissionRange = .pi * 2
-        cell.scale = 0.03
+        cell.scale = 0.032
         cell.scaleRange = 0.02
-        cell.alphaSpeed = -4.2
-        cell.yAcceleration = 170
-        cell.spin = 1.6
-        cell.spinRange = 2.2
+        cell.alphaSpeed = -3.6
+        cell.yAcceleration = 160
+        cell.spin = 1.5
+        cell.spinRange = 2.0
 
         emitter.emitterCells = [cell]
         view.layer.addSublayer(emitter)
