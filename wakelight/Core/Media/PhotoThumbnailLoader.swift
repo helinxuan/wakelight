@@ -3,6 +3,7 @@ import Photos
 import UIKit
 import SwiftUI
 import GRDB
+import AVFoundation
 
 final class PhotoThumbnailLoader {
     static let shared = PhotoThumbnailLoader()
@@ -201,14 +202,21 @@ final class PhotoThumbnailLoader {
             return await loadThumbnailFromPhotos(localIdentifier: localIdentifier, size: size)
         case .webdav, .file:
             do {
+                let mediaType = try await lookupMediaType(for: locator.stableKey)
                 let resource = try await MediaResolver.shared.resolve(locator: locator)
                 switch resource {
                 case .data(let data):
                     print("[ThumbLoader] fallback-resource=data-bytes locator=\(locator.stableKey) bytes=\(data.count)")
+                    if mediaType == .video {
+                        return generateVideoThumbnailFromData(data, size: size)
+                    }
                     return UIImage(data: data)
                 case .url(let url):
                     let isLocal = url.isFileURL
                     print("[ThumbLoader] fallback-resource=url locator=\(locator.stableKey) isFileURL=\(isLocal) path=\(url.path)")
+                    if mediaType == .video || isLikelyVideo(path: url.path) {
+                        return generateVideoThumbnailFromURL(url, size: size)
+                    }
                     return UIImage(contentsOfFile: url.path)
                 case .phAsset(let asset):
                     print("[ThumbLoader] fallback-resource=phAsset locator=\(locator.stableKey) localIdentifier=\(asset.localIdentifier)")
@@ -239,6 +247,68 @@ final class PhotoThumbnailLoader {
             } catch {
                 return nil
             }
+        }
+    }
+
+    private func lookupMediaType(for locatorKey: String) async throws -> PhotoAsset.MediaType? {
+        try await DatabaseContainer.shared.db.reader.read { db in
+            if let asset = try PhotoAsset.filter(Column("localIdentifier") == locatorKey).fetchOne(db) {
+                return asset.mediaType
+            }
+
+            guard let locator = MediaLocator.parse(locatorKey) else { return nil }
+
+            switch locator {
+            case .library(let id):
+                return try PhotoAsset.filter(Column("localIdentifier") == id).fetchOne(db)?.mediaType
+            case .webdav(let profileIdRaw, let remotePath):
+                guard let profileId = UUID(uuidString: profileIdRaw) else { return nil }
+                guard let remote = try RemoteMediaAsset
+                    .filter(Column("profileId") == profileId && Column("remotePath") == remotePath)
+                    .fetchOne(db) else { return nil }
+                return try PhotoAsset.fetchOne(db, key: remote.photoAssetId)?.mediaType
+            case .file:
+                return nil
+            }
+        }
+    }
+
+    private func isLikelyVideo(path: String) -> Bool {
+        let lower = path.lowercased()
+        return lower.hasSuffix(".mp4") || lower.hasSuffix(".mov") || lower.hasSuffix(".m4v")
+    }
+
+    private func generateVideoThumbnailFromURL(_ url: URL, size: CGSize) -> UIImage? {
+        let asset = AVURLAsset(url: url)
+        return generateVideoThumbnail(from: asset, size: size)
+    }
+
+    private func generateVideoThumbnailFromData(_ data: Data, size: CGSize) -> UIImage? {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".tmp")
+        do {
+            try data.write(to: tempURL)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+            let asset = AVURLAsset(url: tempURL)
+            return generateVideoThumbnail(from: asset, size: size)
+        } catch {
+            return nil
+        }
+    }
+
+    private func generateVideoThumbnail(from asset: AVAsset, size: CGSize) -> UIImage? {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = size
+
+        let durationSeconds = CMTimeGetSeconds(asset.duration)
+        let sampleTimeSeconds = durationSeconds.isFinite && durationSeconds > 0 ? min(durationSeconds * 0.33, 2.0) : 0.0
+        let time = CMTime(seconds: sampleTimeSeconds, preferredTimescale: 600)
+
+        do {
+            let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+            return UIImage(cgImage: cgImage)
+        } catch {
+            return nil
         }
     }
 
