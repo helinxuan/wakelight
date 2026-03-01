@@ -36,12 +36,21 @@ struct ExplorationMapView: UIViewRepresentable {
             pan.cancelsTouchesInView = false
             mapView.addGestureRecognizer(pan)
             self.panGesture = pan
+
+            // 预热触觉/音频/粒子资源，避免首次刮开同帧初始化导致卡顿
+            HapticPlayer.warmUpIfNeeded()
+            SystemSoundPlayer.warmUpIfNeeded()
+            StardustEmitter.warmUpIfNeeded()
         }
 
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard parent.isAwakenMode else { return }
             let mapView = gesture.view as! MKMapView
             let location = gesture.location(in: mapView)
+
+            #if DEBUG
+            let panStart = CACurrentMediaTime()
+            #endif
             
             switch gesture.state {
             case .began:
@@ -85,7 +94,11 @@ struct ExplorationMapView: UIViewRepresentable {
                         } else {
                             StardustEmitter.emit(at: point, in: mapView)
                         }
-                        
+
+                        #if DEBUG
+                        let ms = (CACurrentMediaTime() - panStart) * 1000
+                        print(String(format: "[Perf][AwakenPan] feedback chain %.2fms", ms))
+                        #endif
                     }
 
                     // 2. 业务逻辑
