@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ExplorationRootView: View {
     @StateObject private var viewModel = ExploreViewModel()
@@ -9,8 +10,13 @@ struct ExplorationRootView: View {
     @State private var showBadges: Bool = false
     @State private var panelHeight: CGFloat = 380
     @State private var panelCityName: String? = nil
+    @State private var dragStartPanelHeight: CGFloat? = nil
     private let minPanelHeight: CGFloat = 120
     private let defaultPanelHeight: CGFloat = 380
+    private var dragHandleHotZoneHeight: CGFloat {
+        // 仅在“点击再看”提示条出现时预留额外高度，避免顶部出现过大空白
+        (popupText != nil && !isFirstLightPopupPresented) ? 83 : 28
+    }
 
     @State private var didShowFirstLightPopupThisSession: Bool = false
     @State private var popupText: String? = nil
@@ -42,31 +48,21 @@ struct ExplorationRootView: View {
             .ignoresSafeArea()
 
             if isFirstLightPopupPresented, let popupText {
-                ZStack {
-                    Color.black.opacity(0.001)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture {
+                VStack {
+                    FirstLightPopupInlineView(
+                        cityName: popupCityName,
+                        text: popupText,
+                        onClose: {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 self.isFirstLightPopupPresented = false
-                                self.panelHeight = minPanelHeight
                             }
                         }
+                    )
+                    .padding(.top, 90)
 
-                    VStack {
-                        FirstLightPopupInlineView(
-                            cityName: popupCityName,
-                            text: popupText
-                        )
-                        .onTapGesture {
-                            // 点击弹窗本体不关闭
-                        }
-                        .padding(.top, 90)
-
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Spacer()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .zIndex(999)
                 .transition(.opacity)
             }
@@ -167,6 +163,7 @@ struct ExplorationRootView: View {
                                 .padding(.bottom, 8)
                         }
                         .frame(maxWidth: .infinity)
+                        .frame(height: dragHandleHotZoneHeight, alignment: .top)
                         .contentShape(Rectangle())
                         .background(Color(.systemBackground))
                         .task(id: awakenQueue.map(\.id)) {
@@ -175,35 +172,30 @@ struct ExplorationRootView: View {
                                 await MainActor.run {
                                     self.panelCityName = name
                                 }
-                            }else {
+                            } else {
                                 await MainActor.run {
                                     self.panelCityName = nil
                                 }
                             }
                         }
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    let newHeight = panelHeight - value.translation.height
-                                    panelHeight = max(minPanelHeight, min(defaultPanelHeight + 40, newHeight))
-                                }
-                                .onEnded { _ in
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                        if panelHeight < (defaultPanelHeight + minPanelHeight) / 2 {
-                                            panelHeight = minPanelHeight
-                                        }else {
-                                            panelHeight = defaultPanelHeight
-                                        }
-                                    }
-                                }
-                        )
+                        .highPriorityGesture(panelDragGesture)
+                        .simultaneousGesture(panelDragGesture)
 
                         // 始终保留 MemoryPanelView 以维持其内部多选状态，仅通过高度和透明度控制视觉隐藏
                         VStack(spacing: 0) {
-                            MemoryPanelView(clusters: awakenQueue, selectedClusterId: selectedCluster?.id)
-                                .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
-                                .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
-                                .clipped()
+                            MemoryPanelView(
+                                clusters: awakenQueue,
+                                selectedClusterId: selectedCluster?.id,
+                                onHeaderDragChanged: { value in
+                                    handlePanelDragChanged(value)
+                                },
+                                onHeaderDragEnded: { value in
+                                    handlePanelDragEnded(value)
+                                }
+                            )
+                            .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
+                            .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
+                            .clipped()
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -237,6 +229,58 @@ struct ExplorationRootView: View {
             popupText = nil
             popupCityName = ""
         }
+    }
+
+    private var maxPanelHeight: CGFloat {
+        let screenHeight = UIScreen.main.bounds.height
+        let bottomInset = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first(where: { $0.isKeyWindow })?
+            .safeAreaInsets.bottom ?? 0
+
+        let dynamicMax = screenHeight * 0.82 - bottomInset
+        return max(defaultPanelHeight + 40, dynamicMax)
+    }
+
+    private var panelDragGesture: some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
+            .onChanged { value in
+                handlePanelDragChanged(value)
+            }
+            .onEnded { value in
+                handlePanelDragEnded(value)
+            }
+    }
+
+    private func handlePanelDragChanged(_ value: DragGesture.Value) {
+        if dragStartPanelHeight == nil {
+            dragStartPanelHeight = panelHeight
+        }
+
+        let start = dragStartPanelHeight ?? panelHeight
+        let newHeight = start - value.translation.height
+        panelHeight = max(minPanelHeight, min(maxPanelHeight, newHeight))
+    }
+
+    private func handlePanelDragEnded(_ value: DragGesture.Value) {
+        let current = max(minPanelHeight, min(maxPanelHeight, panelHeight))
+        let lowerSnapThreshold = minPanelHeight + 28
+        let upperSnapThreshold = maxPanelHeight - 40
+
+        let target: CGFloat
+        if current <= lowerSnapThreshold || value.predictedEndTranslation.height > 140 {
+            target = minPanelHeight
+        } else if current >= upperSnapThreshold || value.predictedEndTranslation.height < -180 {
+            target = maxPanelHeight
+        } else {
+            target = current
+        }
+
+        withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.86)) {
+            panelHeight = target
+        }
+        dragStartPanelHeight = nil
     }
 
     private func generateFirstLightText(for cluster: PlaceCluster, resolvedCity: String) {
@@ -298,6 +342,7 @@ struct ExplorationRootView: View {
 private struct FirstLightPopupInlineView: View {
     let cityName: String
     let text: String
+    let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -307,15 +352,27 @@ private struct FirstLightPopupInlineView: View {
                     .foregroundStyle(.yellow)
 
                 Spacer(minLength: 0)
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.primary.opacity(0.75))
+                        .frame(width: 26, height: 26)
+                        .background(
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                        )
+                }
+                .buttonStyle(.plain)
             }
 
             Text(cityName)
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.primary)
 
             Text(text)
                 .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(Color.primary.opacity(0.82))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(nil)
                 .multilineTextAlignment(.leading)
@@ -325,13 +382,13 @@ private struct FirstLightPopupInlineView: View {
         .frame(width: 300)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(Color(.systemBackground).opacity(0.84))
                 .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                 )
         )
-        .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 10)
     }
 }
 
