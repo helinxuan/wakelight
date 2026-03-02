@@ -29,10 +29,14 @@ struct ExplorationMapView: UIViewRepresentable {
         private let firstAwakenPanelDelay: TimeInterval = 0.18
         private var lastHandledBlowUnlockSignal: Int = 0
 
-        private var blowSweepLayer: CAShapeLayer?
+        private var blowSweepContainerLayer: CALayer?
+        private var blowSweepGlowGradient: CAGradientLayer?
+        private var blowSweepCoreGradient: CAGradientLayer?
+        private var blowSweepGlowMask: CAShapeLayer?
+        private var blowSweepCoreMask: CAShapeLayer?
         private var blowSweepDisplayLink: CADisplayLink?
         private var blowSweepStartTime: CFTimeInterval = 0
-        private let blowSweepDuration: CFTimeInterval = 1.05
+        private let blowSweepDuration: CFTimeInterval = 2.4
         private var blowSweepMapView: MKMapView?
         private var blowSweepStartY: CGFloat = 0
         private var blowSweepEndY: CGFloat = 0
@@ -223,18 +227,71 @@ struct ExplorationMapView: UIViewRepresentable {
             blowSweepStartY = h + 40
             blowSweepEndY = -30
 
-            let pathLayer = CAShapeLayer()
-            pathLayer.frame = mapView.bounds
-            pathLayer.fillColor = UIColor.clear.cgColor
-            pathLayer.strokeColor = UIColor.white.withAlphaComponent(0.85).cgColor
-            pathLayer.lineWidth = 3.0
-            pathLayer.lineCap = .round
-            pathLayer.shadowColor = UIColor.white.cgColor
-            pathLayer.shadowRadius = 12
-            pathLayer.shadowOpacity = 0.95
-            pathLayer.shadowOffset = .zero
-            mapView.layer.addSublayer(pathLayer)
-            blowSweepLayer = pathLayer
+            let container = CALayer()
+            container.frame = mapView.bounds
+            container.masksToBounds = false
+            mapView.layer.addSublayer(container)
+            blowSweepContainerLayer = container
+
+            let glowMask = CAShapeLayer()
+            glowMask.frame = container.bounds
+            glowMask.fillColor = UIColor.clear.cgColor
+            glowMask.strokeColor = UIColor.white.cgColor
+            glowMask.lineWidth = 18.0
+            glowMask.lineCap = .round
+            glowMask.lineJoin = .round
+            blowSweepGlowMask = glowMask
+
+            let glowGradient = CAGradientLayer()
+            glowGradient.frame = container.bounds
+            glowGradient.startPoint = CGPoint(x: 0, y: 0.5)
+            glowGradient.endPoint = CGPoint(x: 1, y: 0.5)
+            glowGradient.colors = [
+                UIColor.white.withAlphaComponent(0.0).cgColor,
+                UIColor.white.withAlphaComponent(0.16).cgColor,
+                UIColor.white.withAlphaComponent(0.34).cgColor,
+                UIColor.white.withAlphaComponent(0.50).cgColor,
+                UIColor.white.withAlphaComponent(0.34).cgColor,
+                UIColor.white.withAlphaComponent(0.16).cgColor,
+                UIColor.white.withAlphaComponent(0.0).cgColor
+            ]
+            glowGradient.locations = [0.0, 0.18, 0.36, 0.5, 0.64, 0.82, 1.0]
+            glowGradient.mask = glowMask
+            container.addSublayer(glowGradient)
+            blowSweepGlowGradient = glowGradient
+
+            let coreMask = CAShapeLayer()
+            coreMask.frame = container.bounds
+            coreMask.fillColor = UIColor.clear.cgColor
+            coreMask.strokeColor = UIColor.white.cgColor
+            coreMask.lineWidth = 5.0
+            coreMask.lineCap = .round
+            coreMask.lineJoin = .round
+            blowSweepCoreMask = coreMask
+
+            let coreGradient = CAGradientLayer()
+            coreGradient.frame = container.bounds
+            coreGradient.startPoint = CGPoint(x: 0, y: 0.5)
+            coreGradient.endPoint = CGPoint(x: 1, y: 0.5)
+            coreGradient.colors = [
+                UIColor.white.withAlphaComponent(0.0).cgColor,
+                UIColor.white.withAlphaComponent(0.28).cgColor,
+                UIColor.white.withAlphaComponent(0.52).cgColor,
+                UIColor.white.withAlphaComponent(0.74).cgColor,
+                UIColor.white.withAlphaComponent(0.88).cgColor,
+                UIColor.white.withAlphaComponent(0.74).cgColor,
+                UIColor.white.withAlphaComponent(0.52).cgColor,
+                UIColor.white.withAlphaComponent(0.28).cgColor,
+                UIColor.white.withAlphaComponent(0.0).cgColor
+            ]
+            coreGradient.locations = [0.0, 0.14, 0.28, 0.42, 0.5, 0.58, 0.72, 0.86, 1.0]
+            coreGradient.mask = coreMask
+            coreGradient.shadowColor = UIColor.white.cgColor
+            coreGradient.shadowRadius = 12
+            coreGradient.shadowOpacity = 0.9
+            coreGradient.shadowOffset = .zero
+            container.addSublayer(coreGradient)
+            blowSweepCoreGradient = coreGradient
 
             let link = CADisplayLink(target: self, selector: #selector(handleBlowSweepFrame))
             link.add(to: .main, forMode: .common)
@@ -262,23 +319,35 @@ struct ExplorationMapView: UIViewRepresentable {
         private func updateBlowSweep(at progress: CGFloat, mapView: MKMapView) {
             let p = easeOut(progress)
             let y = blowSweepStartY + (blowSweepEndY - blowSweepStartY) * p
-            let centerX = mapView.bounds.midX
-            let current = CGPoint(x: centerX, y: y)
 
-            if let layer = blowSweepLayer {
-                let path = UIBezierPath()
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: mapView.bounds.width, y: y))
-                layer.path = path.cgPath
-                layer.opacity = Float(1 - p * 0.45)
+            let left = CGPoint(x: -24, y: y)
+            let right = CGPoint(x: mapView.bounds.width + 24, y: y)
+
+            let baseArcHeight = max(72, min(140, mapView.bounds.width * 0.18))
+            let arcBreath = 0.9 + 0.24 * sin(progress * .pi)
+            let arcDriftX = sin(progress * .pi * 1.2) * mapView.bounds.width * 0.03
+            let control = CGPoint(x: mapView.bounds.midX + arcDriftX, y: y - baseArcHeight * arcBreath)
+
+            let path = UIBezierPath()
+            path.move(to: left)
+            path.addQuadCurve(to: right, controlPoint: control)
+
+            blowSweepGlowMask?.path = path.cgPath
+            blowSweepCoreMask?.path = path.cgPath
+
+            let fade = Float(1 - p * 0.38)
+            let pulse = Float(0.92 + 0.08 * sin(progress * .pi * 1.6))
+            blowSweepGlowGradient?.opacity = fade * pulse
+            blowSweepCoreGradient?.opacity = min(1.0, (fade + 0.12) * pulse)
+
+            let sampleCount = max(30, Int(mapView.bounds.width / 16))
+            for i in 0...sampleCount {
+                let t = CGFloat(i) / CGFloat(sampleCount)
+                let samplePoint = pointOnQuadratic(from: left, control: control, to: right, t: t)
+                processInteraction(at: samplePoint, in: mapView)
             }
 
-            let sampleStep: CGFloat = 24
-            var x: CGFloat = 0
-            while x <= mapView.bounds.width {
-                processInteraction(at: CGPoint(x: x, y: y), in: mapView)
-                x += sampleStep
-            }
+            let current = pointOnQuadratic(from: left, control: control, to: right, t: 0.5)
             processInteraction(at: current, in: mapView)
 
             if !blowSweepDidTriggerStartFeedback {
@@ -298,12 +367,28 @@ struct ExplorationMapView: UIViewRepresentable {
             blowSweepDisplayLink = nil
             blowSweepMapView = nil
 
-            blowSweepLayer?.removeFromSuperlayer()
-            blowSweepLayer = nil
+            blowSweepCoreGradient?.removeFromSuperlayer()
+            blowSweepGlowGradient?.removeFromSuperlayer()
+            blowSweepContainerLayer?.removeFromSuperlayer()
+
+            blowSweepCoreGradient = nil
+            blowSweepGlowGradient = nil
+            blowSweepCoreMask = nil
+            blowSweepGlowMask = nil
+            blowSweepContainerLayer = nil
         }
 
         private func easeOut(_ t: CGFloat) -> CGFloat {
             1 - pow(1 - t, 3)
+        }
+
+        private func pointOnQuadratic(from p0: CGPoint, control p1: CGPoint, to p2: CGPoint, t: CGFloat) -> CGPoint {
+            let u = 1 - t
+            let tt = t * t
+            let uu = u * u
+            let x = uu * p0.x + 2 * u * t * p1.x + tt * p2.x
+            let y = uu * p0.y + 2 * u * t * p1.y + tt * p2.y
+            return CGPoint(x: x, y: y)
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
