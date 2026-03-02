@@ -29,6 +29,16 @@ struct ExplorationMapView: UIViewRepresentable {
         private let firstAwakenPanelDelay: TimeInterval = 0.18
         private var lastHandledBlowUnlockSignal: Int = 0
 
+        private var blowSweepLayer: CAShapeLayer?
+        private var blowSweepDisplayLink: CADisplayLink?
+        private var blowSweepStartTime: CFTimeInterval = 0
+        private let blowSweepDuration: CFTimeInterval = 1.05
+        private var blowSweepMapView: MKMapView?
+        private var blowSweepStartY: CGFloat = 0
+        private var blowSweepEndY: CGFloat = 0
+        private var blowSweepDidTriggerStartFeedback: Bool = false
+        private var blowSweepDidTriggerMidFeedback: Bool = false
+
         init(parent: ExplorationMapView) {
             self.parent = parent
         }
@@ -51,111 +61,111 @@ struct ExplorationMapView: UIViewRepresentable {
             let mapView = gesture.view as! MKMapView
             let location = gesture.location(in: mapView)
 
-            #if DEBUG
-            let panStart = CACurrentMediaTime()
-            #endif
-            
             switch gesture.state {
             case .began:
                 didTriggerFirstAwakenCallbackInSession = false
                 return
             case .changed:
-                break
+                processInteraction(at: location, in: mapView)
             default:
                 return
             }
+        }
+
+        private func processInteraction(at location: CGPoint, in mapView: MKMapView) {
+            #if DEBUG
+            let panStart = CACurrentMediaTime()
+            #endif
 
             let hitRect = CGRect(x: location.x - 22, y: location.y - 22, width: 44, height: 44)
 
             for annotation in currentAnnotations {
                 let point = mapView.convert(annotation.coordinate, toPointTo: mapView)
                 if hitRect.contains(point) {
-                    let hitCluster = annotation.cluster
-                    let isAlreadyInQueue = parent.awakenQueue.contains(where: { $0.id == hitCluster.id })
+                    handleClusterHit(annotation: annotation, point: point, mapView: mapView)
 
-                    // 1. 视觉/触觉反馈控制
-                    let now = CACurrentMediaTime()
-                    
-                    // 只有切换了 Cluster，或者在同一个 Cluster 上停留超过 0.1s 才再次触发反馈
-                    let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.5)
+                    #if DEBUG
+                    let ms = (CACurrentMediaTime() - panStart) * 1000
+                    print(String(format: "[Perf][AwakenPan] feedback chain %.2fms", ms))
+                    #endif
+                    return
+                }
+            }
+        }
 
-                    if shouldTriggerFeedback {
-                        if now - lastHitTime > 0.8 {
-                            hitStreakCount = 0
-                        }
-                        lastHitTime = now
-                        lastFeedbackTime = now
-                        lastHitClusterId = hitCluster.id
-                        hitStreakCount += 1
+        private func handleClusterHit(annotation: ClusterAnnotation, point: CGPoint, mapView: MKMapView) {
+            let hitCluster = annotation.cluster
+            let isAlreadyInQueue = parent.awakenQueue.contains(where: { $0.id == hitCluster.id })
 
-                        HapticPlayer.play(forCount: hitStreakCount)
-                        SystemSoundPlayer.playTick()
+            let now = CACurrentMediaTime()
+            let shouldTriggerFeedback = hitCluster.id != lastHitClusterId || (now - lastFeedbackTime > 0.5)
 
-                        if let fogView = fogScreenView {
-                            let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
-                            StardustEmitter.emit(at: screenPoint, in: fogView)
-                        } else {
-                            StardustEmitter.emit(at: point, in: mapView)
-                        }
+            if shouldTriggerFeedback {
+                if now - lastHitTime > 0.8 {
+                    hitStreakCount = 0
+                }
+                lastHitTime = now
+                lastFeedbackTime = now
+                lastHitClusterId = hitCluster.id
+                hitStreakCount += 1
 
-                        #if DEBUG
-                        let ms = (CACurrentMediaTime() - panStart) * 1000
-                        print(String(format: "[Perf][AwakenPan] feedback chain %.2fms", ms))
-                        #endif
+                HapticPlayer.play(forCount: hitStreakCount)
+                SystemSoundPlayer.playTick()
+
+                if let fogView = fogScreenView {
+                    let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
+                    StardustEmitter.emit(at: screenPoint, in: fogView)
+                } else {
+                    StardustEmitter.emit(at: point, in: mapView)
+                }
+            }
+
+            if !isAlreadyInQueue {
+                let shouldTriggerFirstCallback = !didTriggerFirstAwakenCallbackInSession
+                if shouldTriggerFirstCallback {
+                    didTriggerFirstAwakenCallbackInSession = true
+                }
+
+                Task { @MainActor in
+                    parent.revealedClusterIds.insert(hitCluster.id)
+
+                    if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                        view.isStoryPoint = hitCluster.hasStory
+                        view.isHalfRevealed = true
+                        view.updateStyle()
                     }
 
-                    // 2. 业务逻辑
-                    if !isAlreadyInQueue {
-                        let shouldTriggerFirstCallback = !didTriggerFirstAwakenCallbackInSession
-                        if shouldTriggerFirstCallback {
-                            didTriggerFirstAwakenCallbackInSession = true
-                        }
+                    fogScreenView?.triggerDiffusion(for: hitCluster.id)
+                    parent.selectedCluster = hitCluster
 
-                        Task { @MainActor in
-                            // 先做本地 UI 响应，让光晕扩散立刻可见
-                            parent.revealedClusterIds.insert(hitCluster.id)
-
-                            if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
-                                view.isStoryPoint = hitCluster.hasStory
-                                view.isHalfRevealed = true
-                                view.updateStyle()
+                    if shouldTriggerFirstCallback {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + self.firstAwakenPanelDelay) {
+                            if !self.parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
+                                self.parent.awakenQueue.append(hitCluster)
                             }
-
-                            fogScreenView?.triggerDiffusion(for: hitCluster.id)
-                            parent.selectedCluster = hitCluster
-
-                            // 首次唤醒：延后面板/AI，避免与首帧视觉反馈抢资源
-                            if shouldTriggerFirstCallback {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + self.firstAwakenPanelDelay) {
-                                    if !self.parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
-                                        self.parent.awakenQueue.append(hitCluster)
-                                    }
-                                    self.parent.onFirstAwakenInSession?(hitCluster, point)
-                                }
-                            } else {
-                                if !parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
-                                    parent.awakenQueue.append(hitCluster)
-                                }
-                            }
+                            self.parent.onFirstAwakenInSession?(hitCluster, point)
                         }
                     } else {
-                        Task { @MainActor in
-                            if !parent.revealedClusterIds.contains(hitCluster.id) {
-                                parent.revealedClusterIds.insert(hitCluster.id)
-                                if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
-                                    view.isStoryPoint = hitCluster.hasStory
-                                    view.isHalfRevealed = true
-                                    view.updateStyle()
-                                }
-                                fogScreenView?.triggerDiffusion(for: hitCluster.id)
-                            }
-
-                            if parent.selectedCluster?.id != hitCluster.id {
-                                parent.selectedCluster = hitCluster
-                            }
+                        if !parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
+                            parent.awakenQueue.append(hitCluster)
                         }
                     }
-                    return
+                }
+            } else {
+                Task { @MainActor in
+                    if !parent.revealedClusterIds.contains(hitCluster.id) {
+                        parent.revealedClusterIds.insert(hitCluster.id)
+                        if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
+                            view.isStoryPoint = hitCluster.hasStory
+                            view.isHalfRevealed = true
+                            view.updateStyle()
+                        }
+                        fogScreenView?.triggerDiffusion(for: hitCluster.id)
+                    }
+
+                    if parent.selectedCluster?.id != hitCluster.id {
+                        parent.selectedCluster = hitCluster
+                    }
                 }
             }
         }
@@ -186,53 +196,114 @@ struct ExplorationMapView: UIViewRepresentable {
             let visibleRect = mapView.bounds
             guard !visibleRect.isEmpty else { return }
 
-            var visibleClusters: [PlaceCluster] = []
-            visibleClusters.reserveCapacity(currentAnnotations.count)
+            var visibleAnnotations: [ClusterAnnotation] = []
+            visibleAnnotations.reserveCapacity(currentAnnotations.count)
 
             for annotation in currentAnnotations {
                 let p = mapView.convert(annotation.coordinate, toPointTo: mapView)
                 if visibleRect.contains(p) {
-                    visibleClusters.append(annotation.cluster)
+                    visibleAnnotations.append(annotation)
                 }
             }
 
-            guard !visibleClusters.isEmpty else { return }
+            guard !visibleAnnotations.isEmpty else { return }
+            startBlowSweep(on: mapView, visibleAnnotations: visibleAnnotations)
+        }
 
+        private func startBlowSweep(on mapView: MKMapView, visibleAnnotations: [ClusterAnnotation]) {
+            stopBlowSweepIfNeeded()
             didTriggerFirstAwakenCallbackInSession = false
-            let firstCluster = visibleClusters[0]
-            let firstCoordinate = CLLocationCoordinate2D(latitude: firstCluster.centerLatitude, longitude: firstCluster.centerLongitude)
-            let firstPoint = mapView.convert(firstCoordinate, toPointTo: mapView)
 
-            Task { @MainActor in
-                for cluster in visibleClusters {
-                    parent.revealedClusterIds.insert(cluster.id)
+            blowSweepMapView = mapView
+            blowSweepStartTime = CACurrentMediaTime()
+            blowSweepDidTriggerStartFeedback = false
+            blowSweepDidTriggerMidFeedback = false
 
-                    if !parent.awakenQueue.contains(where: { $0.id == cluster.id }) {
-                        parent.awakenQueue.append(cluster)
-                    }
+            let h = mapView.bounds.height
+            blowSweepStartY = h + 40
+            blowSweepEndY = -30
 
-                    if let annotation = currentAnnotations.first(where: { $0.cluster.id == cluster.id }),
-                       let view = mapView.view(for: annotation) as? LightPointAnnotationView {
-                        view.isStoryPoint = cluster.hasStory
-                        view.isHalfRevealed = true
-                        view.updateStyle()
-                    }
+            let pathLayer = CAShapeLayer()
+            pathLayer.frame = mapView.bounds
+            pathLayer.fillColor = UIColor.clear.cgColor
+            pathLayer.strokeColor = UIColor.white.withAlphaComponent(0.85).cgColor
+            pathLayer.lineWidth = 3.0
+            pathLayer.lineCap = .round
+            pathLayer.shadowColor = UIColor.white.cgColor
+            pathLayer.shadowRadius = 12
+            pathLayer.shadowOpacity = 0.95
+            pathLayer.shadowOffset = .zero
+            mapView.layer.addSublayer(pathLayer)
+            blowSweepLayer = pathLayer
 
-                    fogScreenView?.triggerDiffusion(for: cluster.id)
-                }
+            let link = CADisplayLink(target: self, selector: #selector(handleBlowSweepFrame))
+            link.add(to: .main, forMode: .common)
+            blowSweepDisplayLink = link
 
-                if parent.selectedCluster == nil || !visibleClusters.contains(where: { $0.id == parent.selectedCluster?.id }) {
-                    parent.selectedCluster = firstCluster
-                }
+            updateBlowSweep(at: 0, mapView: mapView)
+        }
 
-                if !didTriggerFirstAwakenCallbackInSession {
-                    didTriggerFirstAwakenCallbackInSession = true
-                    parent.onFirstAwakenInSession?(firstCluster, firstPoint)
-                }
+        @objc private func handleBlowSweepFrame() {
+            guard let mapView = blowSweepMapView else {
+                stopBlowSweepIfNeeded()
+                return
+            }
 
-                HapticPlayer.play(forCount: max(3, hitStreakCount + 1))
+            let elapsed = CACurrentMediaTime() - blowSweepStartTime
+            let progress = min(1, elapsed / blowSweepDuration)
+
+            updateBlowSweep(at: progress, mapView: mapView)
+
+            if progress >= 1 {
+                stopBlowSweepIfNeeded()
+            }
+        }
+
+        private func updateBlowSweep(at progress: CGFloat, mapView: MKMapView) {
+            let p = easeOut(progress)
+            let y = blowSweepStartY + (blowSweepEndY - blowSweepStartY) * p
+            let centerX = mapView.bounds.midX
+            let current = CGPoint(x: centerX, y: y)
+
+            if let layer = blowSweepLayer {
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: mapView.bounds.width, y: y))
+                layer.path = path.cgPath
+                layer.opacity = Float(1 - p * 0.45)
+            }
+
+            let sampleStep: CGFloat = 24
+            var x: CGFloat = 0
+            while x <= mapView.bounds.width {
+                processInteraction(at: CGPoint(x: x, y: y), in: mapView)
+                x += sampleStep
+            }
+            processInteraction(at: current, in: mapView)
+
+            if !blowSweepDidTriggerStartFeedback {
+                blowSweepDidTriggerStartFeedback = true
+                HapticPlayer.play(forCount: max(2, hitStreakCount + 1))
                 SystemSoundPlayer.playTick()
             }
+
+            if progress >= 0.4, !blowSweepDidTriggerMidFeedback {
+                blowSweepDidTriggerMidFeedback = true
+                HapticPlayer.play(forCount: max(3, hitStreakCount + 1))
+            }
+        }
+
+        private func stopBlowSweepIfNeeded() {
+            blowSweepDisplayLink?.invalidate()
+            blowSweepDisplayLink = nil
+            blowSweepMapView = nil
+
+            blowSweepLayer?.removeFromSuperlayer()
+            blowSweepLayer = nil
+        }
+
+        private func easeOut(_ t: CGFloat) -> CGFloat {
+            1 - pow(1 - t, 3)
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
