@@ -25,6 +25,7 @@ struct ExplorationRootView: View {
     @State private var popupCityName: String = ""
     @State private var isFirstLightPopupPresented: Bool = false
     @State private var blowUnlockSignal: Int = 0
+    @State private var isPanelContentReady: Bool = false
     @StateObject private var blowDetector = BlowDetector()
 
     var body: some View {
@@ -198,8 +199,8 @@ struct ExplorationRootView: View {
                                     handlePanelDragEnded(value)
                                 }
                             )
-                            .opacity(panelHeight > minPanelHeight + 20 ? 1 : 0)
-                            .frame(maxHeight: panelHeight > minPanelHeight + 20 ? .infinity : 0)
+                            .opacity(isPanelContentReady && panelHeight > minPanelHeight + 20 ? 1 : 0)
+                            .frame(maxHeight: isPanelContentReady && panelHeight > minPanelHeight + 20 ? .infinity : 0)
                             .clipped()
                         }
                     }
@@ -230,6 +231,19 @@ struct ExplorationRootView: View {
             blowUnlockSignal += 1
             blowDetector.consumeDetection()
         }
+        .onChange(of: awakenQueue.map(\.id)) { _, newValue in
+            guard isAwakenMode, !newValue.isEmpty else {
+                isPanelContentReady = false
+                return
+            }
+            isPanelContentReady = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                guard self.isAwakenMode, !self.awakenQueue.isEmpty else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    self.isPanelContentReady = true
+                }
+            }
+        }
         .onChange(of: isAwakenMode) { _, newValue in
             // 只要离开唤醒模式，就彻底复位本次 Session 状态（白点 + 面板 + 选中项）
             guard newValue == false else { return }
@@ -241,6 +255,7 @@ struct ExplorationRootView: View {
             didShowFirstLightPopupThisSession = false
             popupText = nil
             popupCityName = ""
+            isPanelContentReady = false
             blowDetector.consumeDetection()
         }
     }
@@ -344,10 +359,9 @@ struct ExplorationRootView: View {
         Task {
             let text = await AITextEngine.shared.generateText(for: request)
             await MainActor.run {
+                // 首次扫光阶段避免与面板/地图动画同帧叠加，先仅展示“点击再看”提示条
                 self.popupText = text
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    self.isFirstLightPopupPresented = true
-                }
+                self.isFirstLightPopupPresented = false
             }
         }
     }
