@@ -27,6 +27,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
         private var didTriggerFirstAwakenCallbackInSession: Bool = false
         private let firstAwakenPanelDelay: TimeInterval = 0.18
+        private let firstAwakenCallbackDelayAfterPanel: TimeInterval = 0.42
         private var lastHandledBlowUnlockSignal: Int = 0
 
         private var blowSweepContainerLayer: CALayer?
@@ -42,6 +43,10 @@ struct ExplorationMapView: UIViewRepresentable {
         private var blowSweepEndY: CGFloat = 0
         private var blowSweepDidTriggerStartFeedback: Bool = false
         private var blowSweepDidTriggerMidFeedback: Bool = false
+        private var didPrewarmBlowSweep: Bool = false
+        private var isBlowSweepRunning: Bool = false
+        private var lastBlowSweepStartTime: CFTimeInterval = 0
+        private let blowSweepTriggerCooldown: CFTimeInterval = 0.9
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -58,6 +63,52 @@ struct ExplorationMapView: UIViewRepresentable {
             HapticPlayer.warmUpIfNeeded()
             SystemSoundPlayer.warmUpIfNeeded()
             StardustEmitter.warmUpIfNeeded()
+        }
+
+        func prewarmBlowSweepIfNeeded(on mapView: MKMapView) {
+            guard !didPrewarmBlowSweep else { return }
+            didPrewarmBlowSweep = true
+
+            let prewarmPath = UIBezierPath()
+            let y = mapView.bounds.height * 0.78
+            prewarmPath.move(to: CGPoint(x: -20, y: y))
+            prewarmPath.addQuadCurve(
+                to: CGPoint(x: mapView.bounds.width + 20, y: y),
+                controlPoint: CGPoint(x: mapView.bounds.midX, y: y - 90)
+            )
+
+            let container = CALayer()
+            container.frame = mapView.bounds
+            container.opacity = 0.0
+            mapView.layer.addSublayer(container)
+
+            let mask = CAShapeLayer()
+            mask.frame = container.bounds
+            mask.fillColor = UIColor.clear.cgColor
+            mask.strokeColor = UIColor.white.cgColor
+            mask.lineWidth = 14
+            mask.lineCap = .round
+            mask.lineJoin = .round
+            mask.path = prewarmPath.cgPath
+
+            let gradient = CAGradientLayer()
+            gradient.frame = container.bounds
+            gradient.startPoint = CGPoint(x: 0, y: 0.5)
+            gradient.endPoint = CGPoint(x: 1, y: 0.5)
+            gradient.colors = [
+                UIColor.white.withAlphaComponent(0.0).cgColor,
+                UIColor.white.withAlphaComponent(0.25).cgColor,
+                UIColor.white.withAlphaComponent(0.0).cgColor
+            ]
+            gradient.locations = [0, 0.5, 1]
+            gradient.mask = mask
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            container.addSublayer(gradient)
+            CATransaction.commit()
+
+            container.removeFromSuperlayer()
         }
 
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -147,7 +198,11 @@ struct ExplorationMapView: UIViewRepresentable {
                             if !self.parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
                                 self.parent.awakenQueue.append(hitCluster)
                             }
-                            self.parent.onFirstAwakenInSession?(hitCluster, point)
+
+                            // 首次唤醒流程按顺序串行：先扫光与入队，再触发首光文案/弹层逻辑
+                            DispatchQueue.main.asyncAfter(deadline: .now() + self.firstAwakenCallbackDelayAfterPanel) {
+                                self.parent.onFirstAwakenInSession?(hitCluster, point)
+                            }
                         }
                     } else {
                         if !parent.awakenQueue.contains(where: { $0.id == hitCluster.id }) {
@@ -196,6 +251,10 @@ struct ExplorationMapView: UIViewRepresentable {
             guard parent.blowUnlockSignal != lastHandledBlowUnlockSignal else { return }
             lastHandledBlowUnlockSignal = parent.blowUnlockSignal
             guard parent.isAwakenMode else { return }
+            guard !isBlowSweepRunning else { return }
+
+            let now = CACurrentMediaTime()
+            guard now - lastBlowSweepStartTime >= blowSweepTriggerCooldown else { return }
 
             let visibleRect = mapView.bounds
             guard !visibleRect.isEmpty else { return }
@@ -218,8 +277,10 @@ struct ExplorationMapView: UIViewRepresentable {
             stopBlowSweepIfNeeded()
             didTriggerFirstAwakenCallbackInSession = false
 
+            isBlowSweepRunning = true
             blowSweepMapView = mapView
             blowSweepStartTime = CACurrentMediaTime()
+            lastBlowSweepStartTime = blowSweepStartTime
             blowSweepDidTriggerStartFeedback = false
             blowSweepDidTriggerMidFeedback = false
 
@@ -366,6 +427,7 @@ struct ExplorationMapView: UIViewRepresentable {
             blowSweepDisplayLink?.invalidate()
             blowSweepDisplayLink = nil
             blowSweepMapView = nil
+            isBlowSweepRunning = false
 
             blowSweepCoreGradient?.removeFromSuperlayer()
             blowSweepGlowGradient?.removeFromSuperlayer()
@@ -476,7 +538,8 @@ struct ExplorationMapView: UIViewRepresentable {
 
         context.coordinator.applyAnnotations(to: mapView)
         context.coordinator.setupGestures(for: mapView)
-        
+        context.coordinator.prewarmBlowSweepIfNeeded(on: mapView)
+
         return container
     }
 
