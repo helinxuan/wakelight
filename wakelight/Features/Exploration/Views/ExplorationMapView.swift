@@ -53,6 +53,13 @@ struct ExplorationMapView: UIViewRepresentable {
         private let blowSweepTriggerCooldown: CFTimeInterval = 0.9
         private var blowSweepHitTargets: [(annotation: ClusterAnnotation, point: CGPoint)] = []
 
+        weak var scratchGuideView: ScratchGuideOverlayView?
+        weak var blowGuideView: BlowGuideBarView?
+        private var didShowBlowGuideInSession: Bool = false
+        private var awakenSessionHitCount: Int = 0
+        private var awakenSessionStartWorkItem: DispatchWorkItem?
+        private var previousAwakenMode: Bool = false
+
         init(parent: ExplorationMapView) {
             self.parent = parent
         }
@@ -68,6 +75,54 @@ struct ExplorationMapView: UIViewRepresentable {
             HapticPlayer.warmUpIfNeeded()
             SystemSoundPlayer.warmUpIfNeeded()
             StardustEmitter.warmUpIfNeeded()
+        }
+
+        func handleAwakenModeTransitionIfNeeded() {
+            let isEnteringAwaken = parent.isAwakenMode && !previousAwakenMode
+            let isExitingAwaken = !parent.isAwakenMode && previousAwakenMode
+            previousAwakenMode = parent.isAwakenMode
+
+            if isEnteringAwaken {
+                resetAwakenGuidesSession()
+                scratchGuideView?.showGuide()
+
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    guard self.parent.isAwakenMode else { return }
+                    self.showBlowGuideIfNeeded(triggeredByTimeout: true)
+                }
+                awakenSessionStartWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
+            }
+
+            if isExitingAwaken {
+                awakenSessionStartWorkItem?.cancel()
+                awakenSessionStartWorkItem = nil
+                scratchGuideView?.hideGuide(animated: true)
+                blowGuideView?.hideGuide(animated: true)
+                didShowBlowGuideInSession = false
+                awakenSessionHitCount = 0
+                didTriggerFirstAwakenCallbackInSession = false
+            }
+        }
+
+        private func resetAwakenGuidesSession() {
+            awakenSessionStartWorkItem?.cancel()
+            awakenSessionStartWorkItem = nil
+            didShowBlowGuideInSession = false
+            awakenSessionHitCount = 0
+            didTriggerFirstAwakenCallbackInSession = false
+            scratchGuideView?.hideGuide(animated: false)
+            blowGuideView?.hideGuide(animated: false)
+        }
+
+        private func showBlowGuideIfNeeded(triggeredByTimeout: Bool = false) {
+            guard parent.isAwakenMode else { return }
+            guard !didShowBlowGuideInSession else { return }
+            if !triggeredByTimeout && awakenSessionHitCount < 2 { return }
+
+            didShowBlowGuideInSession = true
+            blowGuideView?.showGuide()
         }
 
         func prewarmBlowSweepIfNeeded(on mapView: MKMapView) {
@@ -181,6 +236,9 @@ struct ExplorationMapView: UIViewRepresentable {
             }
 
             if !isAlreadyInQueue {
+                awakenSessionHitCount += 1
+                showBlowGuideIfNeeded()
+
                 let shouldTriggerFirstCallback = !didTriggerFirstAwakenCallbackInSession
                 if shouldTriggerFirstCallback {
                     didTriggerFirstAwakenCallbackInSession = true
@@ -574,7 +632,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
-        
+
         let mapView = MKMapView()
         mapView.delegate = context.coordinator
         mapView.showsUserLocation = true
@@ -589,18 +647,38 @@ struct ExplorationMapView: UIViewRepresentable {
         container.addSubview(fogView)
         context.coordinator.fogScreenView = fogView
 
+        let scratchGuideView = ScratchGuideOverlayView()
+        scratchGuideView.translatesAutoresizingMaskIntoConstraints = false
+        scratchGuideView.isUserInteractionEnabled = false
+        container.addSubview(scratchGuideView)
+        context.coordinator.scratchGuideView = scratchGuideView
+
+        let blowGuideView = BlowGuideBarView()
+        blowGuideView.translatesAutoresizingMaskIntoConstraints = false
+        blowGuideView.isUserInteractionEnabled = false
+        container.addSubview(blowGuideView)
+        context.coordinator.blowGuideView = blowGuideView
 
         NSLayoutConstraint.activate([
             mapView.topAnchor.constraint(equalTo: container.topAnchor),
             mapView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             mapView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             mapView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            
+
             fogView.topAnchor.constraint(equalTo: container.topAnchor),
             fogView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             fogView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             fogView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
+            scratchGuideView.topAnchor.constraint(equalTo: container.topAnchor),
+            scratchGuideView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scratchGuideView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scratchGuideView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            blowGuideView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            blowGuideView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            blowGuideView.bottomAnchor.constraint(equalTo: container.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            blowGuideView.heightAnchor.constraint(greaterThanOrEqualToConstant: 52)
         ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
@@ -619,8 +697,10 @@ struct ExplorationMapView: UIViewRepresentable {
         guard let mapView = uiView.subviews.first(where: { $0 is MKMapView }) as? MKMapView,
               let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
 
+        context.coordinator.handleAwakenModeTransitionIfNeeded()
+
         mapView.isScrollEnabled = !isAwakenMode
-        
+
         fogView.clusters = viewModel.clusters
         fogView.revealedClusterIds = revealedClusterIds
         fogView.updateIfNeeded(interactionPhase: false)
@@ -762,7 +842,7 @@ final class FogScreenView: UIView {
             let isHalfRevealed = revealedClusterIds.contains(c.id)
             let isFullyRevealed = c.hasStory
             let isAnimating = c.id == animatingClusterId
-            
+
             guard isHalfRevealed || isFullyRevealed || isAnimating else { continue }
 
             let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
@@ -816,7 +896,7 @@ final class FogScreenView: UIView {
 
         for (id, layer) in activeGlowLayers {
             guard let c = clusters.first(where: { $0.id == id }) else { continue }
-            
+
             let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
             layer.position = mapView.convert(coord, toPointTo: self)
             layer.contents = c.hasStory ? storyGlowImage : glowImage
@@ -861,5 +941,227 @@ final class FogScreenView: UIView {
         glowContainerLayer.addSublayer(layer)
         activeGlowLayers[id] = layer
         return layer
+    }
+}
+
+final class ScratchGuideOverlayView: UIView {
+    private let label = UILabel()
+    private let traceLayer = CAShapeLayer()
+    private var isShowing = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        alpha = 0
+
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "划过光点，解锁记忆"
+        label.textColor = UIColor.white.withAlphaComponent(0.96)
+        label.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+        label.textAlignment = .center
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 84)
+        ])
+
+        traceLayer.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
+        traceLayer.fillColor = UIColor.clear.cgColor
+        traceLayer.lineWidth = 3
+        traceLayer.lineCap = .round
+        traceLayer.lineJoin = .round
+        traceLayer.lineDashPattern = [8, 8]
+        traceLayer.opacity = 0
+        layer.addSublayer(traceLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        traceLayer.frame = bounds
+        updateTracePath()
+    }
+
+    func showGuide() {
+        guard !isShowing else { return }
+        isShowing = true
+        alpha = 0
+        traceLayer.removeAllAnimations()
+        traceLayer.opacity = 0.95
+        updateTracePath()
+
+        UIView.animate(withDuration: 0.24) {
+            self.alpha = 1
+        }
+
+        startTraceAnimationLoop()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.hideGuide(animated: true)
+        }
+    }
+
+    func hideGuide(animated: Bool) {
+        isShowing = false
+        let animations = {
+            self.alpha = 0
+            self.traceLayer.opacity = 0
+        }
+        let completion: (Bool) -> Void = { _ in
+            self.traceLayer.removeAllAnimations()
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.22, animations: animations, completion: completion)
+        } else {
+            animations()
+            completion(true)
+        }
+    }
+
+    private func updateTracePath() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let y = bounds.height * 0.55
+        let start = CGPoint(x: bounds.width * 0.24, y: y)
+        let end = CGPoint(x: bounds.width * 0.76, y: y)
+        let control = CGPoint(x: bounds.width * 0.5, y: y - 52)
+
+        let path = UIBezierPath()
+        path.move(to: start)
+        path.addQuadCurve(to: end, controlPoint: control)
+        traceLayer.path = path.cgPath
+    }
+
+    private func startTraceAnimationLoop() {
+        let stroke = CABasicAnimation(keyPath: "strokeEnd")
+        stroke.fromValue = 0
+        stroke.toValue = 1
+        stroke.duration = 1.0
+        stroke.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.25
+        fade.toValue = 0.95
+        fade.duration = 1.0
+        fade.autoreverses = true
+
+        let group = CAAnimationGroup()
+        group.animations = [stroke, fade]
+        group.duration = 1.0
+        group.repeatCount = .infinity
+        group.isRemovedOnCompletion = false
+        traceLayer.add(group, forKey: "trace.loop")
+    }
+}
+
+final class BlowGuideBarView: UIView {
+    private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let iconView = UIImageView(image: UIImage(systemName: "wind"))
+    private let textLabel = UILabel()
+    private let pulseLayer = CAGradientLayer()
+    private var isShowing = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        alpha = 0
+        layer.cornerRadius = 16
+        layer.masksToBounds = true
+
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(blurView)
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.tintColor = UIColor.white.withAlphaComponent(0.92)
+        iconView.contentMode = .scaleAspectFit
+
+        textLabel.translatesAutoresizingMaskIntoConstraints = false
+        textLabel.text = "试试吹一口气，一键解锁当前屏幕光点"
+        textLabel.textColor = UIColor.white.withAlphaComponent(0.94)
+        textLabel.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+        textLabel.numberOfLines = 2
+
+        addSubview(iconView)
+        addSubview(textLabel)
+
+        NSLayoutConstraint.activate([
+            blurView.topAnchor.constraint(equalTo: topAnchor),
+            blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            blurView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            blurView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 20),
+            iconView.heightAnchor.constraint(equalToConstant: 20),
+
+            textLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            textLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            textLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            textLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8)
+        ])
+
+        layer.addSublayer(pulseLayer)
+        pulseLayer.colors = [
+            UIColor.white.withAlphaComponent(0.0).cgColor,
+            UIColor.white.withAlphaComponent(0.22).cgColor,
+            UIColor.white.withAlphaComponent(0.0).cgColor
+        ]
+        pulseLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        pulseLayer.endPoint = CGPoint(x: 1, y: 0.5)
+        pulseLayer.opacity = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        pulseLayer.frame = bounds
+    }
+
+    func showGuide() {
+        guard !isShowing else { return }
+        isShowing = true
+
+        alpha = 0
+        transform = CGAffineTransform(translationX: 0, y: 10)
+
+        UIView.animate(withDuration: 0.24, delay: 0, options: [.curveEaseOut]) {
+            self.alpha = 1
+            self.transform = .identity
+        }
+
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 0.06
+        anim.toValue = 0.35
+        anim.duration = 1.1
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        pulseLayer.add(anim, forKey: "pulse.opacity")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.hideGuide(animated: true)
+        }
+    }
+
+    func hideGuide(animated: Bool) {
+        isShowing = false
+        let animations = {
+            self.alpha = 0
+            self.transform = CGAffineTransform(translationX: 0, y: 10)
+        }
+        let completion: (Bool) -> Void = { _ in
+            self.transform = .identity
+            self.pulseLayer.removeAllAnimations()
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.22, animations: animations, completion: completion)
+        } else {
+            animations()
+            completion(true)
+        }
     }
 }
