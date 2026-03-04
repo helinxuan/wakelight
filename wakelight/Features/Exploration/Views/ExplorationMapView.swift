@@ -945,8 +945,10 @@ final class FogScreenView: UIView {
 }
 
 final class ScratchGuideOverlayView: UIView {
+    private let badgeView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     private let label = UILabel()
     private let traceLayer = CAShapeLayer()
+    private var badgeTopConstraint: NSLayoutConstraint?
     private var isShowing = false
 
     override init(frame: CGRect) {
@@ -955,16 +957,29 @@ final class ScratchGuideOverlayView: UIView {
         backgroundColor = .clear
         alpha = 0
 
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.layer.cornerRadius = 14
+        badgeView.clipsToBounds = true
+        badgeView.alpha = 0.95
+        addSubview(badgeView)
+
         label.translatesAutoresizingMaskIntoConstraints = false
         label.text = "划过光点，解锁记忆"
         label.textColor = UIColor.white.withAlphaComponent(0.96)
         label.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
         label.textAlignment = .center
-        addSubview(label)
+        badgeView.contentView.addSubview(label)
+
+        badgeTopConstraint = badgeView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 84)
 
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: centerXAnchor),
-            label.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 84)
+            badgeView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            badgeTopConstraint!,
+
+            label.leadingAnchor.constraint(equalTo: badgeView.contentView.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: badgeView.contentView.trailingAnchor, constant: -14),
+            label.topAnchor.constraint(equalTo: badgeView.contentView.topAnchor, constant: 8),
+            label.bottomAnchor.constraint(equalTo: badgeView.contentView.bottomAnchor, constant: -8)
         ])
 
         traceLayer.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
@@ -989,6 +1004,10 @@ final class ScratchGuideOverlayView: UIView {
         guard !isShowing else { return }
         isShowing = true
         alpha = 0
+
+        badgeTopConstraint?.constant = 84
+        label.transform = .identity
+
         traceLayer.removeAllAnimations()
         traceLayer.opacity = 0.95
         updateTracePath()
@@ -999,8 +1018,12 @@ final class ScratchGuideOverlayView: UIView {
 
         startTraceAnimationLoop()
 
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.pinToTopAsAwakeIndicator()
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.hideGuide(animated: true)
+            self?.fadeOutTraceOnly()
         }
     }
 
@@ -1012,6 +1035,8 @@ final class ScratchGuideOverlayView: UIView {
         }
         let completion: (Bool) -> Void = { _ in
             self.traceLayer.removeAllAnimations()
+            self.badgeTopConstraint?.constant = 84
+            self.label.transform = .identity
         }
 
         if animated {
@@ -1020,6 +1045,27 @@ final class ScratchGuideOverlayView: UIView {
             animations()
             completion(true)
         }
+    }
+
+    private func pinToTopAsAwakeIndicator() {
+        guard isShowing else { return }
+        badgeTopConstraint?.constant = 10
+
+        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseInOut]) {
+            self.label.transform = CGAffineTransform(scaleX: 0.84, y: 0.84)
+            self.layoutIfNeeded()
+        }
+    }
+
+    private func fadeOutTraceOnly() {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = traceLayer.presentation()?.opacity ?? traceLayer.opacity
+        fade.toValue = 0
+        fade.duration = 0.24
+        fade.fillMode = .forwards
+        fade.isRemovedOnCompletion = false
+        traceLayer.add(fade, forKey: "trace.fadeout")
+        traceLayer.opacity = 0
     }
 
     private func updateTracePath() {
