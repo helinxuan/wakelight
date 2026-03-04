@@ -24,6 +24,7 @@ struct ExplorationRootView: View {
     @State private var popupText: String? = nil
     @State private var popupCityName: String = ""
     @State private var isFirstLightPopupPresented: Bool = false
+    @State private var shouldPresentFirstLightPopupAfterSweep: Bool = false
     @State private var blowUnlockSignal: Int = 0
     @State private var isBlowSweepRunning: Bool = false
     @State private var isPanelContentReady: Bool = false
@@ -48,6 +49,7 @@ struct ExplorationRootView: View {
                         let resolvedCity = (try? await ResolvePlaceClusterCityNameUseCase().resolveCityName(for: cluster)) ?? cluster.cityName ?? "新地点"
                         await MainActor.run {
                             self.popupCityName = resolvedCity
+                            self.shouldPresentFirstLightPopupAfterSweep = true
                             generateFirstLightText(for: cluster, resolvedCity: resolvedCity)
                         }
                     }
@@ -125,9 +127,7 @@ struct ExplorationRootView: View {
                         VStack(spacing: 0) {
                             if let popupText, !isFirstLightPopupPresented {
                                 Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        self.isFirstLightPopupPresented = true
-                                    }
+                                    presentFirstLightPopup()
                                 }) {
                                     HStack(alignment: .center, spacing: 8) {
                                         Image(systemName: "sparkles")
@@ -249,10 +249,16 @@ struct ExplorationRootView: View {
         }
         .onChange(of: isBlowSweepRunning) { _, running in
             guard running == false else { return }
-            guard isAwakenMode, !awakenQueue.isEmpty, !isPanelContentReady else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                isPanelContentReady = true
+            if isAwakenMode, !awakenQueue.isEmpty, !isPanelContentReady {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isPanelContentReady = true
+                }
             }
+
+            tryPresentFirstLightPopupIfReady()
+        }
+        .onChange(of: popupText) { _, _ in
+            tryPresentFirstLightPopupIfReady()
         }
         .onChange(of: isAwakenMode) { _, newValue in
             // 只要离开唤醒模式，就彻底复位本次 Session 状态（白点 + 面板 + 选中项）
@@ -265,6 +271,8 @@ struct ExplorationRootView: View {
             didShowFirstLightPopupThisSession = false
             popupText = nil
             popupCityName = ""
+            isFirstLightPopupPresented = false
+            shouldPresentFirstLightPopupAfterSweep = false
             isPanelContentReady = false
             isBlowSweepRunning = false
             blowDetector.consumeDetection()
@@ -321,6 +329,21 @@ struct ExplorationRootView: View {
             panelHeight = target
         }
         dragStartPanelHeight = nil
+    }
+
+    private func presentFirstLightPopup() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isFirstLightPopupPresented = true
+        }
+    }
+
+    private func tryPresentFirstLightPopupIfReady() {
+        guard shouldPresentFirstLightPopupAfterSweep else { return }
+        guard popupText != nil else { return }
+        guard isBlowSweepRunning == false else { return }
+
+        shouldPresentFirstLightPopupAfterSweep = false
+        presentFirstLightPopup()
     }
 
     private func generateFirstLightText(for cluster: PlaceCluster, resolvedCity: String) {
