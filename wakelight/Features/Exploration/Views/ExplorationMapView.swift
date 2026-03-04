@@ -11,6 +11,7 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var revealedClusterIds: Set<UUID>
     @Binding var blowUnlockSignal: Int
     @Binding var isBlowSweepRunning: Bool
+    @Binding var exploreGuideTrigger: Int
 
     var onFirstAwakenInSession: ((PlaceCluster, CGPoint) -> Void)?
 
@@ -55,7 +56,9 @@ struct ExplorationMapView: UIViewRepresentable {
 
         weak var scratchGuideView: ScratchGuideOverlayView?
         weak var blowGuideView: BlowGuideBarView?
+        weak var exploreGuideView: ExploreTapGuideView?
         private var didShowBlowGuideInSession: Bool = false
+        private var lastHandledExploreGuideTrigger: Int = -1
         private var awakenSessionHitCount: Int = 0
         private var awakenSessionStartWorkItem: DispatchWorkItem?
         private var previousAwakenMode: Bool = false
@@ -83,6 +86,7 @@ struct ExplorationMapView: UIViewRepresentable {
             previousAwakenMode = parent.isAwakenMode
 
             if isEnteringAwaken {
+                exploreGuideView?.hideGuide(animated: true)
                 resetAwakenGuidesSession()
                 scratchGuideView?.showGuide()
 
@@ -123,6 +127,15 @@ struct ExplorationMapView: UIViewRepresentable {
 
             didShowBlowGuideInSession = true
             blowGuideView?.showGuide()
+        }
+
+        func showExploreGuideIfNeeded() {
+            guard !parent.isAwakenMode else { return }
+            guard parent.exploreGuideTrigger != lastHandledExploreGuideTrigger else { return }
+            guard !parent.viewModel.clusters.isEmpty else { return }
+
+            lastHandledExploreGuideTrigger = parent.exploreGuideTrigger
+            exploreGuideView?.showGuide()
         }
 
         func prewarmBlowSweepIfNeeded(on mapView: MKMapView) {
@@ -298,9 +311,8 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            if !parent.isAwakenMode {
-            }
-            return true
+            // 刮擦手势只在 Awake 模式生效，避免与地图点击选点竞争
+            return parent.isAwakenMode
         }
 
         func applyAnnotations(to mapView: MKMapView) {
@@ -659,6 +671,12 @@ struct ExplorationMapView: UIViewRepresentable {
         container.addSubview(blowGuideView)
         context.coordinator.blowGuideView = blowGuideView
 
+        let exploreGuideView = ExploreTapGuideView()
+        exploreGuideView.translatesAutoresizingMaskIntoConstraints = false
+        exploreGuideView.isUserInteractionEnabled = false
+        container.addSubview(exploreGuideView)
+        context.coordinator.exploreGuideView = exploreGuideView
+
         NSLayoutConstraint.activate([
             mapView.topAnchor.constraint(equalTo: container.topAnchor),
             mapView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -678,7 +696,12 @@ struct ExplorationMapView: UIViewRepresentable {
             blowGuideView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             blowGuideView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             blowGuideView.bottomAnchor.constraint(equalTo: container.safeAreaLayoutGuide.bottomAnchor, constant: -16),
-            blowGuideView.heightAnchor.constraint(greaterThanOrEqualToConstant: 52)
+            blowGuideView.heightAnchor.constraint(greaterThanOrEqualToConstant: 52),
+
+            exploreGuideView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            exploreGuideView.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 82),
+            exploreGuideView.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, multiplier: 0.82),
+            exploreGuideView.heightAnchor.constraint(greaterThanOrEqualToConstant: 50)
         ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
@@ -698,6 +721,7 @@ struct ExplorationMapView: UIViewRepresentable {
               let fogView = uiView.subviews.first(where: { $0 is FogScreenView }) as? FogScreenView else { return }
 
         context.coordinator.handleAwakenModeTransitionIfNeeded()
+        context.coordinator.showExploreGuideIfNeeded()
 
         mapView.isScrollEnabled = !isAwakenMode
 
@@ -1209,5 +1233,165 @@ final class BlowGuideBarView: UIView {
             animations()
             completion(true)
         }
+    }
+}
+
+final class ExploreTapGuideView: UIView {
+    private let badgeView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let iconWrapView = UIView()
+    private let iconView = UIImageView(image: UIImage(systemName: "hand.tap.fill"))
+    private let label = UILabel()
+    private let rippleLayer = CAShapeLayer()
+    private var isShowing = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        alpha = 0
+        layer.cornerRadius = 14
+        layer.masksToBounds = true
+
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(badgeView)
+
+        iconWrapView.translatesAutoresizingMaskIntoConstraints = false
+        iconWrapView.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        iconWrapView.layer.cornerRadius = 12
+        badgeView.contentView.addSubview(iconWrapView)
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.tintColor = UIColor.white.withAlphaComponent(0.95)
+        iconWrapView.addSubview(iconView)
+
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "点击光点，进入唤醒模式"
+        label.textColor = UIColor.white.withAlphaComponent(0.96)
+        label.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        badgeView.contentView.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            badgeView.topAnchor.constraint(equalTo: topAnchor),
+            badgeView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            badgeView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            badgeView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            iconWrapView.leadingAnchor.constraint(equalTo: badgeView.contentView.leadingAnchor, constant: 12),
+            iconWrapView.centerYAnchor.constraint(equalTo: badgeView.contentView.centerYAnchor),
+            iconWrapView.widthAnchor.constraint(equalToConstant: 24),
+            iconWrapView.heightAnchor.constraint(equalToConstant: 24),
+
+            iconView.centerXAnchor.constraint(equalTo: iconWrapView.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconWrapView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 14),
+            iconView.heightAnchor.constraint(equalToConstant: 14),
+
+            label.topAnchor.constraint(equalTo: badgeView.contentView.topAnchor, constant: 11),
+            label.bottomAnchor.constraint(equalTo: badgeView.contentView.bottomAnchor, constant: -11),
+            label.leadingAnchor.constraint(equalTo: iconWrapView.trailingAnchor, constant: 9),
+            label.trailingAnchor.constraint(equalTo: badgeView.contentView.trailingAnchor, constant: -14)
+        ])
+
+        rippleLayer.fillColor = UIColor.clear.cgColor
+        rippleLayer.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
+        rippleLayer.lineWidth = 1.8
+        rippleLayer.opacity = 0
+        iconWrapView.layer.addSublayer(rippleLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        rippleLayer.frame = iconWrapView.bounds
+        let d = min(iconWrapView.bounds.width, iconWrapView.bounds.height) - 6
+        rippleLayer.path = UIBezierPath(ovalIn: CGRect(
+            x: (iconWrapView.bounds.width - d) * 0.5,
+            y: (iconWrapView.bounds.height - d) * 0.5,
+            width: d,
+            height: d
+        )).cgPath
+    }
+
+    func showGuide() {
+        guard !isShowing else { return }
+        isShowing = true
+
+        alpha = 0
+        transform = CGAffineTransform(translationX: 0, y: 10)
+        iconWrapView.layer.removeAllAnimations()
+        iconView.layer.removeAllAnimations()
+        rippleLayer.removeAllAnimations()
+
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
+            self.alpha = 1
+            self.transform = .identity
+        }
+
+        startTapAnimationLoop()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.hideGuide(animated: true)
+        }
+    }
+
+    func hideGuide(animated: Bool) {
+        isShowing = false
+        let animations = {
+            self.alpha = 0
+            self.transform = CGAffineTransform(translationX: 0, y: 10)
+        }
+        let completion: (Bool) -> Void = { _ in
+            self.transform = .identity
+            self.iconWrapView.layer.removeAllAnimations()
+            self.iconView.layer.removeAllAnimations()
+            self.rippleLayer.removeAllAnimations()
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.2, animations: animations, completion: completion)
+        } else {
+            animations()
+            completion(true)
+        }
+    }
+
+    private func startTapAnimationLoop() {
+        let press = CABasicAnimation(keyPath: "transform.scale")
+        press.fromValue = 1.0
+        press.toValue = 0.84
+        press.duration = 0.22
+        press.autoreverses = true
+        press.repeatCount = .infinity
+        press.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        iconWrapView.layer.add(press, forKey: "tap.press")
+
+        let hand = CABasicAnimation(keyPath: "transform.scale")
+        hand.fromValue = 1.0
+        hand.toValue = 0.9
+        hand.duration = 0.22
+        hand.autoreverses = true
+        hand.repeatCount = .infinity
+        hand.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        iconView.layer.add(hand, forKey: "tap.hand")
+
+        let rippleScale = CABasicAnimation(keyPath: "transform.scale")
+        rippleScale.fromValue = 0.55
+        rippleScale.toValue = 1.55
+        rippleScale.duration = 0.8
+        rippleScale.repeatCount = .infinity
+        rippleScale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        let rippleOpacity = CABasicAnimation(keyPath: "opacity")
+        rippleOpacity.fromValue = 0.9
+        rippleOpacity.toValue = 0.0
+        rippleOpacity.duration = 0.8
+        rippleOpacity.repeatCount = .infinity
+
+        let group = CAAnimationGroup()
+        group.animations = [rippleScale, rippleOpacity]
+        group.duration = 0.8
+        group.repeatCount = .infinity
+        group.isRemovedOnCompletion = false
+        rippleLayer.add(group, forKey: "tap.ripple")
     }
 }

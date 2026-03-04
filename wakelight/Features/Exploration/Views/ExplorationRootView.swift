@@ -28,6 +28,7 @@ struct ExplorationRootView: View {
     @State private var blowUnlockSignal: Int = 0
     @State private var isBlowSweepRunning: Bool = false
     @State private var isPanelContentReady: Bool = false
+    @State private var exploreGuideTrigger: Int = 0
     @StateObject private var blowDetector = BlowDetector()
 
     var body: some View {
@@ -40,6 +41,7 @@ struct ExplorationRootView: View {
                 revealedClusterIds: $revealedClusterIds,
                 blowUnlockSignal: $blowUnlockSignal,
                 isBlowSweepRunning: $isBlowSweepRunning,
+                exploreGuideTrigger: $exploreGuideTrigger,
                 onFirstAwakenInSession: { cluster, _ in
                     guard !didShowFirstLightPopupThisSession else { return }
                     didShowFirstLightPopupThisSession = true
@@ -220,6 +222,9 @@ struct ExplorationRootView: View {
         }
         .task {
             await blowDetector.startIfNeeded()
+        }
+        .onAppear {
+            exploreGuideTrigger += 1
         }
         .onTapGesture {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
