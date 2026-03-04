@@ -25,6 +25,7 @@ struct ExplorationRootView: View {
     @State private var popupCityName: String = ""
     @State private var isFirstLightPopupPresented: Bool = false
     @State private var blowUnlockSignal: Int = 0
+    @State private var isBlowSweepRunning: Bool = false
     @State private var isPanelContentReady: Bool = false
     @StateObject private var blowDetector = BlowDetector()
 
@@ -37,6 +38,7 @@ struct ExplorationRootView: View {
                 isAwakenMode: $isAwakenMode,
                 revealedClusterIds: $revealedClusterIds,
                 blowUnlockSignal: $blowUnlockSignal,
+                isBlowSweepRunning: $isBlowSweepRunning,
                 onFirstAwakenInSession: { cluster, _ in
                     guard !didShowFirstLightPopupThisSession else { return }
                     didShowFirstLightPopupThisSession = true
@@ -216,7 +218,6 @@ struct ExplorationRootView: View {
             }
             .ignoresSafeArea(edges: .bottom)
         }
-        .animation(.easeInOut(duration: 0.22), value: awakenQueue.map(\.id))
         .task {
             await blowDetector.startIfNeeded()
         }
@@ -237,11 +238,20 @@ struct ExplorationRootView: View {
                 return
             }
             isPanelContentReady = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            let panelDelay: TimeInterval = isBlowSweepRunning ? 2.55 : 0.18
+            DispatchQueue.main.asyncAfter(deadline: .now() + panelDelay) {
                 guard self.isAwakenMode, !self.awakenQueue.isEmpty else { return }
+                guard !self.isBlowSweepRunning else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
                     self.isPanelContentReady = true
                 }
+            }
+        }
+        .onChange(of: isBlowSweepRunning) { _, running in
+            guard running == false else { return }
+            guard isAwakenMode, !awakenQueue.isEmpty, !isPanelContentReady else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                isPanelContentReady = true
             }
         }
         .onChange(of: isAwakenMode) { _, newValue in
@@ -256,6 +266,7 @@ struct ExplorationRootView: View {
             popupText = nil
             popupCityName = ""
             isPanelContentReady = false
+            isBlowSweepRunning = false
             blowDetector.consumeDetection()
         }
     }

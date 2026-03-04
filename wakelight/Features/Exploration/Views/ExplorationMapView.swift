@@ -10,6 +10,7 @@ struct ExplorationMapView: UIViewRepresentable {
     @Binding var isAwakenMode: Bool
     @Binding var revealedClusterIds: Set<UUID>
     @Binding var blowUnlockSignal: Int
+    @Binding var isBlowSweepRunning: Bool
 
     var onFirstAwakenInSession: ((PlaceCluster, CGPoint) -> Void)?
 
@@ -43,10 +44,14 @@ struct ExplorationMapView: UIViewRepresentable {
         private var blowSweepEndY: CGFloat = 0
         private var blowSweepDidTriggerStartFeedback: Bool = false
         private var blowSweepDidTriggerMidFeedback: Bool = false
+        private var blowSweepFrameIndex: Int = 0
+        private var blowSweepPreviousY: CGFloat = 0
+        private var blowSweepHitClusterIds: Set<UUID> = []
         private var didPrewarmBlowSweep: Bool = false
         private var isBlowSweepRunning: Bool = false
         private var lastBlowSweepStartTime: CFTimeInterval = 0
         private let blowSweepTriggerCooldown: CFTimeInterval = 0.9
+        private var blowSweepHitTargets: [(annotation: ClusterAnnotation, point: CGPoint)] = []
 
         init(parent: ExplorationMapView) {
             self.parent = parent
@@ -278,11 +283,18 @@ struct ExplorationMapView: UIViewRepresentable {
             didTriggerFirstAwakenCallbackInSession = false
 
             isBlowSweepRunning = true
+            parent.isBlowSweepRunning = true
             blowSweepMapView = mapView
             blowSweepStartTime = CACurrentMediaTime()
             lastBlowSweepStartTime = blowSweepStartTime
             blowSweepDidTriggerStartFeedback = false
             blowSweepDidTriggerMidFeedback = false
+            blowSweepFrameIndex = 0
+            blowSweepPreviousY = 0
+            blowSweepHitClusterIds.removeAll(keepingCapacity: true)
+            blowSweepHitTargets = visibleAnnotations.map { ann in
+                (annotation: ann, point: mapView.convert(ann.coordinate, toPointTo: mapView))
+            }
 
             let h = mapView.bounds.height
             blowSweepStartY = h + 40
@@ -393,23 +405,59 @@ struct ExplorationMapView: UIViewRepresentable {
             path.move(to: left)
             path.addQuadCurve(to: right, controlPoint: control)
 
-            blowSweepGlowMask?.path = path.cgPath
-            blowSweepCoreMask?.path = path.cgPath
-
             let fade = Float(1 - p * 0.38)
             let pulse = Float(0.92 + 0.08 * sin(progress * .pi * 1.6))
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            blowSweepGlowMask?.path = path.cgPath
+            blowSweepCoreMask?.path = path.cgPath
             blowSweepGlowGradient?.opacity = fade * pulse
             blowSweepCoreGradient?.opacity = min(1.0, (fade + 0.12) * pulse)
+            CATransaction.commit()
 
-            let sampleCount = max(30, Int(mapView.bounds.width / 16))
-            for i in 0...sampleCount {
-                let t = CGFloat(i) / CGFloat(sampleCount)
-                let samplePoint = pointOnQuadratic(from: left, control: control, to: right, t: t)
-                processInteraction(at: samplePoint, in: mapView)
+            blowSweepFrameIndex += 1
+            let frameStride: Int
+            if progress < 0.35 {
+                frameStride = 2
+            } else if progress < 0.62 {
+                frameStride = 3
+            } else if progress < 0.80 {
+                frameStride = 5
+            } else {
+                frameStride = 8
             }
 
-            let current = pointOnQuadratic(from: left, control: control, to: right, t: 0.5)
-            processInteraction(at: current, in: mapView)
+            // 顶部收尾阶段最容易抖：仅在弧线真正扫过目标纵向区间时判定命中，且每个 cluster 只触发一次。
+            let lowY = min(blowSweepPreviousY, y)
+            let highY = max(blowSweepPreviousY, y)
+            let shouldRunHitTestThisFrame = (blowSweepFrameIndex % frameStride == 0)
+
+            if shouldRunHitTestThisFrame {
+                let arcBandHalfWidth: CGFloat
+                if progress < 0.35 {
+                    arcBandHalfWidth = 34
+                } else if progress < 0.62 {
+                    arcBandHalfWidth = 28
+                } else if progress < 0.80 {
+                    arcBandHalfWidth = 22
+                } else {
+                    arcBandHalfWidth = 18
+                }
+
+                for target in blowSweepHitTargets {
+                    if blowSweepHitClusterIds.contains(target.annotation.cluster.id) { continue }
+                    if target.point.y < lowY - arcBandHalfWidth || target.point.y > highY + arcBandHalfWidth { continue }
+
+                    let d = distanceFromPoint(target.point, toLineSegmentStart: left, end: right)
+                    if d <= arcBandHalfWidth {
+                        blowSweepHitClusterIds.insert(target.annotation.cluster.id)
+                        handleClusterHit(annotation: target.annotation, point: target.point, mapView: mapView)
+                    }
+                }
+            }
+
+            blowSweepPreviousY = y
 
             if !blowSweepDidTriggerStartFeedback {
                 blowSweepDidTriggerStartFeedback = true
@@ -428,6 +476,10 @@ struct ExplorationMapView: UIViewRepresentable {
             blowSweepDisplayLink = nil
             blowSweepMapView = nil
             isBlowSweepRunning = false
+            parent.isBlowSweepRunning = false
+            blowSweepHitTargets.removeAll(keepingCapacity: true)
+            blowSweepHitClusterIds.removeAll(keepingCapacity: true)
+            blowSweepPreviousY = 0
 
             blowSweepCoreGradient?.removeFromSuperlayer()
             blowSweepGlowGradient?.removeFromSuperlayer()
@@ -451,6 +503,25 @@ struct ExplorationMapView: UIViewRepresentable {
             let x = uu * p0.x + 2 * u * t * p1.x + tt * p2.x
             let y = uu * p0.y + 2 * u * t * p1.y + tt * p2.y
             return CGPoint(x: x, y: y)
+        }
+
+        private func distanceFromPoint(_ p: CGPoint, toLineSegmentStart a: CGPoint, end b: CGPoint) -> CGFloat {
+            let abx = b.x - a.x
+            let aby = b.y - a.y
+            let apx = p.x - a.x
+            let apy = p.y - a.y
+            let ab2 = abx * abx + aby * aby
+            guard ab2 > 0.0001 else {
+                let dx = p.x - a.x
+                let dy = p.y - a.y
+                return sqrt(dx * dx + dy * dy)
+            }
+
+            let t = max(0, min(1, (apx * abx + apy * aby) / ab2))
+            let proj = CGPoint(x: a.x + t * abx, y: a.y + t * aby)
+            let dx = p.x - proj.x
+            let dy = p.y - proj.y
+            return sqrt(dx * dx + dy * dy)
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
