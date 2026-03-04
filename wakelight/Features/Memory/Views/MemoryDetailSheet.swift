@@ -263,8 +263,9 @@ struct MemoryDetailSheet: View {
             case .story(let node):
                 let (minStart, maxEnd) = try await loadTimeRangeForStory(node)
                 let groups = try await loadGroupsForStory(node)
+                let fallbackSummary = try await loadFallbackSummaryForStory(node)
                 await MainActor.run {
-                    self.editText = node.mainSummary ?? ""
+                    self.editText = node.mainSummary ?? fallbackSummary
                     if let minStart, let maxEnd {
                         self.summaryTitle = Self.dateRangeText(startAt: minStart, endAt: maxEnd)
                     }
@@ -335,6 +336,25 @@ struct MemoryDetailSheet: View {
         }
 
         return groups
+    }
+
+    private func loadFallbackSummaryForStory(_ node: StoryNode) async throws -> String {
+        try await DatabaseContainer.shared.db.reader.read { db in
+            let layerIds = node.subVisitLayerIds
+            guard !layerIds.isEmpty else { return "" }
+
+            let layers = try VisitLayer
+                .filter(layerIds.contains(Column("id")))
+                .order(Column("startAt").asc)
+                .fetchAll(db)
+
+            let texts = layers
+                .compactMap { $0.userText?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            if texts.isEmpty { return "" }
+            return texts.joined(separator: "\n\n")
+        }
     }
 
     private func save() {
