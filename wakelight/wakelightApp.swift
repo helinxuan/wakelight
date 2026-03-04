@@ -14,7 +14,11 @@ struct wakelightApp: App {
             ContentView()
                 .onAppear {
                     _ = AchievementService.shared
-                    WebDAVBootstrap.shared.bootstrap()
+                    Task { @MainActor in
+                        await WebDAVBootstrap.shared.bootstrap()
+                        // Resume interrupted thumbnail generation jobs (e.g. app terminated during WebDAV import).
+                        PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
+                    }
 
                     // Start observing Photos library changes for incremental sync.
                     PhotosLibraryObserver.shared.start()
@@ -25,8 +29,6 @@ struct wakelightApp: App {
                         PhotoImportManager.shared.handlePhotosLibraryChange(change)
                     }
 
-                    // Resume interrupted thumbnail generation jobs (e.g. app terminated during WebDAV import).
-                    PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
                 }
         }
     }
