@@ -12,8 +12,21 @@ struct TimeTravelMapView: UIViewRepresentable {
         private var currentOverlays: [MKOverlay] = []
         private var currentAnnotations: [TimeTravelNodeAnnotation] = []
 
+        private weak var flowRenderer: MKPolylineRenderer?
+        private var displayLink: CADisplayLink?
+        private var dashPhase: CGFloat = 0
+        private var lastFrameTime: CFTimeInterval = 0
+
+        private let dashGap: CGFloat = 12
+        private let cycleDuration: CFTimeInterval = 3.0
+
         init(parent: TimeTravelMapView) {
             self.parent = parent
+            super.init()
+        }
+
+        deinit {
+            stopFlowAnimation()
         }
 
         func rebuildOverlaysAndAnnotations(on mapView: MKMapView) {
@@ -30,6 +43,9 @@ struct TimeTravelMapView: UIViewRepresentable {
             currentOverlays = buildRouteOverlays(from: coords)
             if !currentOverlays.isEmpty {
                 mapView.addOverlays(currentOverlays)
+                startFlowAnimationIfNeeded()
+            } else {
+                stopFlowAnimation()
             }
 
             currentAnnotations = parent.nodes.enumerated().compactMap { idx, node in
@@ -45,30 +61,43 @@ struct TimeTravelMapView: UIViewRepresentable {
 
         private func buildRouteOverlays(from coords: [CLLocationCoordinate2D]) -> [MKOverlay] {
             guard coords.count >= 2 else { return [] }
+            let flowLine = MKGeodesicPolyline(coordinates: coords, count: coords.count)
+            flowLine.title = "route_flow_dashed"
+            return [flowLine]
+        }
 
-            var overlays: [MKOverlay] = []
+        private func startFlowAnimationIfNeeded() {
+            guard displayLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+            dashPhase = 0
+            lastFrameTime = 0
+        }
 
-            let glow = MKGeodesicPolyline(coordinates: coords, count: coords.count)
-            glow.title = "route_glow"
-            overlays.append(glow)
+        private func stopFlowAnimation() {
+            displayLink?.invalidate()
+            displayLink = nil
+            dashPhase = 0
+            lastFrameTime = 0
+        }
 
-            let pastNodeCount = min(max(parent.selectedIndex + 1, 1), coords.count)
-            if pastNodeCount >= 2 {
-                let pastCoords = Array(coords.prefix(pastNodeCount))
-                let past = MKGeodesicPolyline(coordinates: pastCoords, count: pastCoords.count)
-                past.title = "route_past"
-                overlays.append(past)
+        @objc private func handleDisplayLink(_ link: CADisplayLink) {
+            guard let renderer = flowRenderer else { return }
+
+            if lastFrameTime == 0 {
+                lastFrameTime = link.timestamp
+                return
             }
 
-            let futureStart = min(max(parent.selectedIndex, 0), coords.count - 1)
-            let futureCoords = Array(coords.suffix(from: futureStart))
-            if futureCoords.count >= 2 {
-                let future = MKGeodesicPolyline(coordinates: futureCoords, count: futureCoords.count)
-                future.title = "route_future"
-                overlays.append(future)
-            }
+            let delta = link.timestamp - lastFrameTime
+            lastFrameTime = link.timestamp
 
-            return overlays
+            let speed = dashGap / CGFloat(cycleDuration)
+            dashPhase = (dashPhase + CGFloat(delta) * speed).truncatingRemainder(dividingBy: dashGap)
+
+            renderer.lineDashPhase = dashPhase
+            renderer.setNeedsDisplay()
         }
 
         func updateSelection(on mapView: MKMapView) {
@@ -80,7 +109,6 @@ struct TimeTravelMapView: UIViewRepresentable {
             if parent.nodes.indices.contains(parent.selectedIndex),
                let cluster = parent.nodes[parent.selectedIndex].placeCluster {
                 let center = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-
                 let camera = MKMapCamera(lookingAtCenter: center, fromDistance: 1_200_000, pitch: 50, heading: 0)
 
                 UIView.animate(withDuration: 1.1, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
@@ -97,28 +125,18 @@ struct TimeTravelMapView: UIViewRepresentable {
             let renderer = MKPolylineRenderer(polyline: polyline)
             renderer.lineCap = .round
             renderer.lineJoin = .round
+            renderer.strokeColor = UIColor(red: 0xA8 / 255.0, green: 0xEE / 255.0, blue: 0xFF / 255.0, alpha: 0.88)
+            renderer.lineWidth = 4
+            renderer.lineDashPattern = [6, 12]
+            renderer.lineDashPhase = dashPhase
 
-            switch polyline.title ?? "" {
-            case "route_glow":
-                renderer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.22)
-                renderer.lineWidth = 12
-            case "route_past":
-                renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.95)
-                renderer.lineWidth = 4
-            case "route_future":
-                renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.45)
-                renderer.lineWidth = 3
-                renderer.lineDashPattern = [8, 6]
-            default:
-                renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.85)
-                renderer.lineWidth = 4
-            }
+            flowRenderer = renderer
             return renderer
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation { return nil }
-            guard let ttAnn = annotation as? TimeTravelNodeAnnotation else { return nil }
+            guard annotation is TimeTravelNodeAnnotation else { return nil }
 
             let reuseId = "timeTravelLightPoint"
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? LightPointAnnotationView
@@ -126,8 +144,8 @@ struct TimeTravelMapView: UIViewRepresentable {
 
             view.annotation = annotation
             view.canShowCallout = false
-            view.isHalfRevealed = ttAnn.index != parent.selectedIndex
-            view.isStoryPoint = ttAnn.index == parent.selectedIndex
+            view.isHalfRevealed = false
+            view.isStoryPoint = true
             view.updateStyle()
             return view
         }
