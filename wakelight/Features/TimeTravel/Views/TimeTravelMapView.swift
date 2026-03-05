@@ -120,47 +120,16 @@ struct TimeTravelMapView: UIViewRepresentable {
             if annotation is MKUserLocation { return nil }
             guard let ttAnn = annotation as? TimeTravelNodeAnnotation else { return nil }
 
-            let reuseId = "timeTravelNode"
-            let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView
-                ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+            let reuseId = "timeTravelLightPoint"
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? LightPointAnnotationView
+                ?? LightPointAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
 
             view.annotation = annotation
-            view.canShowCallout = true
-            view.titleVisibility = .adaptive
-            view.subtitleVisibility = .adaptive
-            view.displayPriority = .required
-            view.markerTintColor = markerColor(for: ttAnn)
-            configureGlyph(for: view, annotation: ttAnn)
+            view.canShowCallout = false
+            view.isHalfRevealed = ttAnn.index != parent.selectedIndex
+            view.isStoryPoint = ttAnn.index == parent.selectedIndex
+            view.updateStyle()
             return view
-        }
-
-        private func markerColor(for annotation: TimeTravelNodeAnnotation) -> UIColor {
-            if annotation.index == parent.selectedIndex {
-                return UIColor.systemOrange
-            }
-            if annotation.index == 0 {
-                return UIColor.systemBlue
-            }
-            if annotation.index == parent.nodes.count - 1 {
-                return UIColor.systemPurple
-            }
-            return UIColor.systemGray
-        }
-
-        private func configureGlyph(for view: MKMarkerAnnotationView, annotation: TimeTravelNodeAnnotation) {
-            if annotation.index == parent.selectedIndex {
-                view.glyphImage = UIImage(systemName: "sparkles")
-                view.glyphText = nil
-            } else if annotation.index == 0 {
-                view.glyphImage = nil
-                view.glyphText = "S"
-            } else if annotation.index == parent.nodes.count - 1 {
-                view.glyphImage = nil
-                view.glyphText = "E"
-            } else {
-                view.glyphImage = nil
-                view.glyphText = "\(annotation.index + 1)"
-            }
         }
     }
 
