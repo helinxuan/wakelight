@@ -9,7 +9,7 @@ struct TimeTravelMapView: UIViewRepresentable {
     final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: TimeTravelMapView
 
-        private var currentPolyline: MKPolyline?
+        private var currentOverlays: [MKOverlay] = []
         private var currentAnnotations: [TimeTravelNodeAnnotation] = []
 
         init(parent: TimeTravelMapView) {
@@ -17,8 +17,8 @@ struct TimeTravelMapView: UIViewRepresentable {
         }
 
         func rebuildOverlaysAndAnnotations(on mapView: MKMapView) {
-            if let poly = currentPolyline {
-                mapView.removeOverlay(poly)
+            if !currentOverlays.isEmpty {
+                mapView.removeOverlays(currentOverlays)
             }
             mapView.removeAnnotations(currentAnnotations)
 
@@ -27,26 +27,54 @@ struct TimeTravelMapView: UIViewRepresentable {
                 return CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
             }
 
-            if coords.count >= 2 {
-                let polyline = MKPolyline(coordinates: coords, count: coords.count)
-                currentPolyline = polyline
-                mapView.addOverlay(polyline)
-            } else {
-                currentPolyline = nil
+            currentOverlays = buildRouteOverlays(from: coords)
+            if !currentOverlays.isEmpty {
+                mapView.addOverlays(currentOverlays)
             }
 
             currentAnnotations = parent.nodes.enumerated().compactMap { idx, node in
                 guard let cluster = node.placeCluster else { return nil }
-                return TimeTravelNodeAnnotation(index: idx, node: node, coordinate: CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude))
+                return TimeTravelNodeAnnotation(
+                    index: idx,
+                    node: node,
+                    coordinate: CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+                )
             }
             mapView.addAnnotations(currentAnnotations)
         }
 
+        private func buildRouteOverlays(from coords: [CLLocationCoordinate2D]) -> [MKOverlay] {
+            guard coords.count >= 2 else { return [] }
+
+            var overlays: [MKOverlay] = []
+
+            let glow = MKGeodesicPolyline(coordinates: coords, count: coords.count)
+            glow.title = "route_glow"
+            overlays.append(glow)
+
+            let pastNodeCount = min(max(parent.selectedIndex + 1, 1), coords.count)
+            if pastNodeCount >= 2 {
+                let pastCoords = Array(coords.prefix(pastNodeCount))
+                let past = MKGeodesicPolyline(coordinates: pastCoords, count: pastCoords.count)
+                past.title = "route_past"
+                overlays.append(past)
+            }
+
+            let futureStart = min(max(parent.selectedIndex, 0), coords.count - 1)
+            let futureCoords = Array(coords.suffix(from: futureStart))
+            if futureCoords.count >= 2 {
+                let future = MKGeodesicPolyline(coordinates: futureCoords, count: futureCoords.count)
+                future.title = "route_future"
+                overlays.append(future)
+            }
+
+            return overlays
+        }
+
         func updateSelection(on mapView: MKMapView) {
-            for ann in currentAnnotations {
-                if ann.index == parent.selectedIndex {
-                    mapView.selectAnnotation(ann, animated: true)
-                }
+            mapView.selectedAnnotations.removeAll()
+            for ann in currentAnnotations where ann.index == parent.selectedIndex {
+                mapView.selectAnnotation(ann, animated: true)
             }
 
             if parent.nodes.indices.contains(parent.selectedIndex),
@@ -62,15 +90,30 @@ struct TimeTravelMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            if let polyline = overlay as? MKPolyline {
-                let renderer = MKPolylineRenderer(polyline: polyline)
+            guard let polyline = overlay as? MKPolyline else {
+                return MKOverlayRenderer(overlay: overlay)
+            }
+
+            let renderer = MKPolylineRenderer(polyline: polyline)
+            renderer.lineCap = .round
+            renderer.lineJoin = .round
+
+            switch polyline.title ?? "" {
+            case "route_glow":
+                renderer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.22)
+                renderer.lineWidth = 12
+            case "route_past":
+                renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.95)
+                renderer.lineWidth = 4
+            case "route_future":
+                renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.45)
+                renderer.lineWidth = 3
+                renderer.lineDashPattern = [8, 6]
+            default:
                 renderer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.85)
                 renderer.lineWidth = 4
-                renderer.lineCap = .round
-                renderer.lineJoin = .round
-                return renderer
             }
-            return MKOverlayRenderer(overlay: overlay)
+            return renderer
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
@@ -83,9 +126,41 @@ struct TimeTravelMapView: UIViewRepresentable {
 
             view.annotation = annotation
             view.canShowCallout = true
-            view.markerTintColor = (ttAnn.index == parent.selectedIndex) ? UIColor.systemOrange : UIColor.systemGray
-            view.glyphImage = UIImage(systemName: "sparkle")
+            view.titleVisibility = .adaptive
+            view.subtitleVisibility = .adaptive
+            view.displayPriority = .required
+            view.markerTintColor = markerColor(for: ttAnn)
+            configureGlyph(for: view, annotation: ttAnn)
             return view
+        }
+
+        private func markerColor(for annotation: TimeTravelNodeAnnotation) -> UIColor {
+            if annotation.index == parent.selectedIndex {
+                return UIColor.systemOrange
+            }
+            if annotation.index == 0 {
+                return UIColor.systemBlue
+            }
+            if annotation.index == parent.nodes.count - 1 {
+                return UIColor.systemPurple
+            }
+            return UIColor.systemGray
+        }
+
+        private func configureGlyph(for view: MKMarkerAnnotationView, annotation: TimeTravelNodeAnnotation) {
+            if annotation.index == parent.selectedIndex {
+                view.glyphImage = UIImage(systemName: "sparkles")
+                view.glyphText = nil
+            } else if annotation.index == 0 {
+                view.glyphImage = nil
+                view.glyphText = "S"
+            } else if annotation.index == parent.nodes.count - 1 {
+                view.glyphImage = nil
+                view.glyphText = "E"
+            } else {
+                view.glyphImage = nil
+                view.glyphText = "\(annotation.index + 1)"
+            }
         }
     }
 
@@ -128,10 +203,22 @@ final class TimeTravelNodeAnnotation: NSObject, MKAnnotation {
     }
 
     var title: String? {
-        node.displaySummary ?? node.displayLocation
+        if let location = node.displayLocation, !location.isEmpty {
+            return Self.clip(location, maxLength: 16)
+        }
+        if let summary = node.displaySummary, !summary.isEmpty {
+            return Self.clip(summary, maxLength: 16)
+        }
+        return "第\(index + 1)站"
     }
 
     var subtitle: String? {
-        nil
+        node.displayTitle
+    }
+
+    private static func clip(_ text: String, maxLength: Int) -> String {
+        guard text.count > maxLength else { return text }
+        let end = text.index(text.startIndex, offsetBy: maxLength)
+        return String(text[..<end]) + "…"
     }
 }

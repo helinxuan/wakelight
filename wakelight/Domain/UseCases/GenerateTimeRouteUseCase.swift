@@ -19,20 +19,7 @@ struct GenerateTimeRouteUseCase {
                 // 2. 加载该 Story 关联的所有 VisitLayer
                 let storyLayerIds = story.subVisitLayerIds
                 guard !storyLayerIds.isEmpty else { continue }
-                
                 let layers = try VisitLayer.fetchAll(db, keys: storyLayerIds)
-                
-                // 诊断日志：帮助排查日期缺失问题
-                #if DEBUG
-                print("DEBUG: StoryNode Diagnostic - id=\(story.id) summary=\(story.mainSummary ?? "nil")")
-                print("  Expected Layer IDs (\(storyLayerIds.count)): \(storyLayerIds)")
-                print("  Found Layers in DB (\(layers.count)): \(layers.map { "\($0.id) (\($0.startAt))" })")
-                if layers.count != storyLayerIds.count {
-                    let missingIds = Set(storyLayerIds).subtracting(Set(layers.map { $0.id }))
-                    print("  !!! MISSING IDs: \(missingIds)")
-                }
-                #endif
-
                 guard !layers.isEmpty else { continue }
                 
                 // 3. 确定时间范围

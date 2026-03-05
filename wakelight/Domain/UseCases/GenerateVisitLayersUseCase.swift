@@ -20,6 +20,20 @@ final class GenerateVisitLayersUseCase {
             var totalCreatedOrUpdated = 0
 
             for cluster in clusters {
+                // 关键保护：已有故事的 cluster 不做“删库重建 VisitLayer”，避免 StoryNode 引用失效
+                let hasStoryNode = try StoryNode
+                    .filter(Column("placeClusterId") == cluster.id)
+                    .fetchCount(db) > 0
+                let hasStoryLayer = try VisitLayer
+                    .filter(Column("placeClusterId") == cluster.id && Column("isStoryNode") == true)
+                    .fetchCount(db) > 0
+                if hasStoryNode || hasStoryLayer {
+                    #if DEBUG
+                    print("DEBUG: GenerateVisitLayersUseCase - skip regenerating cluster \(cluster.id) because it already has story data")
+                    #endif
+                    continue
+                }
+
                 // 仅使用“保留/未标注”照片生成 VisitLayer；已归档过滤的不参与分层
                 let allPhotos = try PhotoAsset
                     .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
