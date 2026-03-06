@@ -239,6 +239,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
                 HapticPlayer.play(forCount: hitStreakCount)
                 SystemSoundPlayer.playTick()
+                print("[Exploration][Feedback] hit streak=\(hitStreakCount) cluster=\(hitCluster.id)")
 
                 if let fogView = fogScreenView {
                     let screenPoint = mapView.convert(annotation.coordinate, toPointTo: fogView)
