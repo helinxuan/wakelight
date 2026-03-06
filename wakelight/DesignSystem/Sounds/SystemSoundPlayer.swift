@@ -2,15 +2,30 @@ import AudioToolbox
 import AVFoundation
 
 enum SystemSoundPlayer {
-    private static var didWarmUp = false
-
     static func warmUpIfNeeded() {
-        guard !didWarmUp else { return }
-        didWarmUp = true
-
+        #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.ambient, mode: .default)
-        try? session.setActive(true, options: [])
+        do {
+            // 探索页可能已启用麦克风（BlowDetector: playAndRecord）。
+            // 录音态下显式允许系统触感与系统短音效，避免被系统策略静默。
+            if session.category == .playAndRecord {
+                if #available(iOS 13.0, *) {
+                    try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+                }
+            } else {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            }
+
+            try session.setActive(true, options: [])
+            #if DEBUG
+            print("[FeedbackDiag][Audio] category=\(session.category.rawValue) mode=\(session.mode.rawValue) silencedHint=\(session.secondaryAudioShouldBeSilencedHint) volume=\(session.outputVolume)")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[FeedbackDiag][Audio] setup failed: \(error)")
+            #endif
+        }
+        #endif
     }
 
     static func playTick() {

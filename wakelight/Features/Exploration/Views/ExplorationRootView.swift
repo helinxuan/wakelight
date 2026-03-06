@@ -486,7 +486,16 @@ final class BlowDetector: NSObject, ObservableObject, AVAudioRecorderDelegate {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+            if #available(iOS 13.0, *) {
+                try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+            }
             try session.setActive(true, options: [])
+
+            #if DEBUG
+            if #available(iOS 13.0, *) {
+                print("[FeedbackDiag][BlowDetector] allowHapticsDuringRecording=true category=\(session.category.rawValue) mode=\(session.mode.rawValue)")
+            }
+            #endif
 
             let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("blow_detector_temp.caf")
             let settings: [String: Any] = [
