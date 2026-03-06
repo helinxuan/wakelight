@@ -11,43 +11,36 @@ struct TimeTravelMapView: UIViewRepresentable {
 
         private var currentOverlays: [MKOverlay] = []
         private var currentAnnotations: [TimeTravelNodeAnnotation] = []
-
-        private weak var flowRenderer: MKPolylineRenderer?
-        private var displayLink: CADisplayLink?
-        private var dashPhase: CGFloat = 0
-        private var lastFrameTime: CFTimeInterval = 0
-
-        private let dashGap: CGFloat = 12
-        private let cycleDuration: CFTimeInterval = 3.0
+        private var lastRouteSignature: [String] = []
 
         init(parent: TimeTravelMapView) {
             self.parent = parent
             super.init()
         }
 
-        deinit {
-            stopFlowAnimation()
-        }
-
         func rebuildOverlaysAndAnnotations(on mapView: MKMapView) {
-            if !currentOverlays.isEmpty {
-                mapView.removeOverlays(currentOverlays)
-            }
-            mapView.removeAnnotations(currentAnnotations)
-
             let coords: [CLLocationCoordinate2D] = parent.nodes.compactMap { node in
                 guard let cluster = node.placeCluster else { return nil }
                 return CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
             }
 
-            currentOverlays = buildRouteOverlays(from: coords)
-            if !currentOverlays.isEmpty {
-                mapView.addOverlays(currentOverlays)
-                startFlowAnimationIfNeeded()
-            } else {
-                stopFlowAnimation()
+            let routeSignature = coords.map { "\(round($0.latitude * 10_000) / 10_000),\(round($0.longitude * 10_000) / 10_000)" }
+            let routeChanged = routeSignature != lastRouteSignature
+
+            if routeChanged {
+                if !currentOverlays.isEmpty {
+                    mapView.removeOverlays(currentOverlays)
+                }
+
+                currentOverlays = buildRouteOverlays(from: coords)
+                if !currentOverlays.isEmpty {
+                    mapView.addOverlays(currentOverlays)
+                }
+
+                lastRouteSignature = routeSignature
             }
 
+            mapView.removeAnnotations(currentAnnotations)
             currentAnnotations = parent.nodes.enumerated().compactMap { idx, node in
                 guard let cluster = node.placeCluster else { return nil }
                 return TimeTravelNodeAnnotation(
@@ -61,43 +54,10 @@ struct TimeTravelMapView: UIViewRepresentable {
 
         private func buildRouteOverlays(from coords: [CLLocationCoordinate2D]) -> [MKOverlay] {
             guard coords.count >= 2 else { return [] }
-            let flowLine = MKGeodesicPolyline(coordinates: coords, count: coords.count)
-            flowLine.title = "route_flow_dashed"
+            // 稳定优先：使用 MKPolyline，避免 geodesic 在高纬和缩放时出现段重算抖动
+            let flowLine = MKPolyline(coordinates: coords, count: coords.count)
+            flowLine.title = "route_flow_dashed_stable"
             return [flowLine]
-        }
-
-        private func startFlowAnimationIfNeeded() {
-            guard displayLink == nil else { return }
-            let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
-            link.add(to: .main, forMode: .common)
-            displayLink = link
-            dashPhase = 0
-            lastFrameTime = 0
-        }
-
-        private func stopFlowAnimation() {
-            displayLink?.invalidate()
-            displayLink = nil
-            dashPhase = 0
-            lastFrameTime = 0
-        }
-
-        @objc private func handleDisplayLink(_ link: CADisplayLink) {
-            guard let renderer = flowRenderer else { return }
-
-            if lastFrameTime == 0 {
-                lastFrameTime = link.timestamp
-                return
-            }
-
-            let delta = link.timestamp - lastFrameTime
-            lastFrameTime = link.timestamp
-
-            let speed = dashGap / CGFloat(cycleDuration)
-            dashPhase = (dashPhase + CGFloat(delta) * speed).truncatingRemainder(dividingBy: dashGap)
-
-            renderer.lineDashPhase = dashPhase
-            renderer.setNeedsDisplay()
         }
 
         func updateSelection(on mapView: MKMapView) {
@@ -125,12 +85,9 @@ struct TimeTravelMapView: UIViewRepresentable {
             let renderer = MKPolylineRenderer(polyline: polyline)
             renderer.lineCap = .round
             renderer.lineJoin = .round
-            renderer.strokeColor = UIColor(red: 0xA8 / 255.0, green: 0xEE / 255.0, blue: 0xFF / 255.0, alpha: 0.88)
-            renderer.lineWidth = 4
-            renderer.lineDashPattern = [6, 12]
-            renderer.lineDashPhase = dashPhase
-
-            flowRenderer = renderer
+            renderer.strokeColor = UIColor(red: 0xA8 / 255.0, green: 0xEE / 255.0, blue: 0xFF / 255.0, alpha: 0.84)
+            renderer.lineWidth = 2.5
+            renderer.lineDashPattern = [4, 8]
             return renderer
         }
 
