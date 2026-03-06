@@ -9,11 +9,21 @@ struct TimeTravelView: View {
     var body: some View {
         ZStack {
             TimeTravelMapView(nodes: viewModel.nodes, selectedIndex: viewModel.selectedIndex)
+                .saturation(0.8)
+                .brightness(0.03)
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    Button {
+            Color.black
+                .opacity(0.26)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            if !viewModel.nodes.isEmpty {
+                TimeTravelScrubberView(
+                    nodes: viewModel.nodes,
+                    selectedIndex: $viewModel.selectedIndex,
+                    isPlaying: viewModel.isPlaying,
+                    onCruiseTap: {
                         withAnimation(.spring()) {
                             if viewModel.isPlaying {
                                 viewModel.pause()
@@ -21,25 +31,19 @@ struct TimeTravelView: View {
                                 viewModel.play()
                             }
                         }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                            Text(viewModel.isPlaying ? "暂停" : "播放")
+                    },
+                    onDragStart: {
+                        if viewModel.isPlaying {
+                            viewModel.pause()
                         }
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .frame(height: 44)
-                        .background(viewModel.isPlaying ? Color.orange : Color.blue)
-                        .clipShape(Capsule())
-                        .shadow(color: (viewModel.isPlaying ? Color.orange : Color.blue).opacity(0.3), radius: 8, y: 4)
                     }
+                )
+                .padding(.top, 8)
+                .zIndex(30)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
 
-                    Spacer()
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-
+            VStack(spacing: 0) {
                 Spacer()
 
                 if viewModel.nodes.isEmpty {
@@ -57,62 +61,38 @@ struct TimeTravelView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .padding(.bottom, 40)
                 } else {
-                    VStack(spacing: 0) {
-                        TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex) { node in
-                            print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
-                            if let storyId = node.storyId {
-                                Task {
-                                    do {
-                                        let story = try await DatabaseContainer.shared.db.reader.read { db in
-                                            try StoryNode.fetchOne(db, key: storyId)
+                    TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex) { node in
+                        print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
+                        if let storyId = node.storyId {
+                            Task {
+                                do {
+                                    let story = try await DatabaseContainer.shared.db.reader.read { db in
+                                        try StoryNode.fetchOne(db, key: storyId)
+                                    }
+                                    if let story {
+                                        await MainActor.run {
+                                            selectedDetailItem = .story(story)
                                         }
-                                        if let story {
-                                            await MainActor.run {
-                                                selectedDetailItem = .story(story)
-                                            }
-                                        } else if let layer = node.visitLayer {
-                                            await MainActor.run {
-                                                selectedDetailItem = .unhandled(layer)
-                                            }
+                                    } else if let layer = node.visitLayer {
+                                        await MainActor.run {
+                                            selectedDetailItem = .unhandled(layer)
                                         }
-                                    } catch {
-                                        if let layer = node.visitLayer {
-                                            await MainActor.run {
-                                                selectedDetailItem = .unhandled(layer)
-                                            }
+                                    }
+                                } catch {
+                                    if let layer = node.visitLayer {
+                                        await MainActor.run {
+                                            selectedDetailItem = .unhandled(layer)
                                         }
                                     }
                                 }
-                            } else if let layer = node.visitLayer {
-                                selectedDetailItem = .unhandled(layer)
-                            } else {
-                                print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
                             }
+                        } else if let layer = node.visitLayer {
+                            selectedDetailItem = .unhandled(layer)
+                        } else {
+                            print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
                         }
-
-                        TimeTravelScrubberView(
-                            nodes: viewModel.nodes,
-                            selectedIndex: $viewModel.selectedIndex,
-                            isPlaying: viewModel.isPlaying,
-                            onCruiseTap: {
-                                withAnimation(.spring()) {
-                                    if viewModel.isPlaying {
-                                        viewModel.pause()
-                                    } else {
-                                        viewModel.play()
-                                    }
-                                }
-                            },
-                            onDragStart: {
-                                if viewModel.isPlaying {
-                                    viewModel.pause()
-                                }
-                            }
-                        )
-                        .padding(.top, 10)
-                        .padding(.bottom, 40)
-                        .zIndex(20)
                     }
+                    .padding(.bottom, 36)
                 }
             }
         }
@@ -142,59 +122,56 @@ private struct TimeTravelScrubberView: View {
     private var totalCount: Int { nodes.count }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             GeometryReader { geo in
                 let width = max(geo.size.width, 1)
                 let tickCount = resolvedTickCount(for: width)
                 let focusX = focusedX(width: width)
 
-                ZStack(alignment: .topLeading) {
-                    if totalCount > 0 {
-                        Text(currentTimeLabel)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.38))
-                            .clipShape(Capsule())
-                            .position(x: bubbleX(width: width), y: 12)
-                    }
+                HStack(alignment: .bottom, spacing: 0) {
+                    ForEach(0..<tickCount, id: \.self) { tick in
+                        Capsule()
+                            .fill(barColor(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
+                            .frame(width: 2, height: barHeight(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
 
-                    HStack(alignment: .bottom, spacing: 0) {
-                        ForEach(0..<tickCount, id: \.self) { tick in
-                            Capsule()
-                                .fill(barColor(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
-                                .frame(width: 2, height: barHeight(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
-
-                            if tick < tickCount - 1 {
-                                Spacer(minLength: 0)
-                            }
+                        if tick < tickCount - 1 {
+                            Spacer(minLength: 0)
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.top, 28)
-                    .animation(.easeOut(duration: 0.08), value: selectedIndex)
-                    .animation(.easeOut(duration: 0.08), value: focusedProgress)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .animation(.easeOut(duration: 0.08), value: selectedIndex)
+                .animation(.easeOut(duration: 0.08), value: focusedProgress)
                 .contentShape(Rectangle())
                 .highPriorityGesture(dragGesture(width: width, tickCount: tickCount), including: .all)
             }
-            .frame(height: 74)
+            .frame(height: 30)
 
-            Button(action: onCruiseTap) {
-                HStack(spacing: 6) {
-                    Text(isPlaying ? "❚❚" : "▶")
-                    Text("巡航")
+            HStack(alignment: .center) {
+                Text(currentTimeLabel)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.38))
+                    .clipShape(Capsule())
+
+                Spacer()
+
+                Button(action: onCruiseTap) {
+                    HStack(spacing: 6) {
+                        Text(isPlaying ? "❚❚" : "▶")
+                        Text("巡航")
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.3))
+                    .clipShape(Capsule())
                 }
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.3))
-                .clipShape(Capsule())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
