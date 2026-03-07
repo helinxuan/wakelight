@@ -41,37 +41,59 @@ private struct TimelineCardView: View {
     let node: TimeRouteNode
     let isSelected: Bool
 
+    private let cardWidth: CGFloat = 372
+    private let photoHeight: CGFloat = 258
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Photo Area
             ZStack(alignment: .bottomLeading) {
                 if let cover = node.coverPhotoIdentifier {
-                    ThumbnailView(locatorKey: cover, size: CGSize(width: 260, height: 160))
+                    ThumbnailView(locatorKey: cover, size: CGSize(width: cardWidth, height: photoHeight))
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 260, height: 160)
+                        .frame(width: cardWidth, height: photoHeight)
                         .clipped()
                 } else {
                     Rectangle()
                         .fill(LinearGradient(colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 260, height: 160)
+                        .frame(width: cardWidth, height: photoHeight)
                         .overlay {
                             Image(systemName: "photo.on.rectangle.angled")
-                                .font(.system(size: 30))
+                                .font(.system(size: 38))
                                 .foregroundColor(.secondary.opacity(0.5))
                         }
                 }
-                
-                // Date Badge
-                if let dateText = node.displayTitle {
-                    Text(dateText)
-                        .font(.system(size: 11, weight: .bold))
+
+                HStack(spacing: 8) {
+                    if let dateText = node.displayTitle {
+                        Text(dateText)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                    }
+
+                    Spacer(minLength: 0)
+
+                    if let location = node.displayLocation, !location.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(location)
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                        }
                         .foregroundColor(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(.ultraThinMaterial)
                         .clipShape(Capsule())
-                        .padding(10)
+                    }
                 }
+                .padding(12)
+                .frame(maxWidth: .infinity)
             }
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .shadow(color: isSelected ? .black.opacity(0.2) : .clear, radius: 10, y: 5)
@@ -82,7 +104,7 @@ private struct TimelineCardView: View {
                     Text(summary)
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(isSelected ? .primary : .secondary)
-                        .lineLimit(2)
+                        .lineLimit(3)
                         .multilineTextAlignment(.leading)
                 } else {
                     Text("记录一段回忆...")
@@ -90,24 +112,13 @@ private struct TimelineCardView: View {
                         .foregroundColor(.secondary.opacity(0.6))
                         .italic()
                 }
-                
-                if let location = node.displayLocation {
-                    HStack(spacing: 4) {
-                        Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 10))
-                        Text(location)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                    }
-                    .foregroundColor(.blue.opacity(0.8))
-                    .padding(.top, 2)
-                }
             }
             .padding(.top, 12)
             .padding(.horizontal, 4)
+            .frame(minHeight: 72, alignment: .topLeading)
         }
-        .frame(width: 260)
-        .scaleEffect(isSelected ? 1.05 : 1.0)
+        .frame(width: cardWidth)
+        .scaleEffect(isSelected ? 1.04 : 1.0)
         .opacity(isSelected ? 1.0 : 0.8)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSelected)
     }

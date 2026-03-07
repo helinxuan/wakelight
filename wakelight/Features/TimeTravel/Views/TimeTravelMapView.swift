@@ -68,11 +68,28 @@ struct TimeTravelMapView: UIViewRepresentable {
 
             if parent.nodes.indices.contains(parent.selectedIndex),
                let cluster = parent.nodes[parent.selectedIndex].placeCluster {
-                let center = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-                let camera = MKMapCamera(lookingAtCenter: center, fromDistance: 1_200_000, pitch: 50, heading: 0)
+                let focus = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
 
-                UIView.animate(withDuration: 1.1, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
-                    mapView.setCamera(camera, animated: false)
+                // 统一缩放级别，避免不同故事点出现忽远忽近
+                var region = MKCoordinateRegion(
+                    center: focus,
+                    span: MKCoordinateSpan(latitudeDelta: 3.0, longitudeDelta: 3.0)
+                )
+                region = mapView.regionThatFits(region)
+
+                UIView.animate(withDuration: 1.0, delay: 0, options: [.curveEaseInOut, .allowUserInteraction]) {
+                    mapView.setRegion(region, animated: false)
+
+                    // 把焦点提到上半屏约 1/3，给底部故事卡片腾位置
+                    let desiredY = mapView.bounds.height * 0.33
+                    let desiredPoint = CGPoint(x: mapView.bounds.midX, y: desiredY)
+                    let coordAtDesiredPoint = mapView.convert(desiredPoint, toCoordinateFrom: mapView)
+
+                    let adjustedCenter = CLLocationCoordinate2D(
+                        latitude: region.center.latitude + (focus.latitude - coordAtDesiredPoint.latitude),
+                        longitude: region.center.longitude + (focus.longitude - coordAtDesiredPoint.longitude)
+                    )
+                    mapView.setCenter(adjustedCenter, animated: false)
                 }
             }
         }
