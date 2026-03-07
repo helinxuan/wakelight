@@ -165,11 +165,14 @@ struct TimeTravelView: View {
     }
 
     private var currentCityText: String {
-        if let city = currentNode?.placeCluster?.cityName, !city.isEmpty {
+        if let city = currentNode?.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty {
             return city
         }
-        if let location = currentNode?.displayLocation, !location.isEmpty {
+        if let location = currentNode?.displayLocation?.trimmingCharacters(in: .whitespacesAndNewlines), !location.isEmpty {
             return location
+        }
+        if let address = currentNode?.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines), !address.isEmpty {
+            return address
         }
         return "未知城市"
     }
@@ -184,6 +187,7 @@ private struct TimeTravelScrubberView: View {
     @State private var focusedProgress: CGFloat = 0
     @State private var lastStoryFeedbackIndex: Int = -1
     @State private var lastTickFeedbackIndex: Int = -1
+    @State private var isPulseExpanded = false
 
     private let minTickSpacing: CGFloat = 6
     private let maxTickCount: Int = 90
@@ -209,7 +213,9 @@ private struct TimeTravelScrubberView: View {
                                 if isCurrentTick {
                                     Circle()
                                         .fill(Color.white.opacity(0.98))
-                                        .frame(width: 6, height: 6)
+                                        .frame(width: isDragging ? (isPulseExpanded ? 7.6 : 6.2) : 6, height: isDragging ? (isPulseExpanded ? 7.6 : 6.2) : 6)
+                                        .scaleEffect(isDragging ? (isPulseExpanded ? 1.06 : 0.96) : 1.0)
+                                        .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: isPulseExpanded)
                                         .offset(y: -8)
                                 }
                             }
@@ -240,6 +246,14 @@ private struct TimeTravelScrubberView: View {
         .onChange(of: selectedIndex) { _, newValue in
             guard !isDragging else { return }
             focusedProgress = progress(for: newValue)
+        }
+        .task(id: isDragging) {
+            guard isDragging else { return }
+            while isDragging {
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                guard isDragging else { break }
+                isPulseExpanded.toggle()
+            }
         }
     }
 
@@ -299,6 +313,7 @@ private struct TimeTravelScrubberView: View {
 
                 if !isDragging {
                     isDragging = true
+                    isPulseExpanded = true
                     onDragStart()
                     HapticPlayer.play(forCount: 5)
                     SystemSoundPlayer.playTick()
@@ -329,6 +344,7 @@ private struct TimeTravelScrubberView: View {
             }
             .onEnded { _ in
                 isDragging = false
+                isPulseExpanded = false
                 focusedProgress = progress(for: selectedIndex)
                 lastTickFeedbackIndex = -1
                 print("[TimeTravel][Feedback] drag end")

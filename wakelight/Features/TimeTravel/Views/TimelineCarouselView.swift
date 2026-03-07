@@ -65,13 +65,13 @@ private struct TimelineCardView: View {
                 if let summary = node.displaySummary, !summary.isEmpty {
                     Text(summary)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white.opacity(0.92))
                         .lineLimit(isExpanded ? 6 : 2)
                         .multilineTextAlignment(.leading)
                 } else {
                     Text("记录一段回忆...")
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundColor(.white.opacity(0.62))
                         .italic()
                         .lineLimit(2)
                 }
@@ -86,7 +86,7 @@ private struct TimelineCardView: View {
                 .padding(.bottom, 10)
         }
         .frame(width: cardWidth, height: cardHeight, alignment: .top)
-        .background(.ultraThinMaterial)
+        .background(.ultraThinMaterial.opacity(0.68))
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
