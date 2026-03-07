@@ -196,12 +196,23 @@ private struct TimeTravelScrubberView: View {
                 let width = max(geo.size.width, 1)
                 let tickCount = resolvedTickCount(for: width)
                 let focusX = focusedX(width: width)
+                let selectedTick = nearestRenderTickIndex(progress: focusedProgress, tickCount: tickCount)
 
                 HStack(alignment: .bottom, spacing: 0) {
                     ForEach(0..<tickCount, id: \.self) { tick in
+                        let isCurrentTick = tick == selectedTick
+
                         Capsule()
-                            .fill(barColor(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
-                            .frame(width: 2, height: barHeight(forTick: tick, tickCount: tickCount, focusX: focusX, width: width))
+                            .fill(barColor(forTick: tick, tickCount: tickCount, focusX: focusX, width: width, isCurrentTick: isCurrentTick))
+                            .frame(width: isCurrentTick ? 3.5 : 2, height: barHeight(forTick: tick, tickCount: tickCount, focusX: focusX, width: width, isCurrentTick: isCurrentTick))
+                            .overlay(alignment: .top) {
+                                if isCurrentTick {
+                                    Circle()
+                                        .fill(Color.white.opacity(0.98))
+                                        .frame(width: 6, height: 6)
+                                        .offset(y: -8)
+                                }
+                            }
 
                         if tick < tickCount - 1 {
                             Spacer(minLength: 0)
@@ -267,14 +278,18 @@ private struct TimeTravelScrubberView: View {
         return 1 - normalized
     }
 
-    private func barHeight(forTick tick: Int, tickCount: Int, focusX: CGFloat, width: CGFloat) -> CGFloat {
+    private func barHeight(forTick tick: Int, tickCount: Int, focusX: CGFloat, width: CGFloat, isCurrentTick: Bool) -> CGFloat {
         let score = distanceScore(forTick: tick, tickCount: tickCount, focusX: focusX, width: width)
-        return 8 + score * 13
+        let base = 8 + score * 13
+        return isCurrentTick ? base + 4 : base
     }
 
-    private func barColor(forTick tick: Int, tickCount: Int, focusX: CGFloat, width: CGFloat) -> Color {
+    private func barColor(forTick tick: Int, tickCount: Int, focusX: CGFloat, width: CGFloat, isCurrentTick: Bool) -> Color {
+        if isCurrentTick {
+            return Color.white.opacity(0.98)
+        }
         let score = distanceScore(forTick: tick, tickCount: tickCount, focusX: focusX, width: width)
-        return Color.white.opacity(0.26 + score * 0.7)
+        return Color.white.opacity(0.22 + score * 0.62)
     }
 
     private func dragGesture(width: CGFloat, tickCount: Int) -> some Gesture {

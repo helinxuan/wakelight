@@ -56,6 +56,9 @@ private struct TimelineCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            photoArea
+                .padding(.top, 12)
+
             VStack(alignment: .leading, spacing: 10) {
                 header
 
@@ -74,11 +77,9 @@ private struct TimelineCardView: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.top, 14)
+            .padding(.top, 12)
 
-            Spacer(minLength: 10)
-
-            photoArea
+            Spacer(minLength: 8)
 
             expandHandle
                 .padding(.top, 8)
@@ -91,7 +92,7 @@ private struct TimelineCardView: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.white.opacity(0.16), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(isSelected ? 0.22 : 0.12), radius: 14, y: 8)
+        .shadow(color: .black.opacity(0.12), radius: 30, y: 8)
         .scaleEffect(isSelected ? 1.0 : 0.985)
         .opacity(isSelected ? 1.0 : 0.9)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: isSelected)
