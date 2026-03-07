@@ -3,6 +3,8 @@ import SwiftUI
 struct TimelineCarouselView: View {
     let nodes: [TimeRouteNode]
     @Binding var selectedIndex: Int
+    @Binding var isExpanded: Bool
+    let cardHeight: CGFloat
     let onShowDetail: (TimeRouteNode) -> Void
 
     var body: some View {
@@ -10,23 +12,28 @@ struct TimelineCarouselView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
                     ForEach(Array(nodes.enumerated()), id: \.offset) { index, node in
-                        TimelineCardView(node: node, isSelected: index == selectedIndex)
-                            .id(index)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                print("DEBUG: TimelineCarouselView - tapped index=\(index) selected=\(index == selectedIndex) nodeId=\(node.id)")
-                                if index == selectedIndex {
-                                    onShowDetail(node)
-                                } else {
-                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                        selectedIndex = index
-                                    }
+                        TimelineCardView(
+                            node: node,
+                            isSelected: index == selectedIndex,
+                            isExpanded: $isExpanded,
+                            cardHeight: cardHeight
+                        )
+                        .id(index)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            print("DEBUG: TimelineCarouselView - tapped index=\(index) selected=\(index == selectedIndex) nodeId=\(node.id)")
+                            if index == selectedIndex {
+                                onShowDetail(node)
+                            } else {
+                                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                    selectedIndex = index
                                 }
                             }
+                        }
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
             .onChange(of: selectedIndex) { _, newIndex in
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -40,86 +47,122 @@ struct TimelineCarouselView: View {
 private struct TimelineCardView: View {
     let node: TimeRouteNode
     let isSelected: Bool
+    @Binding var isExpanded: Bool
+    let cardHeight: CGFloat
 
-    private let cardWidth: CGFloat = 372
-    private let photoHeight: CGFloat = 258
+    private var cardWidth: CGFloat { min(UIScreen.main.bounds.width - 24, 430) }
+    private var photoRatioInCard: CGFloat { isExpanded ? 0.62 : 0.54 }
+    private var photoHeight: CGFloat { cardHeight * photoRatioInCard }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Photo Area
-            ZStack(alignment: .bottomLeading) {
-                if let cover = node.coverPhotoIdentifier {
-                    ThumbnailView(locatorKey: cover, size: CGSize(width: cardWidth, height: photoHeight))
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: cardWidth, height: photoHeight)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(LinearGradient(colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: cardWidth, height: photoHeight)
-                        .overlay {
-                            Image(systemName: "photo.on.rectangle.angled")
-                                .font(.system(size: 38))
-                                .foregroundColor(.secondary.opacity(0.5))
-                        }
-                }
+            VStack(alignment: .leading, spacing: 10) {
+                header
 
-                HStack(spacing: 8) {
-                    if let dateText = node.displayTitle {
-                        Text(dateText)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Capsule())
-                    }
-
-                    Spacer(minLength: 0)
-
-                    if let location = node.displayLocation, !location.isEmpty {
-                        HStack(spacing: 4) {
-                            Image(systemName: "mappin.and.ellipse")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text(location)
-                                .font(.system(size: 11, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .shadow(color: isSelected ? .black.opacity(0.2) : .clear, radius: 10, y: 5)
-
-            // Content Area
-            VStack(alignment: .leading, spacing: 4) {
                 if let summary = node.displaySummary, !summary.isEmpty {
                     Text(summary)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(isSelected ? .primary : .secondary)
-                        .lineLimit(3)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(isExpanded ? 6 : 2)
                         .multilineTextAlignment(.leading)
                 } else {
                     Text("记录一段回忆...")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.7))
                         .italic()
+                        .lineLimit(2)
                 }
             }
-            .padding(.top, 12)
-            .padding(.horizontal, 4)
-            .frame(minHeight: 72, alignment: .topLeading)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+
+            Spacer(minLength: 10)
+
+            photoArea
+
+            expandHandle
+                .padding(.top, 8)
+                .padding(.bottom, 10)
         }
-        .frame(width: cardWidth)
-        .scaleEffect(isSelected ? 1.04 : 1.0)
-        .opacity(isSelected ? 1.0 : 0.8)
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSelected)
+        .frame(width: cardWidth, height: cardHeight, alignment: .top)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(isSelected ? 0.22 : 0.12), radius: 14, y: 8)
+        .scaleEffect(isSelected ? 1.0 : 0.985)
+        .opacity(isSelected ? 1.0 : 0.9)
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: isSelected)
+        .gesture(
+            DragGesture(minimumDistance: 14)
+                .onEnded { value in
+                    if value.translation.height < -38 {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isExpanded = true
+                        }
+                    } else if value.translation.height > 38 {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isExpanded = false
+                        }
+                    }
+                }
+        )
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text(node.displayLocation ?? node.placeCluster?.cityName ?? "未知地点")
+                .font(.system(size: 19, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            if let dateText = node.displayTitle {
+                Text(dateText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+        }
+    }
+
+    private var photoArea: some View {
+        ZStack {
+            if let cover = node.coverPhotoIdentifier {
+                ThumbnailView(locatorKey: cover, size: CGSize(width: cardWidth - 24, height: photoHeight))
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: cardWidth - 24, height: photoHeight)
+                    .background(Color.black.opacity(0.24))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                Rectangle()
+                    .fill(LinearGradient(colors: [Color.gray.opacity(0.24), Color.gray.opacity(0.12)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay {
+                        Image(systemName: "photo")
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary.opacity(0.55))
+                    }
+            }
+        }
+        .frame(width: cardWidth - 24, height: photoHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 12)
+    }
+
+    private var expandHandle: some View {
+        HStack(spacing: 6) {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
+                .font(.system(size: 11, weight: .semibold))
+            Text(isExpanded ? "下滑收起" : "上滑展开")
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundColor(.white.opacity(0.86))
+        .frame(maxWidth: .infinity)
     }
 }

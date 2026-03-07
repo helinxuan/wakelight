@@ -5,23 +5,40 @@ import UIKit
 struct TimeTravelView: View {
     @StateObject private var viewModel = TimeTravelViewModel()
     @State private var selectedDetailItem: MemoryDetailItem?
+    @State private var isCardExpanded = false
+
+    private let collapsedCardRatio: CGFloat = 0.45
+    private let expandedCardRatio: CGFloat = 0.68
 
     var body: some View {
-        ZStack {
-            TimeTravelMapView(nodes: viewModel.nodes, selectedIndex: viewModel.selectedIndex)
-                .saturation(0.8)
-                .brightness(0.03)
-                .ignoresSafeArea()
+        GeometryReader { geo in
+            ZStack {
+                TimeTravelMapView(nodes: viewModel.nodes, selectedIndex: viewModel.selectedIndex)
+                    .saturation(0.82)
+                    .brightness(0.02)
+                    .ignoresSafeArea()
 
-            Color.black
-                .opacity(0.26)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
+                Color.black
+                    .opacity(0.42)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
 
-            if !viewModel.nodes.isEmpty {
-                TimeTravelScrubberView(
-                    nodes: viewModel.nodes,
-                    selectedIndex: $viewModel.selectedIndex,
+                if !viewModel.nodes.isEmpty {
+                    TimeTravelScrubberView(
+                        nodes: viewModel.nodes,
+                        selectedIndex: $viewModel.selectedIndex,
+                        onDragStart: {
+                            if viewModel.isPlaying {
+                                viewModel.pause()
+                            }
+                        }
+                    )
+                    .padding(.top, 56)
+                    .zIndex(30)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+
+                topStatusBar(
                     isPlaying: viewModel.isPlaying,
                     onCruiseTap: {
                         withAnimation(.spring()) {
@@ -31,20 +48,11 @@ struct TimeTravelView: View {
                                 viewModel.play()
                             }
                         }
-                    },
-                    onDragStart: {
-                        if viewModel.isPlaying {
-                            viewModel.pause()
-                        }
                     }
                 )
                 .padding(.top, 8)
-                .zIndex(30)
+                .zIndex(40)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-
-            VStack(spacing: 0) {
-                Spacer()
 
                 if viewModel.nodes.isEmpty {
                     VStack(spacing: 12) {
@@ -59,40 +67,48 @@ struct TimeTravelView: View {
                     .padding(.vertical, 20)
                     .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .padding(.bottom, 40)
                 } else {
-                    TimelineCarouselView(nodes: viewModel.nodes, selectedIndex: $viewModel.selectedIndex) { node in
-                        print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
-                        if let storyId = node.storyId {
-                            Task {
-                                do {
-                                    let story = try await DatabaseContainer.shared.db.reader.read { db in
-                                        try StoryNode.fetchOne(db, key: storyId)
-                                    }
-                                    if let story {
-                                        await MainActor.run {
-                                            selectedDetailItem = .story(story)
+                    VStack(spacing: 10) {
+                        Spacer()
+
+                        TimelineCarouselView(
+                            nodes: viewModel.nodes,
+                            selectedIndex: $viewModel.selectedIndex,
+                            isExpanded: $isCardExpanded,
+                            cardHeight: geo.size.height * (isCardExpanded ? expandedCardRatio : collapsedCardRatio)
+                        ) { node in
+                            print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
+                            if let storyId = node.storyId {
+                                Task {
+                                    do {
+                                        let story = try await DatabaseContainer.shared.db.reader.read { db in
+                                            try StoryNode.fetchOne(db, key: storyId)
                                         }
-                                    } else if let layer = node.visitLayer {
-                                        await MainActor.run {
-                                            selectedDetailItem = .unhandled(layer)
+                                        if let story {
+                                            await MainActor.run {
+                                                selectedDetailItem = .story(story)
+                                            }
+                                        } else if let layer = node.visitLayer {
+                                            await MainActor.run {
+                                                selectedDetailItem = .unhandled(layer)
+                                            }
                                         }
-                                    }
-                                } catch {
-                                    if let layer = node.visitLayer {
-                                        await MainActor.run {
-                                            selectedDetailItem = .unhandled(layer)
+                                    } catch {
+                                        if let layer = node.visitLayer {
+                                            await MainActor.run {
+                                                selectedDetailItem = .unhandled(layer)
+                                            }
                                         }
                                     }
                                 }
+                            } else if let layer = node.visitLayer {
+                                selectedDetailItem = .unhandled(layer)
+                            } else {
+                                print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
                             }
-                        } else if let layer = node.visitLayer {
-                            selectedDetailItem = .unhandled(layer)
-                        } else {
-                            print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
                         }
                     }
-                    .padding(.bottom, 36)
+                    .padding(.bottom, 18)
                 }
             }
         }
@@ -102,13 +118,66 @@ struct TimeTravelView: View {
             }
         }
     }
+
+    private func topStatusBar(isPlaying: Bool, onCruiseTap: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Text(currentDateText)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.96))
+
+            Text(currentCityText)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Button(action: onCruiseTap) {
+                HStack(spacing: 6) {
+                    Text(isPlaying ? "❚❚" : "▶")
+                    Text("巡航")
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.28))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial.opacity(0.45))
+        )
+        .padding(.horizontal, 14)
+    }
+
+    private var currentNode: TimeRouteNode? {
+        guard viewModel.nodes.indices.contains(viewModel.selectedIndex) else { return nil }
+        return viewModel.nodes[viewModel.selectedIndex]
+    }
+
+    private var currentDateText: String {
+        currentNode?.displayTitle ?? "--"
+    }
+
+    private var currentCityText: String {
+        if let city = currentNode?.placeCluster?.cityName, !city.isEmpty {
+            return city
+        }
+        if let location = currentNode?.displayLocation, !location.isEmpty {
+            return location
+        }
+        return "未知城市"
+    }
 }
 
 private struct TimeTravelScrubberView: View {
     let nodes: [TimeRouteNode]
     @Binding var selectedIndex: Int
-    let isPlaying: Bool
-    let onCruiseTap: () -> Void
     let onDragStart: () -> Void
 
     @State private var isDragging = false
@@ -147,31 +216,7 @@ private struct TimeTravelScrubberView: View {
             }
             .frame(height: 30)
 
-            HStack(alignment: .center) {
-                Text(currentTimeLabel)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.black.opacity(0.38))
-                    .clipShape(Capsule())
-
-                Spacer()
-
-                Button(action: onCruiseTap) {
-                    HStack(spacing: 6) {
-                        Text(isPlaying ? "❚❚" : "▶")
-                        Text("巡航")
-                    }
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.3))
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
+            // 仅保留时光轴，去掉其下方时间标签和巡航按钮
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
@@ -207,11 +252,6 @@ private struct TimeTravelScrubberView: View {
 
     private func focusedX(width: CGFloat) -> CGFloat {
         min(max(focusedProgress, 0), 1) * width
-    }
-
-    private func bubbleX(width: CGFloat) -> CGFloat {
-        let x = focusedX(width: width)
-        return min(max(x, 42), max(width - 42, 42))
     }
 
     private func tickX(for tick: Int, tickCount: Int, width: CGFloat) -> CGFloat {
