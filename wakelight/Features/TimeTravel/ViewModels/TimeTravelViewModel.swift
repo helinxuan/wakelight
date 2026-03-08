@@ -11,15 +11,32 @@ final class TimeTravelViewModel: ObservableObject {
 
     private var playTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
+    private let resolvePlaceClusterCityNameUseCase = ResolvePlaceClusterCityNameUseCase()
+    private var inFlightBackfillClusterIDs = Set<UUID>()
+    private var attemptedBackfillClusterIDs = Set<UUID>()
 
     init() {
         observeStoryNodes()
     }
 
     private func observeStoryNodes() {
-        // 监听 StoryNode 表的变化，一旦有新故事产生或被修改，自动重新加载
+        // 监听 StoryNode + VisitLayer + PlaceCluster 的变化，避免时光模式地点文案不刷新。
         ValueObservation.tracking { db in
-            try StoryNode.fetchAll(db)
+            let stories = try StoryNode.fetchAll(db)
+
+            for story in stories {
+                let layerIds = story.subVisitLayerIds
+                guard !layerIds.isEmpty else { continue }
+
+                let layers = try VisitLayer.fetchAll(db, keys: layerIds)
+                for layer in layers {
+                    _ = try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
+                }
+
+                _ = try PlaceCluster.fetchOne(db, key: story.placeClusterId)
+            }
+
+            return stories.map(\.id)
         }
         .publisher(in: DatabaseContainer.shared.db.reader)
         .sink { completion in
@@ -46,6 +63,8 @@ final class TimeTravelViewModel: ObservableObject {
             } else {
                 nodes = newNodes
             }
+
+            triggerLocationBackfillIfNeeded(for: newNodes)
         } catch {
             print("Failed to load time route: \(error)")
             nodes = []
@@ -81,5 +100,43 @@ final class TimeTravelViewModel: ObservableObject {
         isPlaying = false
         playTask?.cancel()
         playTask = nil
+    }
+
+    private func triggerLocationBackfillIfNeeded(for nodes: [TimeRouteNode]) {
+        for node in nodes {
+            guard let cluster = node.placeCluster else { continue }
+            guard needsBackfill(cluster: cluster) else { continue }
+            guard !attemptedBackfillClusterIDs.contains(cluster.id) else { continue }
+            guard !inFlightBackfillClusterIDs.contains(cluster.id) else { continue }
+
+            attemptedBackfillClusterIDs.insert(cluster.id)
+            inFlightBackfillClusterIDs.insert(cluster.id)
+
+            Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    Task { @MainActor [weak self] in
+                        self?.inFlightBackfillClusterIDs.remove(cluster.id)
+                    }
+                }
+
+                do {
+                    _ = try await self.resolvePlaceClusterCityNameUseCase.resolveCityName(for: cluster)
+                    _ = try await self.resolvePlaceClusterCityNameUseCase.resolveDetailedAddress(for: cluster)
+                } catch {
+                    print("[TimeTravel][Backfill][Error] cluster=\(cluster.id) error=\(error)")
+                }
+            }
+        }
+    }
+
+    private func needsBackfill(cluster: PlaceCluster) -> Bool {
+        let city = cluster.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let detailed = cluster.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let cityMissing = city.isEmpty || city == "未知城市"
+        let detailedMissing = detailed.isEmpty || detailed == "未知地点"
+
+        return cityMissing || detailedMissing
     }
 }

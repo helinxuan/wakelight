@@ -41,7 +41,8 @@ struct GenerateTimeRouteUseCase {
                 }
                 #endif
 
-                let locationName = cluster?.detailedAddress ?? cluster?.cityName
+                // 时光模式顶部文案优先城市名，避免展示英文街道名覆盖中文城市名。
+                let locationName = cluster?.cityName ?? cluster?.detailedAddress
 
                 let node = TimeRouteNode(
                     id: UUID(),

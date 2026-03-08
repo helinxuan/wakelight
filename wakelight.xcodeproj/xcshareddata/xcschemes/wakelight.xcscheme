@@ -50,6 +50,13 @@
             ReferencedContainer = "container:wakelight.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "MAPBOX_ACCESS_TOKEN"
+            value = "REDACTED_MAPBOX_ACCESS_TOKEN"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Debug"

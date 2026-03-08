@@ -21,7 +21,6 @@ struct TimelineCarouselView: View {
                         .id(index)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            print("DEBUG: TimelineCarouselView - tapped index=\(index) selected=\(index == selectedIndex) nodeId=\(node.id)")
                             if index == selectedIndex {
                                 onShowDetail(node)
                             } else {
@@ -61,6 +60,13 @@ private struct TimelineCardView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 header
+
+                if let detail = detailDisplayText {
+                    Text(detail)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .lineLimit(1)
+                }
 
                 if let summary = node.displaySummary, !summary.isEmpty {
                     Text(summary)
@@ -114,7 +120,7 @@ private struct TimelineCardView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text(node.displayLocation ?? node.placeCluster?.cityName ?? "未知地点")
+            Text(cityDisplayText)
                 .font(.system(size: 19, weight: .bold))
                 .foregroundColor(.white)
                 .lineLimit(1)
@@ -154,6 +160,28 @@ private struct TimelineCardView: View {
         .frame(width: cardWidth - 24, height: photoHeight)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .padding(.horizontal, 12)
+    }
+
+    private var cityDisplayText: String {
+        let city = node.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !city.isEmpty, city != "未知城市" {
+            return city
+        }
+
+        let fallback = node.displayLocation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !fallback.isEmpty, fallback != "未知地点" {
+            return fallback
+        }
+
+        return "未知城市"
+    }
+
+    private var detailDisplayText: String? {
+        let detail = node.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if detail.isEmpty || detail == "未知地点" || detail == cityDisplayText {
+            return nil
+        }
+        return detail
     }
 
     private var expandHandle: some View {

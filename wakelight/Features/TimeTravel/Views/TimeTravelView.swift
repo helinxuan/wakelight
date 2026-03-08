@@ -77,7 +77,6 @@ struct TimeTravelView: View {
                             isExpanded: $isCardExpanded,
                             cardHeight: geo.size.height * (isCardExpanded ? expandedCardRatio : collapsedCardRatio)
                         ) { node in
-                            print("DEBUG: TimeTravelView - onShowDetail nodeId=\(node.id) visitLayerId=\(node.visitLayerId) storyId=\(node.storyId?.uuidString ?? "nil") hasVisitLayer=\(node.visitLayer != nil)")
                             if let storyId = node.storyId {
                                 Task {
                                     do {
@@ -103,8 +102,6 @@ struct TimeTravelView: View {
                                 }
                             } else if let layer = node.visitLayer {
                                 selectedDetailItem = .unhandled(layer)
-                            } else {
-                                print("DEBUG: TimeTravelView - visitLayer is nil, cannot present sheet")
                             }
                         }
                     }

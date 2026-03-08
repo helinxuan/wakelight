@@ -280,6 +280,7 @@
 				INFOPLIST_FILE = wakelight/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "拾光星图";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于检测吹气手势，快速解锁当前屏幕内的光点。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow adding photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow access to your photo library.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -330,6 +331,7 @@
 				INFOPLIST_FILE = wakelight/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "拾光星图";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于检测吹气手势，快速解锁当前屏幕内的光点。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow adding photos to your library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow access to your photo library.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;

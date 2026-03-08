@@ -26,6 +26,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             try await updateCluster(cluster.id, cityName: cityName)
             return cityName
         }
+
+        print("[Geo][CityResolve][Miss] cluster=\(cluster.id) lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude)")
         return nil
     }
 
@@ -41,13 +43,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         }
 
         let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-        
-        let detailedName: String?
-        if #available(iOS 26.0, *) {
-            detailedName = try await reverseGeocodeDetailedNameUsingMapKit(location: location)
-        } else {
-            detailedName = try await reverseGeocodeDetailedNameUsingCoreLocation(location: location)
-        }
+
+        let detailedName = try await reverseGeocodeDetailedName(location: location)
 
         let result = detailedName ?? cluster.cityName
         if let result = result, !result.isEmpty {
@@ -78,105 +75,359 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
     // MARK: - Core Logic
 
+    private func reverseGeocodeDetailedName(location: CLLocation) async throws -> String? {
+        if #available(iOS 26.0, *) {
+            if let mapKitResult = try await reverseGeocodeDetailedNameUsingMapKit(location: location) {
+                return mapKitResult
+            }
+        }
+
+        do {
+            if let coreLocationResult = try await reverseGeocodeDetailedNameUsingCoreLocation(location: location) {
+                return coreLocationResult
+            }
+        } catch {
+            print("[Geo][CoreLocation][Detailed][Error] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+        }
+
+        if let mapboxDetailed = try await reverseGeocodeDetailedNameUsingMapbox(location: location) {
+            return mapboxDetailed
+        }
+
+        print("[Geo][DetailedResolve][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        return nil
+    }
+
     @available(iOS 26.0, *)
     private func reverseGeocodeDetailedNameUsingMapKit(location: CLLocation) async throws -> String? {
-        guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
-        request.preferredLocale = Locale(identifier: "zh_CN")
-        let items = try await request.mapItems
-        guard let item = items.first else { return nil }
+        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
 
-        // iOS 26+: MKAddressRepresentations is a collection of representations.
-        // We can access it as an array if it conforms to Collection, or use address properties if available.
-        // Since MKAddress does not have localizedAddress, we use the name or other properties from MKMapItem.
-        // Avoid using deprecated `placemark` on iOS 26+.
-        return item.name
+        for locale in locales {
+            guard let request = MKReverseGeocodingRequest(location: location) else { continue }
+            request.preferredLocale = locale
+            do {
+                let items = try await request.mapItems
+                guard let item = items.first else { continue }
+
+                if let name = item.name, !name.isEmpty {
+                    return name
+                }
+
+                let placemark = item.placemark
+                let fallback = [placemark.thoroughfare, placemark.subLocality, placemark.locality, placemark.subAdministrativeArea, placemark.administrativeArea, placemark.country]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty }
+                if let fallback {
+                    return fallback
+                }
+            } catch {
+                print("[Geo][MapKit][Detailed][Error] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+                continue
+            }
+        }
+
+        return nil
     }
 
     @available(iOS, deprecated: 26.0)
     private func reverseGeocodeDetailedNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
-        let geocoder = CLGeocoder()
-        return try await withCheckedThrowingContinuation { [weak self] continuation in
-            geocoder.reverseGeocodeLocation(location, preferredLocale: Locale(identifier: "zh_CN")) { placemarks, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
+        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+
+        for locale in locales {
+            let geocoder = CLGeocoder()
+            let result: String? = try await withCheckedThrowingContinuation { [weak self] continuation in
+                geocoder.reverseGeocodeLocation(location, preferredLocale: locale) { placemarks, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    guard let placemark = placemarks?.first else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let name = self?.formatDetailedName(
+                        district: placemark.subLocality,
+                        name: placemark.name,
+                        city: placemark.locality
+                    )
+                    continuation.resume(returning: name)
                 }
-                guard let placemark = placemarks?.first else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let name = self?.formatDetailedName(district: placemark.subLocality, street: placemark.thoroughfare, name: placemark.name, city: placemark.locality)
-                continuation.resume(returning: name)
+            }
+            if let result, !result.isEmpty {
+                return result
             }
         }
+
+        return nil
         #else
         return nil
         #endif
     }
 
-    private func formatDetailedName(district: String?, street: String?, name: String?, city: String?) -> String? {
+    private func formatDetailedName(district: String?, name: String?, city: String?) -> String? {
         let districtName = district?.replacingOccurrences(of: "区", with: "") ?? ""
-        let streetName = street ?? ""
-        let poiName = name ?? ""
-        
-        var components: [String] = []
+        let poiName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cityName = city?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // 详细地址优先使用 POI/地标名称，不使用街道门牌。
+        if !poiName.isEmpty && poiName != districtName && poiName != cityName {
+            return poiName
+        }
+
         if !districtName.isEmpty {
-            components.append(districtName)
+            return districtName
         }
-        
-        let detail = poiName.isEmpty ? streetName : poiName
-        if !detail.isEmpty && detail != districtName && detail != (city ?? "") {
-            components.append(detail)
+
+        if !cityName.isEmpty {
+            return cityName.replacingOccurrences(of: "市", with: "")
         }
-        
-        if components.isEmpty {
-            return city?.replacingOccurrences(of: "市", with: "")
-        }
-        return components.joined(separator: " · ")
+
+        return nil
     }
 
     private func reverseGeocodeCityName(location: CLLocation) async throws -> String? {
         if #available(iOS 26.0, *) {
-            return try await reverseGeocodeCityNameUsingMapKit(location: location)
-        } else {
-            return try await reverseGeocodeCityNameUsingCoreLocation(location: location)
+            if let city = try await reverseGeocodeCityNameUsingMapKit(location: location) {
+                return city
+            }
         }
+
+        if let city = try await reverseGeocodeCityNameUsingCoreLocation(location: location) {
+            return city
+        }
+
+        if let mapboxCity = try await reverseGeocodeCityNameUsingMapbox(location: location) {
+            return mapboxCity
+        }
+
+        return nil
     }
 
     @available(iOS 26.0, *)
     private func reverseGeocodeCityNameUsingMapKit(location: CLLocation) async throws -> String? {
-        guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
-        request.preferredLocale = Locale(identifier: "zh_CN")
-        let items = try await request.mapItems
-        guard let item = items.first else { return nil }
+        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
 
-        // iOS 26 MapKit address model handling.
-        // Use the placemark as a fallback since it's the most reliable way to get structured data
-        // even if it's deprecated in favor of new APIs that might not be fully exposed yet.
-        let placemark = item.placemark
-        let candidate = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
-        return candidate?.replacingOccurrences(of: "市", with: "")
+        for locale in locales {
+            guard let request = MKReverseGeocodingRequest(location: location) else { continue }
+            request.preferredLocale = locale
+            do {
+                let items = try await request.mapItems
+                guard let item = items.first else { continue }
+
+                let placemark = item.placemark
+                let candidate = [placemark.locality, placemark.subAdministrativeArea, placemark.administrativeArea, placemark.country]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty }
+
+                if let candidate {
+                    return candidate.replacingOccurrences(of: "市", with: "")
+                }
+            } catch {
+                print("[Geo][MapKit][City][Error] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+                continue
+            }
+        }
+
+        return nil
     }
 
     @available(iOS, deprecated: 26.0)
     private func reverseGeocodeCityNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
-        let geocoder = CLGeocoder()
-        return try await withCheckedThrowingContinuation { continuation in
-            geocoder.reverseGeocodeLocation(location, preferredLocale: Locale(identifier: "zh_CN")) { placemarks, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
+        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+
+        for locale in locales {
+            let geocoder = CLGeocoder()
+            do {
+                let candidate: String? = try await withCheckedThrowingContinuation { continuation in
+                    geocoder.reverseGeocodeLocation(location, preferredLocale: locale) { placemarks, error in
+                        if let error = error {
+                            continuation.resume(throwing: error)
+                            return
+                        }
+                        let placemark = placemarks?.first
+                        let value = placemark?.locality
+                            ?? placemark?.subAdministrativeArea
+                            ?? placemark?.administrativeArea
+                            ?? placemark?.country
+                        continuation.resume(returning: value?.replacingOccurrences(of: "市", with: ""))
+                    }
                 }
-                let placemark = placemarks?.first
-                let candidate = placemark?.locality ?? placemark?.subAdministrativeArea ?? placemark?.administrativeArea
-                continuation.resume(returning: candidate?.replacingOccurrences(of: "市", with: ""))
+                if let candidate, !candidate.isEmpty {
+                    return candidate
+                }
+            } catch {
+                print("[Geo][CoreLocation][City][Error] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+                continue
             }
         }
+
+        return nil
         #else
         return nil
         #endif
+    }
+
+    private func reverseGeocodeCityNameUsingMapbox(location: CLLocation) async throws -> String? {
+        guard let result = try await mapboxReverseGeocode(location: location) else {
+            return nil
+        }
+
+        if let city = result.city?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty {
+            print("[Geo][Mapbox][City][Hit] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) city=\(city)")
+            return city
+        }
+
+        print("[Geo][Mapbox][City][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        return nil
+    }
+
+    private func reverseGeocodeDetailedNameUsingMapbox(location: CLLocation) async throws -> String? {
+        guard let result = try await mapboxReverseGeocode(location: location) else {
+            return nil
+        }
+
+        if let detailed = result.detailed?.trimmingCharacters(in: .whitespacesAndNewlines), !detailed.isEmpty {
+            print("[Geo][Mapbox][Detailed][Hit] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) detailed=\(detailed)")
+            return detailed
+        }
+
+        print("[Geo][Mapbox][Detailed][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        return nil
+    }
+
+    private func mapboxReverseGeocode(location: CLLocation) async throws -> MapboxResolvedResult? {
+        guard let token = mapboxAccessToken() else {
+            print("[Geo][Mapbox][Skip] MAPBOX_ACCESS_TOKEN missing")
+            return nil
+        }
+
+        let lon = location.coordinate.longitude
+        let lat = location.coordinate.latitude
+
+        var components = URLComponents(string: "https://api.mapbox.com/search/geocode/v6/reverse")
+        components?.queryItems = [
+            URLQueryItem(name: "longitude", value: "\(lon)"),
+            URLQueryItem(name: "latitude", value: "\(lat)"),
+            URLQueryItem(name: "language", value: "zh,en"),
+            // Geocoding v6 的 types 仅支持地理层级类型，不包含 poi；否则会 422。
+            URLQueryItem(name: "types", value: "address,street,neighborhood,locality,place,region,country"),
+            URLQueryItem(name: "limit", value: "5"),
+            URLQueryItem(name: "access_token", value: token)
+        ]
+
+        guard let url = components?.url else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse {
+                print("[Geo][Mapbox][HTTP] status=\(http.statusCode) lat=\(lat) lng=\(lon)")
+                guard (200...299).contains(http.statusCode) else {
+                    return nil
+                }
+            }
+
+            let decoded = try JSONDecoder().decode(MapboxGeocodeV6ReverseResponse.self, from: data)
+
+            let city = decoded.features
+                .compactMap {
+                    $0.properties.context.place?.name
+                    ?? $0.properties.context.locality?.name
+                    ?? $0.properties.context.region?.name
+                    ?? $0.properties.context.country?.name
+                }
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+
+            // v6 reverse 在当前参数下可能不给 POI；详细地址优先语义区域，再回退 name。
+            let semanticAreaDetailed = decoded.features
+                .compactMap {
+                    $0.properties.context.locality?.name
+                    ?? $0.properties.context.place?.name
+                    ?? $0.properties.context.region?.name
+                }
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+
+            let fallbackNameDetailed = decoded.features
+                .compactMap { $0.properties.name }
+                .first(where: { name in
+                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !trimmed.isEmpty && !looksLikeStreetAddress(trimmed)
+                })
+
+            let detailed = semanticAreaDetailed ?? fallbackNameDetailed
+
+            return MapboxResolvedResult(city: city, detailed: detailed)
+        } catch {
+            print("[Geo][Mapbox][Error] lat=\(lat) lng=\(lon) error=\(error)")
+            return nil
+        }
+    }
+
+    private func mapboxAccessToken() -> String? {
+        if let env = ProcessInfo.processInfo.environment["MAPBOX_ACCESS_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty {
+            return env
+        }
+
+        if let plist = Bundle.main.object(forInfoDictionaryKey: "MAPBOX_ACCESS_TOKEN") as? String {
+            let trimmed = plist.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return nil
+    }
+
+    private func looksLikeStreetAddress(_ value: String) -> Bool {
+        let lowercased = value.lowercased()
+        let markers = [" street", " st", " road", " rd", " avenue", " ave", " lane", " ln", " drive", " dr", " strasse", " straße", "gata", "weg"]
+        let hasMarker = markers.contains { lowercased.contains($0) }
+        let hasDigit = value.rangeOfCharacter(from: .decimalDigits) != nil
+        return hasMarker && hasDigit
+    }
+}
+
+private struct MapboxResolvedResult {
+    let city: String?
+    let detailed: String?
+}
+
+private struct MapboxGeocodeV6ReverseResponse: Decodable {
+    let features: [Feature]
+
+    struct Feature: Decodable {
+        let properties: Properties
+    }
+
+    struct Properties: Decodable {
+        let name: String?
+        let fullAddress: String?
+        let featureType: String?
+        let context: Context
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case fullAddress = "full_address"
+            case featureType = "feature_type"
+            case context
+        }
+    }
+
+    struct Context: Decodable {
+        let place: Item?
+        let locality: Item?
+        let region: Item?
+        let country: Item?
+
+        struct Item: Decodable {
+            let name: String?
+        }
     }
 }
 
