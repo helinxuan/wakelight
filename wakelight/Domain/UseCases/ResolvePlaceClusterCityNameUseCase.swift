@@ -17,8 +17,11 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
     /// 获取仅城市名（如“成都”），用于顶部标题
     func resolveCityName(for cluster: PlaceCluster) async throws -> String? {
-        if let cityName = cluster.cityName, !cityName.isEmpty {
-            return cityName
+        if let cityName = cluster.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !cityName.isEmpty {
+            // 已有中文城市名直接复用；英文/拼音名称尝试刷新为中文，避免 UI 持续显示英文。
+            if containsCJKCharacters(cityName) {
+                return cityName
+            }
         }
 
         let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
@@ -28,7 +31,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         }
 
         print("[Geo][CityResolve][Miss] cluster=\(cluster.id) lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude)")
-        return nil
+        return cluster.cityName
     }
 
     /// 获取详细地址（如“武侯 · 瑞彩路”），用于列表内容
@@ -100,7 +103,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
     @available(iOS 26.0, *)
     private func reverseGeocodeDetailedNameUsingMapKit(location: CLLocation) async throws -> String? {
-        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+        // 优先中文，避免国内地点被解析为英文名（例如 Meishan）。
+        let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
         for locale in locales {
             guard let request = MKReverseGeocodingRequest(location: location) else { continue }
@@ -132,7 +136,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
     @available(iOS, deprecated: 26.0)
     private func reverseGeocodeDetailedNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
-        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+        let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
         for locale in locales {
             let geocoder = CLGeocoder()
@@ -206,7 +210,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
     @available(iOS 26.0, *)
     private func reverseGeocodeCityNameUsingMapKit(location: CLLocation) async throws -> String? {
-        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+        let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
         for locale in locales {
             guard let request = MKReverseGeocodingRequest(location: location) else { continue }
@@ -235,7 +239,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
     @available(iOS, deprecated: 26.0)
     private func reverseGeocodeCityNameUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
-        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN")]
+        // 先尝试中文，避免国内地点在 CoreLocation 路径下返回英文城市名。
+        let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
         for locale in locales {
             let geocoder = CLGeocoder()
@@ -390,6 +395,19 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         let hasMarker = markers.contains { lowercased.contains($0) }
         let hasDigit = value.rangeOfCharacter(from: .decimalDigits) != nil
         return hasMarker && hasDigit
+    }
+
+    private func containsCJKCharacters(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x4E00...0x9FFF,     // CJK Unified Ideographs
+                 0x3400...0x4DBF,     // CJK Extension A
+                 0xF900...0xFAFF:     // CJK Compatibility Ideographs
+                return true
+            default:
+                return false
+            }
+        }
     }
 }
 
