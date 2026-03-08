@@ -308,70 +308,73 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             return nil
         }
 
+        // 统一走 v5，避免 v6 在 reverse geocoding 参数校验上的 422 兼容问题。
+        return try await mapboxReverseGeocodeV5(location: location, token: token)
+    }
+
+    private func mapboxReverseGeocodeV5(location: CLLocation, token: String) async throws -> MapboxResolvedResult? {
         let lon = location.coordinate.longitude
         let lat = location.coordinate.latitude
 
-        var components = URLComponents(string: "https://api.mapbox.com/search/geocode/v6/reverse")
-        components?.queryItems = [
-            URLQueryItem(name: "longitude", value: "\(lon)"),
-            URLQueryItem(name: "latitude", value: "\(lat)"),
-            URLQueryItem(name: "language", value: "zh,en"),
-            // Geocoding v6 的 types 仅支持地理层级类型，不包含 poi；否则会 422。
-            URLQueryItem(name: "types", value: "address,street,neighborhood,locality,place,region,country"),
-            URLQueryItem(name: "limit", value: "5"),
-            URLQueryItem(name: "access_token", value: token)
-        ]
-
-        guard let url = components?.url else {
-            return nil
+        struct V5Response: Decodable {
+            struct Feature: Decodable {
+                let place_name: String?
+                let text: String?
+                let place_type: [String]?
+            }
+            let features: [Feature]
         }
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 8
+        // Mapbox reverse 在 limit 存在时，要求 types 只能是“单个 type”。
+        // 这里按粒度从细到粗依次尝试，拿到第一个可用结果就返回。
+        let typeCandidates = ["place", "locality", "region", "country"]
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse {
-                print("[Geo][Mapbox][HTTP] status=\(http.statusCode) lat=\(lat) lng=\(lon)")
-                guard (200...299).contains(http.statusCode) else {
-                    return nil
-                }
+        for type in typeCandidates {
+            guard var components = URLComponents(string: "https://api.mapbox.com/geocoding/v5/mapbox.places/\(lon),\(lat).json") else {
+                continue
             }
 
-            let decoded = try JSONDecoder().decode(MapboxGeocodeV6ReverseResponse.self, from: data)
+            components.queryItems = [
+                URLQueryItem(name: "language", value: "zh,en"),
+                URLQueryItem(name: "types", value: type),
+                URLQueryItem(name: "limit", value: "1"),
+                URLQueryItem(name: "access_token", value: token)
+            ]
 
-            let city = decoded.features
-                .compactMap {
-                    $0.properties.context.place?.name
-                    ?? $0.properties.context.locality?.name
-                    ?? $0.properties.context.region?.name
-                    ?? $0.properties.context.country?.name
+            guard let url = components.url else { continue }
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 8
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let http = response as? HTTPURLResponse
+                if let http {
+                    print("[Geo][MapboxV5][HTTP] status=\(http.statusCode) lat=\(lat) lng=\(lon) type=\(type)")
+                    guard (200...299).contains(http.statusCode) else {
+                        let snippet = String(data: data.prefix(220), encoding: .utf8) ?? ""
+                        print("[Geo][MapboxV5][HTTP][Body] type=\(type) \(snippet)")
+                        continue
+                    }
                 }
-                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
 
-            // v6 reverse 在当前参数下可能不给 POI；详细地址优先语义区域，再回退 name。
-            let semanticAreaDetailed = decoded.features
-                .compactMap {
-                    $0.properties.context.locality?.name
-                    ?? $0.properties.context.place?.name
-                    ?? $0.properties.context.region?.name
+                let decoded = try JSONDecoder().decode(V5Response.self, from: data)
+                guard let feature = decoded.features.first else { continue }
+
+                let city = feature.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let detailed = feature.place_name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? feature.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if let city, !city.isEmpty {
+                    return MapboxResolvedResult(city: city, detailed: detailed)
                 }
-                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-
-            let fallbackNameDetailed = decoded.features
-                .compactMap { $0.properties.name }
-                .first(where: { name in
-                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return !trimmed.isEmpty && !looksLikeStreetAddress(trimmed)
-                })
-
-            let detailed = semanticAreaDetailed ?? fallbackNameDetailed
-
-            return MapboxResolvedResult(city: city, detailed: detailed)
-        } catch {
-            print("[Geo][Mapbox][Error] lat=\(lat) lng=\(lon) error=\(error)")
-            return nil
+            } catch {
+                print("[Geo][MapboxV5][Error] lat=\(lat) lng=\(lon) type=\(type) error=\(error)")
+                continue
+            }
         }
+
+        return nil
     }
 
     private func mapboxAccessToken() -> String? {
