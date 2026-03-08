@@ -61,13 +61,6 @@ private struct TimelineCardView: View {
             VStack(alignment: .leading, spacing: 10) {
                 header
 
-                if let detail = detailDisplayText {
-                    Text(detail)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.82))
-                        .lineLimit(1)
-                }
-
                 if let summary = node.displaySummary, !summary.isEmpty {
                     Text(summary)
                         .font(.system(size: 15, weight: .medium))
@@ -119,8 +112,8 @@ private struct TimelineCardView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Text(cityDisplayText)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(primaryLocationDisplayText)
                 .font(.system(size: 19, weight: .bold))
                 .foregroundColor(.white)
                 .lineLimit(1)
@@ -162,7 +155,12 @@ private struct TimelineCardView: View {
         .padding(.horizontal, 12)
     }
 
-    private var cityDisplayText: String {
+    private var primaryLocationDisplayText: String {
+        let detail = node.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detail.isEmpty, detail != "未知地点" {
+            return detail
+        }
+
         let city = node.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !city.isEmpty, city != "未知城市" {
             return city
@@ -173,15 +171,19 @@ private struct TimelineCardView: View {
             return fallback
         }
 
-        return "未知城市"
+        return "未知地点"
     }
 
-    private var detailDisplayText: String? {
+    private var secondaryCityDisplayText: String? {
+        let city = node.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !city.isEmpty, city != "未知城市" else { return nil }
+
         let detail = node.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if detail.isEmpty || detail == "未知地点" || detail == cityDisplayText {
+        if detail == city {
             return nil
         }
-        return detail
+
+        return city
     }
 
     private var expandHandle: some View {
