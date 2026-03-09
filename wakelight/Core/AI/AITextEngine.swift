@@ -66,6 +66,91 @@ public actor AITextEngine {
 
     private init() {}
 
+    /// 先对视觉关键词做预筛选，再用一次轻量 AI 做主题归并。
+    /// - Parameters:
+    ///   - rawKeywords: 原始或规则清洗后的关键词
+    ///   - cacheKey: 可选缓存键（建议与照片集合绑定）
+    /// - Returns: 可用于文案提示的 3~6 个主题词
+    public func filterVisionKeywords(rawKeywords: [String], cacheKey: String? = nil) async -> [String] {
+        let normalized = rawKeywords
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !normalized.isEmpty else { return [] }
+
+        // 本地黑名单预过滤（稳定、低成本）
+        let blocked: Set<String> = [
+            "tool", "tools", "seat", "seats",
+            "artifact", "equipment", "device", "appliance",
+            "mechanism", "component", "material", "object"
+        ]
+        let prefiltered = normalized.filter { !blocked.contains($0.lowercased()) }
+        guard !prefiltered.isEmpty else { return [] }
+
+        let sortedInput = prefiltered
+            .map { $0.lowercased() }
+            .sorted()
+            .joined(separator: ",")
+
+        let request = AITextRequest(
+            systemPrompt: """
+            你是“照片关键词清洗器”。
+            你会收到机器视觉标签，请筛选为更自然的回忆线索。
+
+            输出规则：
+            1. 只输出 JSON，格式：{"themes":["词1","词2",...]}
+            2. themes 最少 0 个，最多 6 个
+            3. 删除明显机器词与部件词（如 tool/seat/device 等）
+            4. 尽量输出中文主题词，简洁自然，不要句子
+            5. 不要编造未出现的具体事件
+            """,
+            userPrompt: "原始关键词：\(prefiltered.joined(separator: "、"))",
+            cacheKey: cacheKey ?? "vision_filter_\(sortedInput)",
+            fallbackText: "",
+            temperature: 0.15,
+            topP: 0.8,
+            maxTokens: 120
+        )
+
+        let raw = await generateText(for: request)
+        if let parsed = parseThemesJSON(from: raw), !parsed.isEmpty {
+            return Array(parsed.prefix(6))
+        }
+
+        // 解析失败时降级：直接返回预过滤后的前 6 个词
+        return Array(prefiltered.prefix(6))
+    }
+
+    private func parseThemesJSON(from text: String) -> [String]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        func decode(_ data: Data) -> [String]? {
+            guard
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let themes = json["themes"] as? [String]
+            else { return nil }
+            return themes
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+
+        if let directData = trimmed.data(using: .utf8), let themes = decode(directData) {
+            return themes
+        }
+
+        // 兼容模型返回 ```json ... ``` 包裹
+        if let start = trimmed.range(of: "{")?.lowerBound,
+           let end = trimmed.range(of: "}", options: .backwards)?.upperBound {
+            let jsonSubstring = String(trimmed[start..<end])
+            if let data = jsonSubstring.data(using: .utf8), let themes = decode(data) {
+                return themes
+            }
+        }
+
+        return nil
+    }
+
     /// 生成一段文本；若远端不可用或发生错误，将返回 fallback 文案。
     ///
     /// - 注意：该方法保证**总是返回非空字符串**，调用方无需再处理错误分支。
@@ -80,15 +165,18 @@ public actor AITextEngine {
         }
 
         var resultText: String = request.fallbackText
+        var shouldCache = false
 
         // 直接调用硅基流动 Qwen2.5-7B-Instruct (Free) 在线模型。
         if let remoteText = await generateViaSiliconFlow(for: request) {
             resultText = remoteText
+            shouldCache = true
         } else {
             log("Remote AI unavailable or failed; using fallback.")
         }
 
-        if let key = request.cacheKey {
+        // 只缓存真正的 AI 结果，避免把 fallback 缓存住导致后续一直“像没走 AI”。
+        if shouldCache, let key = request.cacheKey {
             cache[key] = resultText
             log("cache store for key=\(key)")
         }

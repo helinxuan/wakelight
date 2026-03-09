@@ -95,9 +95,13 @@ private struct TimelineCardView: View {
         .scaleEffect(isSelected ? 1.0 : 0.985)
         .opacity(isSelected ? 1.0 : 0.9)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: isSelected)
-        .gesture(
+        .simultaneousGesture(
             DragGesture(minimumDistance: 14)
                 .onEnded { value in
+                    let horizontal = abs(value.translation.width)
+                    let vertical = abs(value.translation.height)
+                    guard vertical > horizontal else { return }
+
                     if value.translation.height < -38 {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                             isExpanded = true

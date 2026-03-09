@@ -687,7 +687,13 @@ private struct MergeVisitLayersSheet: View {
             }) ?? []
 
             let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: allLocators, maxPhotos: 15)
-            let keywords = analysis.topKeywords.joined(separator: "、")
+            let prefilteredKeywords = analysis.sanitizedKeywords
+            let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
+                rawKeywords: prefilteredKeywords,
+                cacheKey: "merge_diary_keywords_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)_\(allLocators.count)"
+            )
+            let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
+            let keywords = promptKeywords.joined(separator: "、")
 
             let count = allLocators.count
             let timeRange = timeRangeText(visitLayers) ?? ""
@@ -702,19 +708,27 @@ private struct MergeVisitLayersSheet: View {
 
             写作规则：
             1. 字数控制在50-80字。
-            2. 文风像个人日记，语气自然、克制。
-            3. 先介绍地点信息，再描述感受。
+            2. 文风像个人日记，语气自然。
+            3. 先介绍地点或者景点信息，再描述感受。
             4. 只根据提供的信息写，不要编造不存在的细节。
+            5.不要根据照片关键词推测具体场景（如工地、餐厅、商店等），只描述可见环境或整体氛围。
+            6. 照片内容关键词可能是机器视觉标签，不要逐词翻译成描述，应转化为自然、抽象的环境线索。
             7. 不虚构人物或事件。
-            8. 语言保持简洁、真实，像几年后回想起这一刻写下的记录。
             """
+
+            let photoContentLine: String = {
+                if keywords.isEmpty {
+                    return "照片内容：未提取到稳定主题（请侧重地点与时间氛围，不要硬编照片细节）"
+                }
+                return "照片内容：\(keywords)"
+            }()
 
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeRange)
             照片数量：\(count)
-            照片内容：\(keywords)
+            \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。
             """

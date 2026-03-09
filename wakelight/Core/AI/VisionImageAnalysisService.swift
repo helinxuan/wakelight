@@ -14,6 +14,8 @@ struct ImageAnalysisResult: Sendable {
 
 struct AggregatedImageKeywords: Sendable {
     let topKeywords: [String]
+    /// 面向文案生成的清洗后关键词（去机器味、可读性更高）
+    let sanitizedKeywords: [String]
     let sceneSummary: String
     let hasText: Bool
     let hasFaces: Bool
@@ -29,6 +31,7 @@ actor VisionImageAnalysisService {
         guard !locators.isEmpty else {
             return AggregatedImageKeywords(
                 topKeywords: [],
+                sanitizedKeywords: [],
                 sceneSummary: "无照片",
                 hasText: false,
                 hasFaces: false,
@@ -52,10 +55,12 @@ actor VisionImageAnalysisService {
         }
 
         let topKeywords = aggregateAndSortKeywords(allKeywords, topN: 12)
-        let sceneSummary = generateSceneSummary(labels: allSceneLabels, keywords: topKeywords)
+        let sanitizedKeywords = sanitizeKeywordsForDiary(topKeywords)
+        let sceneSummary = generateSceneSummary(labels: allSceneLabels, keywords: sanitizedKeywords.isEmpty ? topKeywords : sanitizedKeywords)
 
         return AggregatedImageKeywords(
             topKeywords: topKeywords,
+            sanitizedKeywords: sanitizedKeywords,
             sceneSummary: sceneSummary,
             hasText: hasTextInAny,
             hasFaces: hasFacesInAny,
@@ -211,17 +216,65 @@ actor VisionImageAnalysisService {
     }
 
     private func aggregateAndSortKeywords(_ keywords: [String], topN: Int) -> [String] {
-        let normalized = keywords.map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
-        let counts = Dictionary(grouping: normalized, by: { $0 })
+        let cleaned = keywords.compactMap { sanitizeVisionLabel($0) }
+        let counts = Dictionary(grouping: cleaned, by: { $0 })
             .mapValues { $0.count }
             .filter { $0.key.count > 1 && $0.key != "文字" }
 
-        let sorted = counts.sorted { $0.value > $1.value }
+        let sorted = counts.sorted { lhs, rhs in
+            if lhs.value == rhs.value { return lhs.key < rhs.key }
+            return lhs.value > rhs.value
+        }
         return Array(sorted.prefix(topN).map { $0.key })
     }
 
+    /// 对 Vision 分类词做一层轻量清洗，避免把机器标签直接喂给文案生成。
+    /// 规则：仅做归一化 + 黑名单过滤，不做中文硬映射。
+    private func sanitizeVisionLabel(_ raw: String) -> String? {
+        let normalized = raw
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalized.isEmpty else { return nil }
+
+        // 直接过滤掉机器感强、语义噪声大的词
+        let blocked: Set<String> = [
+            "tool", "tools",
+            "seat", "seats"
+        ]
+        if blocked.contains(normalized) {
+            return nil
+        }
+
+        return normalized
+    }
+
+    /// 针对回忆文案的二次清洗：进一步剔除通用机器词，并限制数量。
+    private func sanitizeKeywordsForDiary(_ keywords: [String], maxCount: Int = 6) -> [String] {
+        let blockedFragments = [
+            "artifact", "equipment", "device", "appliance",
+            "mechanism", "component", "material", "object"
+        ]
+
+        var result: [String] = []
+        var seen = Set<String>()
+
+        for keyword in keywords {
+            let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if blockedFragments.contains(where: { trimmed.contains($0) }) { continue }
+            if seen.contains(trimmed) { continue }
+            seen.insert(trimmed)
+            result.append(trimmed)
+            if result.count >= maxCount { break }
+        }
+
+        return result
+    }
+
     private func generateSceneSummary(labels: [String], keywords: [String]) -> String {
-        let uniqueLabels = Array(Set(labels)).prefix(5)
+        let uniqueLabels = Array(Set(labels.compactMap { sanitizeVisionLabel($0) })).prefix(5)
         if uniqueLabels.isEmpty {
             return keywords.prefix(3).joined(separator: "、")
         }

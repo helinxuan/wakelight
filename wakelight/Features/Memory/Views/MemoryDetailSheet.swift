@@ -35,6 +35,7 @@ struct MemoryDetailSheet: View {
     @State private var errorMessage: String?
     @State private var selectedPhotoIndex: Int?
     @State private var currentStoryLayerIds: [UUID] = []
+    @State private var isGeneratingAIText: Bool = false
 
     private let gridColumns: [GridItem] = [
         GridItem(.flexible(), spacing: 2),
@@ -66,12 +67,20 @@ struct MemoryDetailSheet: View {
                                 )
 
                             Button(action: generateSmartText) {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.blue)
-                                    .padding(10)
-                                    .background(Circle().fill(Color.blue.opacity(0.1)))
+                                Group {
+                                    if isGeneratingAIText {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 18, weight: .semibold))
+                                    }
+                                }
+                                .foregroundColor(.blue)
+                                .padding(10)
+                                .background(Circle().fill(Color.blue.opacity(0.1)))
                             }
+                            .disabled(isGeneratingAIText)
                             .padding(.top, 4)
                         }
 
@@ -207,30 +216,80 @@ struct MemoryDetailSheet: View {
     }
 
     private func generateSmartText() {
+        guard !isGeneratingAIText else { return }
+
         let location = photoGroups.first?.location ?? "这里"
         let count = flattenedLocatorKeys.count
 
-        var timePrefix = ""
-        if let firstGroup = photoGroups.first, let range = firstGroup.title.components(separatedBy: " ").last {
-            let hour = Int(range.prefix(2)) ?? 12
-            switch hour {
-            case 5...11: timePrefix = "清晨的"
-            case 12...14: timePrefix = "正午的"
-            case 15...18: timePrefix = "傍晚的"
-            case 19...23: timePrefix = "深夜的"
-            default: timePrefix = "这时候的"
+        let sampleDate: Date = {
+            if case .unhandled(let layer) = item {
+                return layer.startAt
             }
+            return Date()
+        }()
+
+        let hour = Calendar.current.component(.hour, from: sampleDate)
+        let timePrefix: String
+        switch hour {
+        case 5...11: timePrefix = "清晨的"
+        case 12...14: timePrefix = "正午的"
+        case 15...18: timePrefix = "傍晚的"
+        case 19...23: timePrefix = "深夜的"
+        default: timePrefix = "这时候的"
         }
 
-        let templates = [
-            "\(timePrefix)\(location)，留下了 \(count) 个瞬间。",
-            "在这里度过了一段时光，捕捉到了 \(count) 张回忆。",
-            "\(location) 的这几个小时，都在这些照片里了。",
-            "又是充实的一天，在 \(location) 记录了 \(count) 个故事。"
-        ]
+        let fallback = "\(timePrefix)\(location)，留下了 \(count) 个瞬间。"
 
-        withAnimation {
-            editText = templates.randomElement() ?? ""
+        isGeneratingAIText = true
+        Task {
+            let locators: [PhotoAssetLocator] = (try? await loadAllLocatorsForCurrentItem()) ?? []
+            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
+            let keywords = analysis.topKeywords.joined(separator: "、")
+
+            let systemPrompt = """
+            你是回忆卡片的日记文案助手。
+
+            你的任务：根据地点、时间氛围、照片数量和照片内容，写一段像用户本人记录的简短回忆。
+
+            要求：
+            - 只输出一段中文正文，40-60字
+            - 语气自然、克制、像真实日记
+            - 只写眼前看到的景象和当时感受
+            - 不要介绍城市、历史、景点，不写旅游攻略
+            - 不要引用古诗词，不要抒情堆砌
+            - 不要虚构人物、事件或不存在的细节
+            - 不要逐条复述关键词，不要出现英文关键词原词
+
+            输出只包含正文内容。
+            """
+
+            let userPrompt = """
+            这是用户回忆卡片的一段日记。
+            地点：\(location)
+            时间：\(timePrefix)
+            照片数量：\(count)
+            照片内容：\(keywords)
+
+            请写一段40-60字的自然日记文字，可直接放入回忆卡片。
+            """
+
+            let request = AITextRequest(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                cacheKey: cacheKeyForSmartText(location: location, hour: hour, count: count),
+                fallbackText: fallback,
+                temperature: 0.35,
+                topP: 0.85,
+                maxTokens: 120
+            )
+
+            let text = await AITextEngine.shared.generateText(for: request)
+            await MainActor.run {
+                withAnimation {
+                    editText = text
+                    isGeneratingAIText = false
+                }
+            }
         }
     }
 
@@ -354,6 +413,48 @@ struct MemoryDetailSheet: View {
 
             if texts.isEmpty { return "" }
             return texts.joined(separator: "\n\n")
+        }
+    }
+
+    private func cacheKeyForSmartText(location: String, hour: Int, count: Int) -> String {
+        switch item {
+        case .unhandled(let layer):
+            let date = layer.startAt
+            let components = Calendar.current.dateComponents([.year, .month, .day, .hour], from: date)
+            let bucketId = String(
+                format: "%04d-%02d-%02d-%02d",
+                components.year ?? 0,
+                components.month ?? 0,
+                components.day ?? 0,
+                components.hour ?? 0
+            )
+            return "detail_diary:unhandled:\(layer.placeClusterId.uuidString):\(bucketId):\(count)"
+        case .story(let node):
+            return "detail_diary:story:\(node.id.uuidString):\(count):\(hour):\(location)"
+        }
+    }
+
+    private func loadAllLocatorsForCurrentItem() async throws -> [PhotoAssetLocator] {
+        switch item {
+        case .unhandled(let layer):
+            return try await DatabaseContainer.shared.db.reader.read { db in
+                let links = try VisitLayerPhotoAsset
+                    .filter(Column("visitLayerId") == layer.id)
+                    .fetchAll(db)
+                let photoIds = links.map { $0.photoAssetId }
+                return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            }
+        case .story(let node):
+            return try await DatabaseContainer.shared.db.reader.read { db in
+                let layerIds = node.subVisitLayerIds
+                if layerIds.isEmpty { return [PhotoAssetLocator]() }
+
+                let links = try VisitLayerPhotoAsset
+                    .filter(layerIds.contains(Column("visitLayerId")))
+                    .fetchAll(db)
+                let photoIds = Array(Set(links.map { $0.photoAssetId }))
+                return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
+            }
         }
     }
 
