@@ -24,6 +24,9 @@ struct PlaceCluster: Codable, FetchableRecord, PersistableRecord, Identifiable {
     /// POI 名称（地标/商户/景点语义）
     var poiName: String? = nil
 
+    /// POI 类型（如“商务住宅;住宅区;住宅小区”）
+    var poiType: String? = nil
+
     var photoCount: Int
     var visitCount: Int
     var fogState: FogState

@@ -46,6 +46,7 @@ final class GeneratePlaceClustersUseCase {
                     cityName: nil,
                     detailedAddress: nil,
                     poiName: nil,
+                    poiType: nil,
                     photoCount: items.count,
                     visitCount: 1,
                     fogState: .revealed,

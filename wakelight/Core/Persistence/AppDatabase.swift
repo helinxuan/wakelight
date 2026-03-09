@@ -61,6 +61,7 @@ struct AppDatabase {
                 t.column("cityName", .text)
                 t.column("detailedAddress", .text)
                 t.column("poiName", .text)
+                t.column("poiType", .text)
                 t.column("photoCount", .integer).notNull().defaults(to: 0)
                 t.column("visitCount", .integer).notNull().defaults(to: 0)
                 t.column("fogState", .text).notNull().defaults(to: "locked")
