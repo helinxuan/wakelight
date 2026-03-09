@@ -244,7 +244,7 @@ struct MemoryDetailSheet: View {
                 let title = Self.dateRangeText(startAt: layer.startAt, endAt: layer.endAt)
                 let location = try await DatabaseContainer.shared.db.reader.read { db in
                     try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
-                        .map { $0.detailedAddress ?? $0.cityName ?? "未知地点" }
+                        .map { $0.poiName ?? $0.detailedAddress ?? $0.cityName ?? "未知地点" }
                 }
 
                 await MainActor.run {
@@ -296,7 +296,7 @@ struct MemoryDetailSheet: View {
 
             for layer in layers {
                 let cluster = try PlaceCluster.fetchOne(db, key: layer.placeClusterId)
-                let locationName = cluster?.detailedAddress ?? cluster?.cityName ?? "未知地点"
+                let locationName = cluster?.poiName ?? cluster?.detailedAddress ?? cluster?.cityName ?? "未知地点"
 
                 let links = try VisitLayerPhotoAsset
                     .filter(Column("visitLayerId") == layer.id)

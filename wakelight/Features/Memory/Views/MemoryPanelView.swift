@@ -67,6 +67,9 @@ struct MemoryPanelView: View {
     @State private var mergeErrorMessage: String?
     @State private var editingStoryTarget: StoryNode?
     @State private var appendErrorMessage: String?
+    @State private var isPresentingDeleteStoryAlert: Bool = false
+    @State private var deletingStoryTarget: StoryNode?
+    @State private var isDeletingStory: Bool = false
 
     init(
         clusters: [PlaceCluster],
@@ -304,6 +307,10 @@ struct MemoryPanelView: View {
                                         },
                                         onEdit: {
                                             selectedDetailItem = .story(node)
+                                        },
+                                        onDelete: {
+                                            deletingStoryTarget = node
+                                            isPresentingDeleteStoryAlert = true
                                         }
                                     )
                                     .padding(.vertical, 6)
@@ -317,6 +324,13 @@ struct MemoryPanelView: View {
                                         } label: {
                                             Label("编辑故事", systemImage: "pencil")
                                         }
+
+                                        Button(role: .destructive) {
+                                            deletingStoryTarget = node
+                                            isPresentingDeleteStoryAlert = true
+                                        } label: {
+                                            Label("删除故事", systemImage: "trash")
+                                        }
                                     }
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                         Button {
@@ -325,6 +339,13 @@ struct MemoryPanelView: View {
                                             Label("编辑", systemImage: "pencil")
                                         }
                                         .tint(.blue)
+
+                                        Button(role: .destructive) {
+                                            deletingStoryTarget = node
+                                            isPresentingDeleteStoryAlert = true
+                                        } label: {
+                                            Label("删除", systemImage: "trash")
+                                        }
                                     }
                                 }
                             }
@@ -368,6 +389,17 @@ struct MemoryPanelView: View {
             }
         }
         .background(Color(.systemBackground))
+        .alert("删除故事", isPresented: $isPresentingDeleteStoryAlert, presenting: deletingStoryTarget) { story in
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                Task {
+                    await deleteStory(story)
+                }
+            }
+            .disabled(isDeletingStory)
+        } message: { _ in
+            Text("删除后会把该故事中的片段恢复为“未加入故事”，此操作不可撤销。")
+        }
         .sheet(isPresented: $isPresentingMergeSheet) {
             MergeVisitLayersSheet(
                 visitLayers: viewModel.visitLayers.filter { selectedVisitLayerIds.contains($0.id) },
@@ -439,6 +471,38 @@ struct MemoryPanelView: View {
         } catch {
             await MainActor.run {
                 appendErrorMessage = "加入失败，请重试"
+            }
+        }
+    }
+
+    private func deleteStory(_ story: StoryNode) async {
+        guard !isDeletingStory else { return }
+
+        await MainActor.run {
+            isDeletingStory = true
+        }
+
+        do {
+            try await DeleteStoryNodeUseCase().run(storyNodeId: story.id)
+            await MainActor.run {
+                if case .story(let current)? = selectedDetailItem, current.id == story.id {
+                    selectedDetailItem = nil
+                }
+
+                // 删除故事后统一退出“为故事添加片段”状态，避免回到未加入故事时文案残留
+                editingStoryTarget = nil
+                selectedVisitLayerIds.removeAll()
+                isMultiSelectMode = false
+                appendErrorMessage = nil
+                filterMode = .unhandled
+
+                deletingStoryTarget = nil
+                isDeletingStory = false
+            }
+        } catch {
+            await MainActor.run {
+                deletingStoryTarget = nil
+                isDeletingStory = false
             }
         }
     }
@@ -632,41 +696,37 @@ private struct MergeVisitLayersSheet: View {
             let loc = placeNames.isEmpty ? "这里" : placeNames.prefix(4).joined(separator: "、")
 
             let systemPrompt = """
-            你是一位极度克制、真诚、绝不夸张的私人日记文案助手。
+            你是回忆卡片的日记文案助手。
 
-            你要为一组照片写一段像私人日记的回忆文字。
-            输入包含：具体地点、具体时间范围、照片数量、以及由本地视觉识别得到的照片关键词。
+            你的任务是根据地点、时间氛围和照片内容，写一段简短的回忆文字。
 
-            写作要求：
-            - 总字数 50字左右 
-            - 口吻自然、像本人在记
-            - 不要僵硬的直接使用时间和地点，时间有可能的话尽量和节假日挂钩
-            - 禁止使用“这些地方”“这段时间”等模糊代称，必须直接使用提供的具体地点与时间范围。
-            - 不写旅游攻略，不写宣传语
-            - 不使用感叹号
-            - 不使用“著名”“历史悠久”“文化名城”“旅游胜地”等词
-            - 不编造具体历史事件或年份
-            - 不杜撰诗句
-            - 不要逐条罗列关键词，只需要主体的比如任务，景色相关的关键词，其他非必要关键词不需要
-            - 最后一段必须是两句连续真实存在、与该城市相关的诗词，单独成段
-
-            输出只包含正文内容。
+            写作规则：
+            1. 字数控制在50-80字。
+            2. 文风像个人日记，语气自然、克制。
+            3. 先介绍地点信息，再描述感受。
+            4. 只根据提供的信息写，不要编造不存在的细节。
+            7. 不虚构人物或事件。
+            8. 语言保持简洁、真实，像几年后回想起这一刻写下的记录。
             """
 
             let userPrompt = """
+            这是用户回忆卡片的一段日记。
             地点：\(loc)
-            时间范围：\(timeRange)
+            时间：\(timeRange)
             照片数量：\(count)
-            照片内容关键词：\(keywords)
+            照片内容：\(keywords)
 
-            请直接输出文案，不要加任何其他内容。
+            请根据这些信息写一段回忆卡片文字。
             """
 
             let request = AITextRequest(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 cacheKey: "merge_diary_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)",
-                fallbackText: "\(timeRange)，留下了 \(count) 个瞬间。"
+                fallbackText: "\(timeRange)，留下了 \(count) 个瞬间。",
+                temperature: 0.35,
+                topP: 0.85,
+                maxTokens: 140
             )
 
             let text = await AITextEngine.shared.generateText(for: request)
@@ -797,6 +857,7 @@ private struct StoryNodeRowView: View {
     let node: StoryNode
     let onPreview: ([String], Int) -> Void
     let onEdit: () -> Void
+    let onDelete: () -> Void
     @State private var timeRangeText: String?
 
     private struct StoryThumbnail: Identifiable {
@@ -819,12 +880,21 @@ private struct StoryNodeRowView: View {
 
                 Spacer(minLength: 0)
 
-                Button(action: onEdit) {
-                    Label("编辑", systemImage: "pencil")
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.blue)
+                HStack(spacing: 10) {
+                    Button(action: onEdit) {
+                        Label("编辑", systemImage: "pencil")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: onDelete) {
+                        Label("删除", systemImage: "trash")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             if !thumbnails.isEmpty {
@@ -874,6 +944,12 @@ private struct StoryNodeRowView: View {
                 onEdit()
             } label: {
                 Label("编辑故事", systemImage: "pencil")
+            }
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("删除故事", systemImage: "trash")
             }
         }
     }
@@ -995,24 +1071,18 @@ private struct VisitLayerRowView: View {
         let cacheKey = "diary:\(placeIdPart):\(bucketId)"
 
         let systemPrompt = """
-        你是一位克制、真诚的回忆日记写作者。
+        你是回忆卡片的日记文案助手。
 
-        你要为一组照片写一段像私人日记的回忆文字。
-        输入包含：地点、时间氛围、照片数量、以及由本地视觉识别得到的照片关键词。
+        你的任务：根据地点、时间氛围、照片数量和照片内容，写一段像用户本人记录的简短回忆。
 
-        写作要求：
-        - 总字数 100 字
-        - 口吻自然、像本人在记
-        - 不写旅游攻略，不写宣传语
-        - 不使用感叹号
-        - 不使用“著名”“历史悠久”“文化名城”“旅游胜地”等词
-        - 不编造具体历史事件或年份
-        - 不杜撰诗句
-        - 不要逐条罗列关键词，要把内容融化在叙述里
-        - 最后一段必须是两句连续真实存在、与该城市相关的诗词
-        - 不要把每个照片的关键字都识别输出，只需要最重要的关键词，一些什么家具，工具等不要，只要有意义的关键词，比如人，风景，小孩等
-        - 不要照片中，另一张照片这种描述
-        - 不要说废话
+        要求：
+        - 只输出一段中文正文，40-60字
+        - 语气自然、克制、像真实日记
+        - 只写眼前看到的景象和当时感受
+        - 不要介绍城市、历史、景点，不写旅游攻略
+        - 不要引用古诗词，不要抒情堆砌
+        - 不要虚构人物、事件或不存在的细节
+        - 不要逐条复述关键词，不要出现英文关键词原词
 
         输出只包含正文内容。
         """
@@ -1029,19 +1099,23 @@ private struct VisitLayerRowView: View {
             let keywords = analysis.topKeywords.joined(separator: "、")
 
             let userPrompt = """
+            这是用户回忆卡片的一段日记。
             地点：\(loc)
-            时间氛围：\(timePrefix)
+            时间：\(timePrefix)
             照片数量：\(count)
-            照片内容关键词：\(keywords)
+            照片内容：\(keywords)
 
-            生成一段简要的文字，可以直接放进回忆卡片的日记文字。
+            请写一段40-60字的自然日记文字，可直接放入回忆卡片。
             """
 
             let request = AITextRequest(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 cacheKey: cacheKey,
-                fallbackText: fallback
+                fallbackText: fallback,
+                temperature: 0.35,
+                topP: 0.85,
+                maxTokens: 120
             )
 
             let text = await AITextEngine.shared.generateText(for: request)

@@ -400,6 +400,7 @@ struct ThumbnailView: View {
     let size: CGSize
     var showRawBadge: Bool = false
     var showLiveBadge: Bool = false
+    var preferHighQuality: Bool = false
 
     @State private var image: UIImage?
     @State private var isVideo = false
@@ -456,9 +457,20 @@ struct ThumbnailView: View {
         }
         .frame(width: size.width, height: size.height)
         .cornerRadius(4)
-        .task(id: "\(locatorKey)-\(Int(size.width))x\(Int(size.height))") {
+        .task(id: "\(locatorKey)-\(Int(size.width))x\(Int(size.height))-\(preferHighQuality)") {
             await refreshIsVideo()
-            image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: size)
+
+            if preferHighQuality {
+                // 先给一个快速预览，再异步换高质量图，避免白屏。
+                image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: size)
+
+                let highQuality = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: max(size.width * 2.2, 1200), height: max(size.height * 2.2, 1200)))
+                if let highQuality {
+                    image = highQuality
+                }
+            } else {
+                image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: size)
+            }
         }
     }
 

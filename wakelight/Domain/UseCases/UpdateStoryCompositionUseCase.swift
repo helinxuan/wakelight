@@ -104,3 +104,51 @@ enum UpdateStoryCompositionError: Error {
     case emptyStory
     case coverPhotoNotFound
 }
+
+final class DeleteStoryNodeUseCase {
+    private let writer: DatabaseWriter
+
+    init(writer: DatabaseWriter = DatabaseContainer.shared.writer) {
+        self.writer = writer
+    }
+
+    func run(storyNodeId: UUID) async throws {
+        try await writer.write { db in
+            guard let story = try StoryNode.fetchOne(db, key: storyNodeId) else {
+                throw DeleteStoryNodeError.storyNotFound
+            }
+
+            let layerIds = story.subVisitLayerIds
+            if !layerIds.isEmpty {
+                let layers = try VisitLayer.filter(layerIds.contains(Column("id"))).fetchAll(db)
+                for var layer in layers {
+                    layer.isStoryNode = false
+                    layer.settledAt = nil
+                    layer.userText = nil
+                    try layer.update(db)
+                }
+            }
+
+            try story.delete(db)
+
+            let affectedClusterIds = Set(try VisitLayer
+                .filter(layerIds.contains(Column("id")))
+                .fetchAll(db)
+                .map(\.placeClusterId))
+                .union([story.placeClusterId])
+
+            for clusterId in affectedClusterIds {
+                let hasAnyStoryLayer = try VisitLayer
+                    .filter(Column("placeClusterId") == clusterId && Column("isStoryNode") == true)
+                    .fetchCount(db) > 0
+                _ = try PlaceCluster
+                    .filter(Column("id") == clusterId)
+                    .updateAll(db, Column("hasStory").set(to: hasAnyStoryLayer))
+            }
+        }
+    }
+}
+
+enum DeleteStoryNodeError: Error {
+    case storyNotFound
+}

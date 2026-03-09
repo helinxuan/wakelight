@@ -135,7 +135,7 @@ private struct TimelineCardView: View {
     private var photoArea: some View {
         ZStack {
             if let cover = node.coverPhotoIdentifier {
-                ThumbnailView(locatorKey: cover, size: CGSize(width: cardWidth - 24, height: photoHeight))
+                ThumbnailView(locatorKey: cover, size: CGSize(width: cardWidth - 24, height: photoHeight), preferHighQuality: true)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: cardWidth - 24, height: photoHeight)
                     .background(Color.black.opacity(0.24))
@@ -156,6 +156,11 @@ private struct TimelineCardView: View {
     }
 
     private var primaryLocationDisplayText: String {
+        let poi = node.placeCluster?.poiName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !poi.isEmpty, poi != "未知地点" {
+            return poi
+        }
+
         let detail = node.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !detail.isEmpty, detail != "未知地点" {
             return detail

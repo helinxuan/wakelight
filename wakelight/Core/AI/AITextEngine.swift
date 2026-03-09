@@ -15,17 +15,27 @@ public struct AITextRequest {
     public var cacheKey: String?
     /// 当模型不可用或推理失败时使用的兜底文案。
     public var fallbackText: String
+    /// 可选采样参数（为空时使用引擎默认值）。
+    public var temperature: Double?
+    public var topP: Double?
+    public var maxTokens: Int?
 
     public init(
         systemPrompt: String,
         userPrompt: String,
         cacheKey: String? = nil,
-        fallbackText: String
+        fallbackText: String,
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        maxTokens: Int? = nil
     ) {
         self.systemPrompt = systemPrompt
         self.userPrompt = userPrompt
         self.cacheKey = cacheKey
         self.fallbackText = fallbackText
+        self.temperature = temperature
+        self.topP = topP
+        self.maxTokens = maxTokens
     }
 }
 
@@ -112,6 +122,7 @@ public actor AITextEngine {
             let model: String
             let messages: [ChatMessage]
             let temperature: Double
+            let top_p: Double
             let max_tokens: Int?
         }
 
@@ -134,8 +145,9 @@ public actor AITextEngine {
         let body = ChatRequestBody(
             model: "Qwen/Qwen2.5-7B-Instruct",
             messages: messages,
-            temperature: 0.7,
-            max_tokens: 512
+            temperature: request.temperature ?? 0.7,
+            top_p: request.topP ?? 0.9,
+            max_tokens: request.maxTokens
         )
 
         var urlRequest = URLRequest(url: url)
