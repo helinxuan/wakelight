@@ -18,14 +18,14 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
     /// 获取仅城市名（如“成都”），用于顶部标题
     func resolveCityName(for cluster: PlaceCluster) async throws -> String? {
         if let cityName = cluster.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !cityName.isEmpty {
-            // 已有中文城市名直接复用；英文/拼音名称尝试刷新为中文，避免 UI 持续显示英文。
-            if containsCJKCharacters(cityName) {
+            if !looksLikeRoadName(cityName), containsCJKCharacters(cityName) {
                 return cityName
             }
+            print("[Geo][CityResolve][Bypass] reason=existing-road-or-nonCJK value=\(cityName)")
         }
 
         let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
-        if let cityName = try await reverseGeocodeCityName(location: location) {
+        if let cityName = try await reverseGeocodeCityName(location: location), !looksLikeRoadName(cityName) {
             try await updateCluster(cluster.id, cityName: cityName)
             return cityName
         }
@@ -34,16 +34,13 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         return cluster.cityName
     }
 
-    /// 获取详细地址（如“武侯 · 瑞彩路”），用于列表内容
+    /// 获取详细地址（道路/行政区语义，不含 POI）
     func resolveDetailedAddress(for cluster: PlaceCluster) async throws -> String? {
         print("[Geo][DetailedResolve][Start] cluster=\(cluster.id) lat=\(cluster.centerLatitude) lng=\(cluster.centerLongitude) existing=\(cluster.detailedAddress ?? "nil")")
 
-        if let detailed = cluster.detailedAddress, !detailed.isEmpty {
-            if !looksLikeRoadName(detailed) {
-                print("[Geo][DetailedResolve][Skip] reason=cluster-has-value value=\(detailed)")
-                return detailed
-            }
-            print("[Geo][DetailedResolve][Bypass] reason=cluster-value-road-like value=\(detailed)")
+        if let detailed = cluster.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines), !detailed.isEmpty {
+            print("[Geo][DetailedResolve][Skip] reason=cluster-has-value value=\(detailed)")
+            return detailed
         }
 
         let cacheKey = "\(cluster.centerLatitude.rounded(toPlaces: 3))_\(cluster.centerLongitude.rounded(toPlaces: 3))_detailed" as NSString
@@ -53,18 +50,56 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         }
 
         let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+        let detailedName = try await reverseGeocodeDetailedAddressOnly(location: location)
 
-        let detailedName = try await reverseGeocodeDetailedName(location: location)
-
-        let result = detailedName ?? cluster.cityName
-        if let result = result, !result.isEmpty {
-            Self.memoryCache.setObject(result as NSString, forKey: cacheKey)
-            try await updateCluster(cluster.id, detailedAddress: result)
+        if let detailedName, !detailedName.isEmpty {
+            Self.memoryCache.setObject(detailedName as NSString, forKey: cacheKey)
+            try await updateCluster(cluster.id, detailedAddress: detailedName)
+            return detailedName
         }
-        return result
+
+        return nil
     }
 
-    private func updateCluster(_ id: UUID, cityName: String? = nil, detailedAddress: String? = nil) async throws {
+    /// 获取 POI 名称（地标/商户/景点语义）
+    func resolvePOIName(for cluster: PlaceCluster) async throws -> String? {
+        if let poi = cluster.poiName?.trimmingCharacters(in: .whitespacesAndNewlines), !poi.isEmpty {
+            return poi
+        }
+
+        let cacheKey = "\(cluster.centerLatitude.rounded(toPlaces: 3))_\(cluster.centerLongitude.rounded(toPlaces: 3))_poi" as NSString
+        if let cached = Self.memoryCache.object(forKey: cacheKey) {
+            return cached as String
+        }
+
+        let location = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+        if let poi = try await reverseGeocodePOIName(location: location), !poi.isEmpty {
+            Self.memoryCache.setObject(poi as NSString, forKey: cacheKey)
+            try await updateCluster(cluster.id, poiName: poi)
+            return poi
+        }
+
+        return nil
+    }
+
+    /// 获取 UI 列表展示地点（优先 POI，其次详细地址，最后城市）
+    func resolveDisplayLocation(for cluster: PlaceCluster) async throws -> String? {
+        if let poi = try await resolvePOIName(for: cluster), !poi.isEmpty {
+            return poi
+        }
+
+        if let detailed = try await resolveDetailedAddress(for: cluster), !detailed.isEmpty {
+            return detailed
+        }
+
+        if let city = try await resolveCityName(for: cluster), !city.isEmpty {
+            return city
+        }
+
+        return nil
+    }
+
+    private func updateCluster(_ id: UUID, cityName: String? = nil, detailedAddress: String? = nil, poiName: String? = nil) async throws {
         try await writer.write { db in
             if var cluster = try PlaceCluster.fetchOne(db, key: id) {
                 var changed = false
@@ -76,6 +111,10 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                     cluster.detailedAddress = detailedAddress
                     changed = true
                 }
+                if let poiName = poiName, cluster.poiName != poiName {
+                    cluster.poiName = poiName
+                    changed = true
+                }
                 if changed {
                     try cluster.update(db)
                 }
@@ -85,74 +124,67 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
     // MARK: - Core Logic
 
-    private func reverseGeocodeDetailedName(location: CLLocation) async throws -> String? {
+    private func reverseGeocodeDetailedAddressOnly(location: CLLocation) async throws -> String? {
         print("[Geo][DetailedResolve][PipelineStart] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
 
         if #available(iOS 26.0, *) {
-            print("[Geo][DetailedResolve][Try] provider=MapKit")
-            if let mapKitResult = try await reverseGeocodeDetailedNameUsingMapKit(location: location) {
-                print("[Geo][DetailedResolve][Hit] provider=MapKit value=\(mapKitResult)")
+            print("[Geo][DetailedResolve][Try] provider=MapKitAddress")
+            if let mapKitResult = try await reverseGeocodeDetailedAddressUsingMapKit(location: location) {
+                print("[Geo][DetailedResolve][Hit] provider=MapKitAddress value=\(mapKitResult)")
                 return mapKitResult
             }
-            print("[Geo][DetailedResolve][Miss] provider=MapKit")
-
-            print("[Geo][DetailedResolve][Try] provider=MKLocalSearch")
-            do {
-                if let poiResult = try await searchNearbyPOINameUsingLocalSearch(location: location) {
-                    print("[Geo][DetailedResolve][Hit] provider=MKLocalSearch value=\(poiResult)")
-                    return poiResult
-                }
-                print("[Geo][DetailedResolve][Miss] provider=MKLocalSearch")
-            } catch {
-                print("[Geo][DetailedResolve][Error] provider=MKLocalSearch lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
-            }
+            print("[Geo][DetailedResolve][Miss] provider=MapKitAddress")
         }
 
         if #unavailable(iOS 26.0) {
-            print("[Geo][DetailedResolve][Try] provider=CoreLocation")
+            print("[Geo][DetailedResolve][Try] provider=CoreLocationAddress")
             do {
-                if let coreLocationResult = try await reverseGeocodeDetailedNameUsingCoreLocation(location: location) {
-                    print("[Geo][DetailedResolve][Hit] provider=CoreLocation value=\(coreLocationResult)")
+                if let coreLocationResult = try await reverseGeocodeDetailedAddressUsingCoreLocation(location: location) {
+                    print("[Geo][DetailedResolve][Hit] provider=CoreLocationAddress value=\(coreLocationResult)")
                     return coreLocationResult
                 }
-                print("[Geo][DetailedResolve][Miss] provider=CoreLocation")
+                print("[Geo][DetailedResolve][Miss] provider=CoreLocationAddress")
             } catch {
                 print("[Geo][CoreLocation][Detailed][Error] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
             }
-
-            print("[Geo][DetailedResolve][Try] provider=MKLocalSearch")
-            do {
-                if let poiResult = try await searchNearbyPOINameUsingLocalSearch(location: location) {
-                    print("[Geo][DetailedResolve][Hit] provider=MKLocalSearch value=\(poiResult)")
-                    return poiResult
-                }
-                print("[Geo][DetailedResolve][Miss] provider=MKLocalSearch")
-            } catch {
-                print("[Geo][DetailedResolve][Error] provider=MKLocalSearch lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
-            }
         }
 
-        print("[Geo][DetailedResolve][Try] provider=MapboxTilequeryPOI")
-        if let mapboxPOI = try await reverseGeocodePOIUsingMapboxTilequery(location: location) {
-            print("[Geo][DetailedResolve][Hit] provider=MapboxTilequeryPOI value=\(mapboxPOI)")
-            return mapboxPOI
-        }
-        print("[Geo][DetailedResolve][Miss] provider=MapboxTilequeryPOI")
-
-        print("[Geo][DetailedResolve][Try] provider=Mapbox")
-        if let mapboxDetailed = try await reverseGeocodeDetailedNameUsingMapbox(location: location) {
-            print("[Geo][DetailedResolve][Hit] provider=Mapbox value=\(mapboxDetailed)")
+        print("[Geo][DetailedResolve][Try] provider=MapboxAddress")
+        if let mapboxDetailed = try await reverseGeocodeDetailedAddressUsingMapbox(location: location) {
+            print("[Geo][DetailedResolve][Hit] provider=MapboxAddress value=\(mapboxDetailed)")
             return mapboxDetailed
         }
 
-        print("[Geo][DetailedResolve][Miss] provider=Mapbox lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
-        print("[Geo][DetailedResolve][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        print("[Geo][DetailedResolve][Miss] provider=MapboxAddress lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        return nil
+    }
+
+    private func reverseGeocodePOIName(location: CLLocation) async throws -> String? {
+        print("[Geo][POIResolve][PipelineStart] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+
+        print("[Geo][POIResolve][Try] provider=MKLocalSearch")
+        do {
+            if let poi = try await searchNearbyPOINameUsingLocalSearch(location: location) {
+                print("[Geo][POIResolve][Hit] provider=MKLocalSearch value=\(poi)")
+                return poi
+            }
+            print("[Geo][POIResolve][Miss] provider=MKLocalSearch")
+        } catch {
+            print("[Geo][POIResolve][Error] provider=MKLocalSearch lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+        }
+
+        print("[Geo][POIResolve][Try] provider=MapboxTilequeryPOI")
+        if let mapboxPOI = try await reverseGeocodePOIUsingMapboxTilequery(location: location) {
+            print("[Geo][POIResolve][Hit] provider=MapboxTilequeryPOI value=\(mapboxPOI)")
+            return mapboxPOI
+        }
+        print("[Geo][POIResolve][Miss] provider=MapboxTilequeryPOI")
+
         return nil
     }
 
     @available(iOS 26.0, *)
-    private func reverseGeocodeDetailedNameUsingMapKit(location: CLLocation) async throws -> String? {
-        // 优先中文，避免国内地点被解析为英文名（例如 Meishan）。
+    private func reverseGeocodeDetailedAddressUsingMapKit(location: CLLocation) async throws -> String? {
         let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
         for locale in locales {
@@ -162,26 +194,12 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                 let items = try await request.mapItems
                 guard let item = items.first else { continue }
 
-                if let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-                    if looksLikeRoadName(name) {
-                        print("[Geo][MapKit][Detailed][RoadLike] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) name=\(name)")
-                    } else {
-                        print("[Geo][MapKit][Detailed][Landmark] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) name=\(name)")
-                        return name
-                    }
-                }
-
-                // iOS 26 起 MKMapItem.placemark 废弃，这里仅使用 map item 自身可用字段。
-                let landmarkCandidates = [item.name]
-                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-
-                if let landmark = landmarkCandidates.first(where: { !looksLikeRoadName($0) }) {
-                    print("[Geo][MapKit][Detailed][LandmarkFallback] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) landmark=\(landmark)")
-                    return landmark
+                if let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty, looksLikeRoadName(name) {
+                    print("[Geo][MapKit][Address][Road] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) name=\(name)")
+                    return name
                 }
             } catch {
-                print("[Geo][MapKit][Detailed][Error] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
+                print("[Geo][MapKit][Address][Error] locale=\(locale.identifier) lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) error=\(error)")
                 continue
             }
         }
@@ -190,7 +208,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
     }
 
     @available(iOS, deprecated: 26.0)
-    private func reverseGeocodeDetailedNameUsingCoreLocation(location: CLLocation) async throws -> String? {
+    private func reverseGeocodeDetailedAddressUsingCoreLocation(location: CLLocation) async throws -> String? {
         #if canImport(CoreLocation) && !os(watchOS)
         let locales = [Locale(identifier: "zh_CN"), Locale(identifier: "en_US")]
 
@@ -207,8 +225,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                         return
                     }
                     self?.logCoreLocationPlacemark(placemark, location: location, locale: locale)
-                    let name = self?.formatDetailedName(from: placemark)
-                    continuation.resume(returning: name)
+                    let address = self?.extractDetailedAddress(from: placemark)
+                    continuation.resume(returning: address)
                 }
             }
             if let result, !result.isEmpty {
@@ -222,34 +240,13 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         #endif
     }
 
-    private func formatDetailedName(from placemark: CLPlacemark) -> String? {
-        let districtName = placemark.subLocality?.replacingOccurrences(of: "区", with: "") ?? ""
-        let cityName = placemark.locality?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        let landmarkCandidates = [
-            placemark.name,
-            placemark.areasOfInterest?.first,
-            placemark.inlandWater,
-            placemark.ocean
-        ]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        // 详细地址优先使用地标/POI名称，不使用街道门牌。
-        if let landmark = landmarkCandidates.first(where: { candidate in
-            candidate != districtName
-                && candidate != cityName
-                && !looksLikeRoadName(candidate)
-        }) {
-            return landmark
+    private func extractDetailedAddress(from placemark: CLPlacemark) -> String? {
+        if let thoroughfare = placemark.thoroughfare?.trimmingCharacters(in: .whitespacesAndNewlines), !thoroughfare.isEmpty {
+            return thoroughfare
         }
 
-        if !districtName.isEmpty {
-            return districtName
-        }
-
-        if !cityName.isEmpty {
-            return cityName.replacingOccurrences(of: "市", with: "")
+        if let subLocality = placemark.subLocality?.trimmingCharacters(in: .whitespacesAndNewlines), !subLocality.isEmpty {
+            return subLocality
         }
 
         return nil
@@ -343,6 +340,11 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
+        if looksLikeRoadName(trimmed) {
+            print("[Geo][MapKit][City][RoadLikeSkip] value=\(trimmed)")
+            return nil
+        }
+
         // 尝试从 "成都市武侯区"、"成都·武侯"、"成都, 四川" 等名称中提取城市部分。
         let separators = CharacterSet(charactersIn: "·,，/|-")
         let firstPart = trimmed.components(separatedBy: separators).first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmed
@@ -351,6 +353,10 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             .replacingOccurrences(of: "市", with: "")
             .replacingOccurrences(of: "自治区", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if looksLikeRoadName(normalized) {
+            return nil
+        }
 
         return normalized.isEmpty ? nil : normalized
     }
@@ -399,17 +405,21 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         return nil
     }
 
-    private func reverseGeocodeDetailedNameUsingMapbox(location: CLLocation) async throws -> String? {
+    private func reverseGeocodeDetailedAddressUsingMapbox(location: CLLocation) async throws -> String? {
         guard let result = try await mapboxReverseGeocode(location: location) else {
             return nil
         }
 
         if let detailed = result.detailed?.trimmingCharacters(in: .whitespacesAndNewlines), !detailed.isEmpty {
-            print("[Geo][Mapbox][Detailed][Hit] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) detailed=\(detailed)")
-            return detailed
+            if looksLikeRoadName(detailed) {
+                print("[Geo][Mapbox][Address][Hit] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) detailed=\(detailed)")
+                return detailed
+            }
+
+            print("[Geo][Mapbox][Address][Miss] non-road value lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude) detailed=\(detailed)")
         }
 
-        print("[Geo][Mapbox][Detailed][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
+        print("[Geo][Mapbox][Address][Miss] lat=\(location.coordinate.latitude) lng=\(location.coordinate.longitude)")
         return nil
     }
 

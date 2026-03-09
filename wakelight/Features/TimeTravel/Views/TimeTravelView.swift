@@ -162,16 +162,23 @@ struct TimeTravelView: View {
     }
 
     private var currentCityText: String {
-        if let city = currentNode?.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty {
+        if let city = currentNode?.placeCluster?.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty, !looksLikeRoadName(city) {
             return city
         }
-        if let location = currentNode?.displayLocation?.trimmingCharacters(in: .whitespacesAndNewlines), !location.isEmpty {
-            return location
-        }
-        if let address = currentNode?.placeCluster?.detailedAddress?.trimmingCharacters(in: .whitespacesAndNewlines), !address.isEmpty {
-            return address
-        }
         return "未知城市"
+    }
+
+    private func looksLikeRoadName(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+
+        let latinRoadMarkers = [" street", " st", " road", " rd", " avenue", " ave", " lane", " ln", " drive", " dr", " boulevard", " blvd", " strasse", " straße", "gata", "weg"]
+        let hasLatinRoadMarker = latinRoadMarkers.contains { lowercased.contains($0) }
+
+        let zhRoadMarkers = ["路", "街", "巷", "道", "大道", "胡同", "弄", "段"]
+        let hasZhRoadMarker = zhRoadMarkers.contains { trimmed.contains($0) }
+
+        return hasZhRoadMarker || hasLatinRoadMarker
     }
 }
 

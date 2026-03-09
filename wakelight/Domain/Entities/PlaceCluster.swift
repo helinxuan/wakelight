@@ -14,8 +14,16 @@ struct PlaceCluster: Codable, FetchableRecord, PersistableRecord, Identifiable {
     var centerLatitude: Double
     var centerLongitude: Double
     var geohash: String
-    var cityName: String?
-    var detailedAddress: String?
+
+    /// 城市名（仅城市语义，如“成都”）
+    var cityName: String? = nil
+
+    /// 详细地址（行政区/道路等地址语义）
+    var detailedAddress: String? = nil
+
+    /// POI 名称（地标/商户/景点语义）
+    var poiName: String? = nil
+
     var photoCount: Int
     var visitCount: Int
     var fogState: FogState

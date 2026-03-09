@@ -47,8 +47,18 @@ struct ExplorationRootView: View {
                     didShowFirstLightPopupThisSession = true
 
                     Task {
-                        // 确保在生成文案前，城市名已被解析
-                        let resolvedCity = (try? await ResolvePlaceClusterCityNameUseCase().resolveCityName(for: cluster)) ?? cluster.cityName ?? "新地点"
+                        // 并发解析三类语义：城市名、详细地址、POI。
+                        let resolver = ResolvePlaceClusterCityNameUseCase()
+                        async let resolvedCityTask = resolver.resolveCityName(for: cluster)
+                        async let resolvedDetailedTask = resolver.resolveDetailedAddress(for: cluster)
+                        async let resolvedPOITask = resolver.resolvePOIName(for: cluster)
+
+                        let resolvedCityRaw = try? await resolvedCityTask
+                        _ = try? await resolvedDetailedTask
+                        _ = try? await resolvedPOITask
+
+                        let resolvedCity = normalizeCityLabel(city: resolvedCityRaw ?? cluster.cityName)
+
                         await MainActor.run {
                             self.popupCityName = resolvedCity
                             self.shouldPresentFirstLightPopupAfterSweep = true
@@ -349,6 +359,28 @@ struct ExplorationRootView: View {
 
         shouldPresentFirstLightPopupAfterSweep = false
         presentFirstLightPopup()
+    }
+
+    private func normalizeCityLabel(city: String?) -> String {
+        let cityCandidate = city?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cityCandidate.isEmpty, !looksLikeRoadName(cityCandidate) {
+            return cityCandidate
+        }
+
+        return "新地点"
+    }
+
+    private func looksLikeRoadName(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+
+        let latinRoadMarkers = [" street", " st", " road", " rd", " avenue", " ave", " lane", " ln", " drive", " dr", " boulevard", " blvd", " strasse", " straße", "gata", "weg"]
+        let hasLatinRoadMarker = latinRoadMarkers.contains { lowercased.contains($0) }
+
+        let zhRoadMarkers = ["路", "街", "巷", "道", "大道", "胡同", "弄", "段"]
+        let hasZhRoadMarker = zhRoadMarkers.contains { trimmed.contains($0) }
+
+        return hasZhRoadMarker || hasLatinRoadMarker
     }
 
     private func generateFirstLightText(for cluster: PlaceCluster, resolvedCity: String) {

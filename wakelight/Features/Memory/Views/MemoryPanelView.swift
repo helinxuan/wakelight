@@ -725,7 +725,7 @@ final class MemoryPanelViewModel: ObservableObject {
     private func resolveClusterNames() {
         for cluster in clusters {
             Task {
-                if let name = try? await resolveCityNameUseCase.resolveDetailedAddress(for: cluster) {
+                if let name = try? await resolveCityNameUseCase.resolveDisplayLocation(for: cluster) {
                     await MainActor.run { self.clusterNames[cluster.id] = name }
                 }
             }
@@ -762,11 +762,35 @@ final class MemoryPanelViewModel: ObservableObject {
     }
 
     private func resolveCityNameIfNeeded() {
-        guard cityName == nil, let first = clusters.first else { return }
+        guard let first = clusters.first else { return }
+
+        if let cityName, !cityName.isEmpty, !looksLikeRoadName(cityName) {
+            return
+        }
+
         Task {
             let name = try? await resolveCityNameUseCase.resolveCityName(for: first)
-            await MainActor.run { self.cityName = name }
+            await MainActor.run {
+                if let name, !name.isEmpty, !self.looksLikeRoadName(name) {
+                    self.cityName = name
+                } else {
+                    self.cityName = nil
+                }
+            }
         }
+    }
+
+    private func looksLikeRoadName(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+
+        let latinRoadMarkers = [" street", " st", " road", " rd", " avenue", " ave", " lane", " ln", " drive", " dr", " boulevard", " blvd", " strasse", " straße", "gata", "weg"]
+        let hasLatinRoadMarker = latinRoadMarkers.contains { lowercased.contains($0) }
+
+        let zhRoadMarkers = ["路", "街", "巷", "道", "大道", "胡同", "弄", "段"]
+        let hasZhRoadMarker = zhRoadMarkers.contains { trimmed.contains($0) }
+
+        return hasZhRoadMarker || hasLatinRoadMarker
     }
 }
 
