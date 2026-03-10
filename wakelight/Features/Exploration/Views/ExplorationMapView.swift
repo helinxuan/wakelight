@@ -706,7 +706,9 @@ struct ExplorationMapView: UIViewRepresentable {
         ])
 
         let span = MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 40)
-        let region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 34.0, longitude: 103.0), span: span)
+        let defaultCenter = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: 34.0, longitude: 103.0)
+        let initialCenter = viewModel.initialCenterCoordinate ?? defaultCenter
+        let region = MKCoordinateRegion(center: initialCenter, span: span)
         mapView.setRegion(region, animated: false)
 
         context.coordinator.applyAnnotations(to: mapView)

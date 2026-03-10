@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MapKit
+import CoreLocation
 import GRDB
 
 
@@ -8,6 +9,7 @@ final class ExploreViewModel: ObservableObject {
     @Published var clusters: [PlaceCluster] = []
     @Published var storyThumbnails: [UUID: String] = [:] // clusterId -> locatorKey
     @Published var storyThumbnailHasRaw: [UUID: Bool] = [:] // clusterId -> hasRaw
+    @Published var initialCenterCoordinate: CLLocationCoordinate2D? = nil
 
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
@@ -105,17 +107,35 @@ final class ExploreViewModel: ObservableObject {
                         }
                     }
                 }
-                return (clusters, thumbnails, hasRawByClusterId)
+
+                let recentClusterSql = """
+                    SELECT pc.centerLatitude, pc.centerLongitude
+                    FROM placeCluster pc
+                    JOIN visitLayer vl ON vl.placeClusterId = pc.id
+                    JOIN visitLayerPhotoAsset vlp ON vlp.visitLayerId = vl.id
+                    JOIN photoAsset p ON p.id = vlp.photoAssetId
+                    ORDER BY p.creationDate DESC
+                    LIMIT 1
+                """
+
+                let recentCoordinate: CLLocationCoordinate2D? = try Row.fetchOne(db, sql: recentClusterSql).flatMap { row in
+                    guard let lat: Double = row["centerLatitude"],
+                          let lon: Double = row["centerLongitude"] else { return nil }
+                    return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                }
+
+                return (clusters, thumbnails, hasRawByClusterId, recentCoordinate)
             }
             .publisher(in: db.reader)
             .sink { completion in
                 if case .failure(let error) = completion {
                     print("Error observing clusters: \(error)")
                 }
-            } receiveValue: { [weak self] (clusters, thumbnails, hasRawByClusterId) in
+            } receiveValue: { [weak self] (clusters, thumbnails, hasRawByClusterId, recentCoordinate) in
                 self?.clusters = clusters
                 self?.storyThumbnails = thumbnails
                 self?.storyThumbnailHasRaw = hasRawByClusterId
+                self?.initialCenterCoordinate = recentCoordinate
             }
             .store(in: &cancellables)
     }
