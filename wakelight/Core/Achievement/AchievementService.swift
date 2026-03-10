@@ -3,20 +3,19 @@ import GRDB
 
 final class AchievementService {
     static let shared = AchievementService()
-    
+
     private let writer: DatabaseWriter
-    
-    let achievements: [Achievement] = [
-        Achievement(id: "story_nodes_1", title: "初行者", description: "完成第 1 次故事沉淀", iconName: "sparkles", targetValue: 1),
-        Achievement(id: "story_nodes_10", title: "故事家", description: "完成 10 次故事沉淀", iconName: "book.fill", targetValue: 10),
-        Achievement(id: "places_5", title: "足迹广布", description: "在 5 个不同的地点留下故事", iconName: "map.fill", targetValue: 5)
-    ]
-    
+    private let achievementIndex: [String: Achievement]
+
+    let achievements: [Achievement]
+
     private init(writer: DatabaseWriter = DatabaseContainer.shared.writer) {
         self.writer = writer
+        self.achievements = AchievementCatalogLoader.load()
+        self.achievementIndex = Dictionary(uniqueKeysWithValues: achievements.map { ($0.id, $0) })
         setupSubscriptions()
     }
-    
+
     private func setupSubscriptions() {
         NotificationCenter.default.addObserver(
             forName: .wakelightDomainEvent,
@@ -27,72 +26,95 @@ final class AchievementService {
             self?.handleEvent(event)
         }
     }
-    
+
     private func handleEvent(_ event: DomainEventBus.Event) {
         switch event {
         case .storySettled:
             Task {
-                try? await updateProgress(for: "story_nodes_1", increment: 1)
-                try? await updateProgress(for: "story_nodes_10", increment: 1)
-                await updateUniquePlacesAchievement()
+                try? await applyIncrementRule(achievementId: "story_nodes_1", increment: 1)
+                try? await applyIncrementRule(achievementId: "story_nodes_10", increment: 1)
+                try? await recalculateUniquePlaceRule(achievementId: "places_5")
             }
         case .locationUnlocked:
             break
         }
     }
-    
-    private func updateProgress(for achievementId: String, increment: Int) async throws {
-        try await writer.write { db in
-            var progress = try AchievementProgress
-                .filter(Column("achievementId") == achievementId)
-                .fetchOne(db) ?? AchievementProgress(
-                    id: UUID(),
-                    achievementId: achievementId,
-                    progressValue: 0,
-                    isUnlocked: false,
-                    unlockedAt: nil,
-                    updatedAt: Date()
-                )
-            
+
+    private func applyIncrementRule(achievementId: String, increment: Int) async throws {
+        guard achievementIndex[achievementId] != nil else { return }
+
+        let unlockedAchievement = try await writer.write { db -> Achievement? in
+            var progress = try fetchOrCreateProgress(db: db, achievementId: achievementId)
             progress.progressValue += increment
             progress.updatedAt = Date()
-            
-            if !progress.isUnlocked, let target = achievements.first(where: { $0.id == achievementId })?.targetValue, progress.progressValue >= target {
-                progress.isUnlocked = true
-                progress.unlockedAt = Date()
-            }
-            
+            let unlocked = unlockIfNeeded(progress: &progress)
             try progress.save(db)
+            return unlocked ? achievementIndex[achievementId] : nil
+        }
+
+        if let unlockedAchievement {
+            postUnlockedNotification(unlockedAchievement)
         }
     }
-    
-    private func updateUniquePlacesAchievement() async {
-        let achievementId = "places_5"
-        try? await writer.write { db in
-            let count = try PlaceCluster
+
+    private func recalculateUniquePlaceRule(achievementId: String) async throws {
+        guard achievementIndex[achievementId] != nil else { return }
+
+        let unlockedAchievement = try await writer.write { db -> Achievement? in
+            let placeCount = try PlaceCluster
                 .filter(Column("hasStory") == true)
                 .fetchCount(db)
-            
-            var progress = try AchievementProgress
-                .filter(Column("achievementId") == achievementId)
-                .fetchOne(db) ?? AchievementProgress(
-                    id: UUID(),
-                    achievementId: achievementId,
-                    progressValue: 0,
-                    isUnlocked: false,
-                    unlockedAt: nil,
-                    updatedAt: Date()
-                )
-            
-            progress.progressValue = count
+
+            var progress = try fetchOrCreateProgress(db: db, achievementId: achievementId)
+            progress.progressValue = placeCount
             progress.updatedAt = Date()
-            
-            if !progress.isUnlocked, let target = achievements.first(where: { $0.id == achievementId })?.targetValue, progress.progressValue >= target {
-                progress.isUnlocked = true
-                progress.unlockedAt = Date()
-            }
-            
+            let unlocked = unlockIfNeeded(progress: &progress)
             try progress.save(db)
+            return unlocked ? achievementIndex[achievementId] : nil
+        }
+
+        if let unlockedAchievement {
+            postUnlockedNotification(unlockedAchievement)
         }
     }
+
+    private func fetchOrCreateProgress(db: Database, achievementId: String) throws -> AchievementProgress {
+        if let existing = try AchievementProgress
+            .filter(Column("achievementId") == achievementId)
+            .fetchOne(db) {
+            return existing
+        }
+
+        return AchievementProgress(
+            id: UUID(),
+            achievementId: achievementId,
+            progressValue: 0,
+            isUnlocked: false,
+            unlockedAt: nil,
+            updatedAt: Date()
+        )
+    }
+
+    private func unlockIfNeeded(progress: inout AchievementProgress) -> Bool {
+        guard !progress.isUnlocked,
+              let target = achievementIndex[progress.achievementId]?.targetValue,
+              progress.progressValue >= target else {
+            return false
+        }
+
+        progress.isUnlocked = true
+        progress.unlockedAt = Date()
+        return true
+    }
+
+    private func postUnlockedNotification(_ achievement: Achievement) {
+        NotificationCenter.default.post(
+            name: .wakelightAchievementUnlocked,
+            object: achievement
+        )
+    }
+}
+
+extension Notification.Name {
+    static let wakelightAchievementUnlocked = Notification.Name("wakelightAchievementUnlocked")
 }

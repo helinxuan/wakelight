@@ -1,0 +1,23 @@
+[
+  {
+    "id": "story_nodes_1",
+    "title": "初行者",
+    "description": "完成第 1 次故事沉淀",
+    "iconName": "sparkles",
+    "targetValue": 1
+  },
+  {
+    "id": "story_nodes_10",
+    "title": "故事家",
+    "description": "完成 10 次故事沉淀",
+    "iconName": "book.fill",
+    "targetValue": 10
+  },
+  {
+    "id": "places_5",
+    "title": "足迹广布",
+    "description": "在 5 个不同的地点留下故事",
+    "iconName": "map.fill",
+    "targetValue": 5
+  }
+]

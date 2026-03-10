@@ -114,23 +114,6 @@ struct ExplorationRootView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                if !isAwakenMode {
-                    HStack(spacing: 12) {
-                        Button(action: {
-                            showBadges = true
-                        }) {
-                            Label("Badges", systemImage: "medal.fill")
-                                .padding()
-                                .background(Color.black.opacity(0.7))
-                                .foregroundColor(.white)
-                                .cornerRadius(10)
-                        }
-
-                    }
-                    .padding(.horizontal)
-                    .padding(.top)
-                    .padding(.bottom, 90)
-                }
 
                 if !awakenQueue.isEmpty, isAwakenMode {
                     VStack(spacing: 0) {

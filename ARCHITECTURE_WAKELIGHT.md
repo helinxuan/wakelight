@@ -836,6 +836,29 @@ flowchart LR
   - 状态落库：`CDAchievementProgress` 持久化，避免丢失
 - **展示**：解锁动画与徽章墙只订阅“解锁结果”，不参与业务计算
 
+### 8.2.1 为什么规则用 JSON，而不是“直接写数据库规则”
+
+- **版本可审计**：规则随代码仓库版本管理（PR 可评审、可回滚），比“线上数据库直接改规则”更安全。
+- **离线优先一致性**：Wakelight 以离线为核心，JSON 随 App 包发布，首启即有完整规则，不依赖网络拉取数据库。
+- **职责清晰**：
+  - JSON：定义“成就目录与阈值”（静态配置）。
+  - SQLite：保存“用户进度与解锁状态”（动态数据）。
+- **降低迁移成本**：规则经常改文案、阈值、icon，用 JSON 改动无需数据库 schema migration。
+- **便于后续热更新**：未来可把 JSON 作为“配置包”下发，客户端复用同一套解析与校验逻辑。
+
+> 结论：**规则定义放 JSON，用户进度放数据库**。两者不是二选一，而是分工协作。
+
+### 8.2.2 当前实施方案（已落地口径）
+
+1. `Resources/achievement_rules.json`：维护成就目录（id/title/description/icon/targetValue）。
+2. `AchievementCatalogLoader`：启动时读取 JSON，失败回退到内置默认规则。
+3. `AchievementService`：
+   - 订阅 `DomainEventBus.Event`
+   - 按规则类型执行增量/重算
+   - 持久化 `AchievementProgress`
+   - 首次解锁时发出 `wakelightAchievementUnlocked` 通知（供 UI 动画消费）
+4. `BadgeWallViewModel`：实时观察 `achievementProgress` 表，与目录做 join，渲染徽章墙。
+
 ---
 
 # 9. 云同步（CloudKit，客户端事实源）

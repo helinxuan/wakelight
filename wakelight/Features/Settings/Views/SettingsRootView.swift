@@ -25,6 +25,12 @@ struct SettingsRootView: View {
                         SmartPhotoCurationSettingsView()
                     }
                 }
+
+                Section("成长") {
+                    NavigationLink("成就徽章") {
+                        BadgeWallView()
+                    }
+                }
             }
             .navigationTitle("设置")
         }

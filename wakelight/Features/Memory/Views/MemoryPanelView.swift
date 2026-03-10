@@ -703,17 +703,16 @@ private struct MergeVisitLayersSheet: View {
 
             let systemPrompt = """
             你是回忆卡片的日记文案助手。
-
-            你的任务是根据地点、时间氛围和照片内容，写一段简短的回忆文字。
-
-            写作规则：
-            1. 字数控制在50-80字。
-            2. 文风像个人日记，语气自然。
-            3. 先介绍地点或者景点信息，再描述感受。
-            4. 只根据提供的信息写，不要编造不存在的细节。
-            5.不要根据照片关键词推测具体场景（如工地、餐厅、商店等），只描述可见环境或整体氛围。
-            6. 照片内容关键词可能是机器视觉标签，不要逐词翻译成描述，应转化为自然、抽象的环境线索。
-            7. 不虚构人物或事件。
+            你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
+            要求：
+            - 字数控制在40-60字。
+            - 文风像个人日记，语气自然。
+            - 先介绍一段地点或者景点信息。
+            - 只根据提供的信息写，不要编造不存在的细节。
+            - 不要几张照片之类的描述。
+            - 不要编造人物行为或事件。
+            - 不要根据照片关键词推测具体场景（如工地、餐厅、商店等），只描述可见环境或整体氛围。
+            - 不要逐个描述照片中的物品或人物类别，只描述整体场景或整体氛围。
             """
 
             let photoContentLine: String = {
@@ -727,7 +726,6 @@ private struct MergeVisitLayersSheet: View {
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeRange)
-            照片数量：\(count)
             \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。
@@ -1086,19 +1084,16 @@ private struct VisitLayerRowView: View {
 
         let systemPrompt = """
         你是回忆卡片的日记文案助手。
-
-        你的任务：根据地点、时间氛围、照片数量和照片内容，写一段像用户本人记录的简短回忆。
-
+        你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
         要求：
-        - 只输出一段中文正文，40-60字
-        - 语气自然、克制、像真实日记
-        - 只写眼前看到的景象和当时感受
-        - 不要介绍城市、历史、景点，不写旅游攻略
-        - 不要引用古诗词，不要抒情堆砌
-        - 不要虚构人物、事件或不存在的细节
-        - 不要逐条复述关键词，不要出现英文关键词原词
-
-        输出只包含正文内容。
+        - 字数控制在40-60字。
+        - 文风像个人日记，语气自然。
+        - 先介绍一段地点或者景点信息。
+        - 只根据提供的信息写，不要编造不存在的细节。
+        - 不要几张照片之类的描述。
+        - 不要编造人物行为或事件。
+        - 不要根据照片关键词推测具体场景（如工地、餐厅、商店等），只描述可见环境或整体氛围。
+        - 不要逐个描述照片中的物品或人物类别，只描述整体场景或整体氛围。
         """
 
         Task {
@@ -1110,16 +1105,24 @@ private struct VisitLayerRowView: View {
             }) ?? []
 
             let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
-            let keywords = analysis.topKeywords.joined(separator: "、")
+            let prefilteredKeywords = analysis.sanitizedKeywords
+            let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
+                rawKeywords: prefilteredKeywords,
+                cacheKey: "diary_keywords_\(layer.id.uuidString)_\(locators.count)"
+            )
+            let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
+            let keywords = promptKeywords.joined(separator: "、")
+            let photoContentLine = keywords.isEmpty
+                ? "照片内容：未提取到稳定主题（请侧重整体氛围，不要硬编细节）"
+                : "照片内容：\(keywords)"
 
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timePrefix)
-            照片数量：\(count)
-            照片内容：\(keywords)
+            \(photoContentLine)
 
-            请写一段40-60字的自然日记文字，可直接放入回忆卡片。
+            请根据这些信息写一段回忆卡片文字。
             """
 
             let request = AITextRequest(
