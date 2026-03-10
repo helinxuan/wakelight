@@ -21,7 +21,7 @@ struct TimeTravelMapView: UIViewRepresentable {
         func rebuildOverlaysAndAnnotations(on mapView: MKMapView) {
             let coords: [CLLocationCoordinate2D] = parent.nodes.compactMap { node in
                 guard let cluster = node.placeCluster else { return nil }
-                return CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+                return GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
             }
 
             let routeSignature = coords.map { "\(round($0.latitude * 10_000) / 10_000),\(round($0.longitude * 10_000) / 10_000)" }
@@ -46,7 +46,7 @@ struct TimeTravelMapView: UIViewRepresentable {
                 return TimeTravelNodeAnnotation(
                     index: idx,
                     node: node,
-                    coordinate: CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+                    coordinate: GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
                 )
             }
             mapView.addAnnotations(currentAnnotations)
@@ -68,7 +68,7 @@ struct TimeTravelMapView: UIViewRepresentable {
 
             if parent.nodes.indices.contains(parent.selectedIndex),
                let cluster = parent.nodes[parent.selectedIndex].placeCluster {
-                let focus = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+                let focus = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
 
                 // 统一缩放级别，避免不同故事点出现忽远忽近
                 var region = MKCoordinateRegion(

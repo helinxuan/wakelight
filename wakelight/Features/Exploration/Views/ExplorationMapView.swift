@@ -870,7 +870,7 @@ final class FogScreenView: UIView {
 
             guard isHalfRevealed || isFullyRevealed || isAnimating else { continue }
 
-            let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
+            let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             let p = mapView.convert(coord, toPointTo: self)
             guard visibleRect.contains(p) else { continue }
 
@@ -922,7 +922,7 @@ final class FogScreenView: UIView {
         for (id, layer) in activeGlowLayers {
             guard let c = clusters.first(where: { $0.id == id }) else { continue }
 
-            let coord = CLLocationCoordinate2D(latitude: c.centerLatitude, longitude: c.centerLongitude)
+            let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             layer.position = mapView.convert(coord, toPointTo: self)
             layer.contents = c.hasStory ? storyGlowImage : glowImage
 

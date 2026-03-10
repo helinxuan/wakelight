@@ -159,7 +159,8 @@ final class ClusterAnnotation: NSObject, MKAnnotation {
 
     init(cluster: PlaceCluster) {
         self.cluster = cluster
-        self.coordinate = CLLocationCoordinate2D(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+        let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+        self.coordinate = coord
         super.init()
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+internal import _LocationEssentials
 
 /// 反向地理编码 PlaceCluster 的城市名/详细地址，并写入数据库缓存。
 final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
@@ -239,8 +240,9 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             return nil
         }
 
-        let lon = location.longitude
-        let lat = location.latitude
+        let gcj = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: location.latitude, longitude: location.longitude)
+        let lon = gcj.longitude
+        let lat = gcj.latitude
 
         struct AmapReverseResponse: Decodable {
             struct Regeocode: Decodable {
