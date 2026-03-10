@@ -136,10 +136,15 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         var detailed: String?
 
         print("[Geo][StructuredResolve][Try] provider=Amap")
-        if let amapResult = try await amapReverseGeocode(location: location) {
-            city = city ?? amapResult.city
-            detailed = detailed ?? amapResult.detailed
+        var amapResult: AmapResolvedResult?
+        if let result = try await amapReverseGeocode(location: location) {
+            amapResult = result
+            city = city ?? result.city
+            detailed = detailed ?? result.detailed
             print("[Geo][StructuredResolve][Hit] provider=Amap city=\(city ?? "nil") detailed=\(detailed ?? "nil")")
+            if let poiName = result.poi, !poiName.isEmpty {
+                print("[Geo][StructuredResolve][Hit] provider=AmapPOI value=\(poiName) type=\(result.poiType ?? "nil")")
+            }
         } else {
             print("[Geo][StructuredResolve][Miss] provider=Amap")
         }
@@ -155,7 +160,7 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             }
         }
 
-        let poiResult = try await reverseGeocodePOI(location: location)
+        let poiResult = try await reverseGeocodePOI(location: location, amapResult: amapResult)
 
         if city == nil, detailed == nil, poiResult == nil {
             print("[Geo][StructuredResolve][Miss] lat=\(location.latitude) lng=\(location.longitude)")
@@ -179,8 +184,16 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         )
     }
 
-    private func reverseGeocodePOI(location: GeoCoordinate) async throws -> ResolvedPOI? {
+    private func reverseGeocodePOI(location: GeoCoordinate, amapResult: AmapResolvedResult?) async throws -> ResolvedPOI? {
         print("[Geo][POIResolve][PipelineStart] lat=\(location.latitude) lng=\(location.longitude)")
+
+        if let amap = amapResult,
+           let name = amap.poi?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty,
+           !looksLikeRoadName(name) {
+            print("[Geo][POIResolve][Hit] provider=AmapPOI value=\(name) type=\(amap.poiType ?? "nil")")
+            return ResolvedPOI(name: name, type: amap.poiType)
+        }
 
         print("[Geo][POIResolve][Try] provider=MapboxTilequeryPOI")
         if let mapboxPOI = try await reverseGeocodePOIUsingMapboxTilequery(location: location) {
@@ -231,24 +244,56 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
 
         struct AmapReverseResponse: Decodable {
             struct Regeocode: Decodable {
+                struct StringOrArray: Decodable {
+                    let value: String?
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.singleValueContainer()
+                        if let single = try? container.decode(String.self) {
+                            value = single
+                            return
+                        }
+                        if let list = try? container.decode([String].self) {
+                            value = list.first
+                            return
+                        }
+                        value = nil
+                    }
+                }
+
                 struct AddressComponent: Decodable {
                     struct NameContainer: Decodable {
                         let name: String?
+                        let type: String?
 
                         init(from decoder: Decoder) throws {
                             let container = try decoder.container(keyedBy: CodingKeys.self)
-                            if let single = try? container.decode(String.self, forKey: .name) {
-                                name = single
-                                return
-                            }
-                            if let list = try? container.decode([String].self, forKey: .name) {
-                                name = list.first
-                                return
-                            }
-                            name = nil
+                            name = (try? container.decode(StringOrArray.self, forKey: .name))?.value
+                            type = (try? container.decode(StringOrArray.self, forKey: .type))?.value
                         }
 
-                        enum CodingKeys: String, CodingKey { case name }
+                        enum CodingKeys: String, CodingKey { case name, type }
+                    }
+
+                    struct StreetNumber: Decodable {
+                        let street: String?
+                        let number: String?
+                        let location: String?
+                        let direction: String?
+                        let distance: String?
+
+                        init(from decoder: Decoder) throws {
+                            let container = try decoder.container(keyedBy: CodingKeys.self)
+                            street = (try? container.decode(StringOrArray.self, forKey: .street))?.value
+                            number = (try? container.decode(StringOrArray.self, forKey: .number))?.value
+                            location = (try? container.decode(StringOrArray.self, forKey: .location))?.value
+                            direction = (try? container.decode(StringOrArray.self, forKey: .direction))?.value
+                            distance = (try? container.decode(StringOrArray.self, forKey: .distance))?.value
+                        }
+
+                        enum CodingKeys: String, CodingKey {
+                            case street, number, location, direction, distance
+                        }
                     }
 
                     let province: String?
@@ -257,10 +302,54 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                     let township: String?
                     let neighborhood: NameContainer?
                     let building: NameContainer?
+                    let streetNumber: StreetNumber?
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        province = (try? container.decode(StringOrArray.self, forKey: .province))?.value
+                        city = (try? container.decode(StringOrArray.self, forKey: .city))?.value
+                        district = (try? container.decode(StringOrArray.self, forKey: .district))?.value
+                        township = (try? container.decode(StringOrArray.self, forKey: .township))?.value
+                        neighborhood = try? container.decode(NameContainer.self, forKey: .neighborhood)
+                        building = try? container.decode(NameContainer.self, forKey: .building)
+                        streetNumber = try? container.decode(StreetNumber.self, forKey: .streetNumber)
+                    }
+
+                    enum CodingKeys: String, CodingKey {
+                        case province, city, district, township, neighborhood, building, streetNumber
+                    }
+                }
+
+                struct POI: Decodable {
+                    let id: String?
+                    let name: String?
+                    let type: String?
+                    let distance: String?
+                    let address: String?
+                    let location: String?
+                    let direction: String?
+                    let businessarea: String?
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        id = (try? container.decode(StringOrArray.self, forKey: .id))?.value
+                        name = (try? container.decode(StringOrArray.self, forKey: .name))?.value
+                        type = (try? container.decode(StringOrArray.self, forKey: .type))?.value
+                        distance = (try? container.decode(StringOrArray.self, forKey: .distance))?.value
+                        address = (try? container.decode(StringOrArray.self, forKey: .address))?.value
+                        location = (try? container.decode(StringOrArray.self, forKey: .location))?.value
+                        direction = (try? container.decode(StringOrArray.self, forKey: .direction))?.value
+                        businessarea = (try? container.decode(StringOrArray.self, forKey: .businessarea))?.value
+                    }
+
+                    enum CodingKeys: String, CodingKey {
+                        case id, name, type, distance, address, location, direction, businessarea
+                    }
                 }
 
                 let formatted_address: String?
                 let addressComponent: AddressComponent?
+                let pois: [POI]?
             }
 
             let status: String?
@@ -275,8 +364,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
         components.queryItems = [
             URLQueryItem(name: "key", value: key),
             URLQueryItem(name: "location", value: "\(lon),\(lat)"),
-            URLQueryItem(name: "radius", value: "1000"),
-            URLQueryItem(name: "extensions", value: "base"),
+            URLQueryItem(name: "radius", value: "80"),
+            URLQueryItem(name: "extensions", value: "all"),
             URLQueryItem(name: "roadlevel", value: "0")
         ]
 
@@ -309,6 +398,8 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
             let detailedCandidates = [
                 component?.district,
                 component?.township,
+                component?.streetNumber?.street,
+                component?.streetNumber?.number,
                 component?.neighborhood?.name,
                 component?.building?.name,
                 decoded.regeocode?.formatted_address
@@ -318,11 +409,22 @@ final class ResolvePlaceClusterCityNameUseCase: @unchecked Sendable {
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .first(where: { !$0.isEmpty })
 
-            if city == nil && detailed == nil {
+            let pois = decoded.regeocode?.pois ?? []
+            let poiCandidates = pois
+                .compactMap { poi -> ResolvedPOI? in
+                    guard let name = poi.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+                    guard !looksLikeRoadName(name) else { return nil }
+                    let type = poi.type?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return ResolvedPOI(name: name, type: type)
+                }
+
+            let poi = poiCandidates.first
+
+            if city == nil && detailed == nil && poi == nil {
                 return nil
             }
 
-            return AmapResolvedResult(city: city, detailed: detailed)
+            return AmapResolvedResult(city: city, detailed: detailed, poi: poi?.name, poiType: poi?.type)
         } catch {
             print("[Geo][Amap][Error] lat=\(lat) lng=\(lon) error=\(error)")
             return nil
@@ -585,6 +687,8 @@ private struct ResolvedPOI {
 private struct AmapResolvedResult {
     let city: String?
     let detailed: String?
+    let poi: String?
+    let poiType: String?
 }
 
 private struct MapboxResolvedResult {
