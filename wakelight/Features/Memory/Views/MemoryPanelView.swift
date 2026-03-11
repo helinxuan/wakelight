@@ -706,6 +706,7 @@ private struct MergeVisitLayersSheet: View {
             你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
             要求：
             - 字数控制在40-60字。
+            - 判断时间如果在节假日，就结合节假日来写。
             - 文风像个人日记，语气自然。
             - 先介绍一段地点或者景点信息。
             - 只根据提供的信息写，不要编造不存在的细节。
@@ -725,7 +726,7 @@ private struct MergeVisitLayersSheet: View {
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
-            时间：\(timeRange)
+            时间：\(timeRange ?? "")
             \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。
@@ -1061,16 +1062,14 @@ private struct VisitLayerRowView: View {
         let loc = locationName ?? "这里"
         let count = thumbnails.count
         let hour = Calendar.current.component(.hour, from: layer.startAt)
-        var timePrefix = ""
-        switch hour {
-        case 5...11: timePrefix = "清晨的"
-        case 12...14: timePrefix = "正午的"
-        case 15...18: timePrefix = "傍晚的"
-        case 19...23: timePrefix = "深夜的"
-        default: timePrefix = "这时候的"
-        }
+        let timeText: String = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
+            return formatter.string(from: layer.startAt)
+        }()
 
-        let fallback = "\(timePrefix)\(loc)，留下了 \(count) 个瞬间。"
+        let fallback = "\(timeText) 在\(loc)，留下了 \(count) 个瞬间。"
 
         let placeIdPart = layer.placeClusterId.uuidString
         let date = layer.startAt
@@ -1087,6 +1086,7 @@ private struct VisitLayerRowView: View {
         你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
         要求：
         - 字数控制在40-60字。
+        - 判断时间如果在节假日，就结合节假日来写。
         - 文风像个人日记，语气自然。
         - 先介绍一段地点或者景点信息。
         - 只根据提供的信息写，不要编造不存在的细节。
@@ -1119,7 +1119,7 @@ private struct VisitLayerRowView: View {
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
-            时间：\(timePrefix)
+            时间：\(timeText)
             \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。

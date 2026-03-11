@@ -229,16 +229,14 @@ struct MemoryDetailSheet: View {
         }()
 
         let hour = Calendar.current.component(.hour, from: sampleDate)
-        let timePrefix: String
-        switch hour {
-        case 5...11: timePrefix = "清晨的"
-        case 12...14: timePrefix = "正午的"
-        case 15...18: timePrefix = "傍晚的"
-        case 19...23: timePrefix = "深夜的"
-        default: timePrefix = "这时候的"
-        }
+        let timeText: String = {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.dateFormat = "yyyy年MM月dd日 HH:mm"
+            return formatter.string(from: sampleDate)
+        }()
 
-        let fallback = "\(timePrefix)\(location)，留下了 \(count) 个瞬间。"
+        let fallback = "\(timeText) 在\(location)，留下了 \(count) 个瞬间。"
 
         isGeneratingAIText = true
         Task {
@@ -248,26 +246,23 @@ struct MemoryDetailSheet: View {
 
             let systemPrompt = """
             你是回忆卡片的日记文案助手。
-
-            你的任务：根据地点、时间氛围、照片数量和照片内容，写一段像用户本人记录的简短回忆。
-
+            你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
             要求：
-            - 只输出一段中文正文，40-60字
-            - 语气自然、克制、像真实日记
-            - 只写眼前看到的景象和当时感受
-            - 不要介绍城市、历史、景点，不写旅游攻略
-            - 不要引用古诗词，不要抒情堆砌
-            - 不要虚构人物、事件或不存在的细节
-            - 不要逐条复述关键词，不要出现英文关键词原词
-
-            输出只包含正文内容。
+            - 字数控制在40-60字。
+            - 判断时间如果在节假日，就结合节假日来写。
+            - 文风像个人日记，语气自然。
+            - 先介绍一段地点或者景点信息。
+            - 只根据提供的信息写，不要编造不存在的细节。
+            - 不要几张照片之类的描述。
+            - 不要编造人物行为或事件。
+            - 不要根据照片关键词推测具体场景（如工地、餐厅、商店等），只描述可见环境或整体氛围。
+            - 不要逐个描述照片中的物品或人物类别，只描述整体场景或整体氛围。
             """
 
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(location)
-            时间：\(timePrefix)
-            照片数量：\(count)
+            时间：\(timeText)
             照片内容：\(keywords)
 
             请写一段40-60字的自然日记文字，可直接放入回忆卡片。
