@@ -1026,6 +1026,7 @@ private struct VisitLayerRowView: View {
     @State private var thumbnails: [VisitLayerThumbnail] = []
     @State private var draftText: String = ""
     @State private var isSaving: Bool = false
+    @State private var isGeneratingAI: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1053,7 +1054,14 @@ private struct VisitLayerRowView: View {
                 if let text = layer.userText, !text.isEmpty {
                     Text(text).font(.subheadline).foregroundColor(.primary)
                 } else if !isMultiSelectMode {
-                    InputAreaView(draftText: $draftText, isSaving: isSaving, onSave: save, onSmartFill: generateAIText)
+                    InputAreaView(
+                        draftText: $draftText,
+                        isSaving: isSaving,
+                        isGeneratingAI: isGeneratingAI,
+                        onSave: save,
+                        onSmartFill: generateAIText
+                    )
+                    .opacity(isGeneratingAI ? 0.85 : 1)
                 }
             }
         }
@@ -1080,6 +1088,8 @@ private struct VisitLayerRowView: View {
     }
 
     private func generateAIText() {
+        guard !isGeneratingAI else { return }
+
         let loc = locationName ?? "这里"
         let count = thumbnails.count
         let hour = Calendar.current.component(.hour, from: layer.startAt)
@@ -1119,6 +1129,7 @@ private struct VisitLayerRowView: View {
         - 不要逐个描述照片中的物品或人物类别，只描述整体场景或整体氛围。
         """
 
+        isGeneratingAI = true
         Task {
             AITextEngine.shared.setProvider(.doubao)
 
@@ -1176,12 +1187,16 @@ private struct VisitLayerRowView: View {
                     self.draftText = text
                 }
             }
+            await MainActor.run {
+                self.isGeneratingAI = false
+            }
         }
     }
 
     private struct InputAreaView: View {
         @Binding var draftText: String
         let isSaving: Bool
+        let isGeneratingAI: Bool
         let onSave: () -> Void
         let onSmartFill: () -> Void
 
@@ -1198,12 +1213,21 @@ private struct VisitLayerRowView: View {
                         )
 
                     Button(action: onSmartFill) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.blue)
-                            .padding(8)
-                            .background(Circle().fill(Color.blue.opacity(0.1)))
+                        if isGeneratingAI {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.blue)
+                                .padding(8)
+                                .background(Circle().fill(Color.blue.opacity(0.1)))
+                        } else {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.blue)
+                                .padding(8)
+                                .background(Circle().fill(Color.blue.opacity(0.1)))
+                        }
                     }
+                    .disabled(isGeneratingAI)
                 }
 
                 Button(action: onSave) {
