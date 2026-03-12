@@ -369,7 +369,7 @@ struct ExplorationRootView: View {
     private func generateFirstLightText(for cluster: PlaceCluster, resolvedCity: String) {
         let geohash6 = String(cluster.geohash.prefix(6))
         let city = resolvedCity
-
+        
         #if DEBUG
         let debugCityName = cluster.cityName ?? "nil"
         let debugPanelCityName = panelCityName ?? "nil"
@@ -383,11 +383,9 @@ struct ExplorationRootView: View {
         你是一位克制而有文化气质的城市书写者。
         请简要撰写一段文字。
         要求：
-        - 3~4段结构
-        - 第一段：城市整体气质或历史基调
-        - 第二段：简洁的历史或地理知识真实，不编造
-        - 第三段：当地生活或文化
-        - 最后一段：一段两句完整的，与城市相关的诗词。
+        - 第一段：城市整体简介。
+        - 第二段：介绍地理和历史知识，真实不编造。后面跟上描述当地生活或文化，第二段可以适当多些因为这是正文。
+        - 最后一段：一句与城市相关的诗词，名言，写出作者，国外地点可以引用国外名言，不要用国内的。
         整体字数 90到110字。
         禁止：
         - 使用“著名”“历史悠久”“文化名城”“旅游胜地”等宣传词
@@ -397,10 +395,7 @@ struct ExplorationRootView: View {
 
         let userPrompt = """
         城市：\(city)
-        坐标：(\(cluster.centerLatitude), \(cluster.centerLongitude))
-        geohash_6：\(geohash6)
-        如果坐标在名胜古迹等景点附近，那么就着重介绍景点，不要介绍城市
-        请简要撰写一段文字，整体文字精炼，字数90到110字
+        直接输出正文，不需要加任何非正文的解释性文字来影响观感，输出格式要标准，每段段落前加tab
         """
 
         let request = AITextRequest(
@@ -411,6 +406,7 @@ struct ExplorationRootView: View {
         )
 
         Task {
+            AITextEngine.shared.setProvider(.doubao)
             let text = await AITextEngine.shared.generateText(for: request)
             await MainActor.run {
                 // 首次扫光阶段避免与面板/地图动画同帧叠加，先仅展示“点击再看”提示条

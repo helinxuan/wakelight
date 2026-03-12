@@ -690,14 +690,14 @@ private struct MergeVisitLayersSheet: View {
                 return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
             }) ?? []
 
-            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: allLocators, maxPhotos: 15)
-            let prefilteredKeywords = analysis.sanitizedKeywords
-            let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
-                rawKeywords: prefilteredKeywords,
-                cacheKey: "merge_diary_keywords_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)_\(allLocators.count)"
-            )
-            let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
-            let keywords = promptKeywords.joined(separator: "、")
+            // let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: allLocators, maxPhotos: 15)
+            // let prefilteredKeywords = analysis.sanitizedKeywords
+            // let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
+            //     rawKeywords: prefilteredKeywords,
+            //     cacheKey: "merge_diary_keywords_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)_\(allLocators.count)"
+            // )
+            // let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
+            // let keywords = promptKeywords.joined(separator: "、")
 
             let count = allLocators.count
             let timeRange = timeRangeText(visitLayers) ?? ""
@@ -705,12 +705,21 @@ private struct MergeVisitLayersSheet: View {
             let placeNames = uniquePlaces.compactMap { clusterNames[$0] }.filter { !$0.isEmpty }
             let loc = placeNames.isEmpty ? "这里" : placeNames.prefix(4).joined(separator: "、")
 
+            // let photoContentLine: String = {
+            //     if keywords.isEmpty {
+            //         return "照片内容：未提取到稳定主题（请侧重地点与时间氛围，不要硬编照片细节）"
+            //     }
+            //     return "照片内容：\(keywords)"
+            // }()
+
             let systemPrompt = """
             你是回忆卡片的日记文案助手。
             你的任务：根据地点、时间氛围、照片内容，写一段像用户本人记录的简短回忆。
             要求：
             - 字数控制在40-60字。
             - 判断时间如果在节假日，就结合节假日来写。
+            - 如果在名胜古迹等景点附近，那么可以结合景点来写。
+            - 如果场景内容，地点合适，可以结合一句诗词来写，不合适不用硬加。
             - 文风像个人日记，语气自然。
             - 先介绍一段地点或者景点信息。
             - 只根据提供的信息写，不要编造不存在的细节。
@@ -720,23 +729,16 @@ private struct MergeVisitLayersSheet: View {
             - 不要逐个描述照片中的物品或人物类别，只描述整体场景或整体氛围。
             """
 
-            let photoContentLine: String = {
-                if keywords.isEmpty {
-                    return "照片内容：未提取到稳定主题（请侧重地点与时间氛围，不要硬编照片细节）"
-                }
-                return "照片内容：\(keywords)"
-            }()
 
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeRange ?? "")
-
-            请根据这些信息写一段回忆卡片文字。
+            直接输出正文，不需要加任何非正文的解释性文字来影响观感，输出格式要标准，每段段落前加tab
             """
 
             var imageInputs: [AITextImage] = []
-            for locator in allLocators.prefix(3) {
+            for locator in allLocators.prefix(6) {
                 if let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
                     locatorKey: locator.locatorKey,
                     size: Self.aiThumbnailSize
@@ -1106,6 +1108,8 @@ private struct VisitLayerRowView: View {
         要求：
         - 字数控制在40-60字。
         - 判断时间如果在节假日，就结合节假日来写。
+        - 如果在名胜古迹等景点附近，那么可以结合景点来写。
+        - 如果场景内容，地点合适，可以结合一句诗词来写，不合适不用硬加。
         - 文风像个人日记，语气自然。
         - 先介绍一段地点或者景点信息。
         - 只根据提供的信息写，不要编造不存在的细节。
@@ -1125,28 +1129,27 @@ private struct VisitLayerRowView: View {
                 return try PhotoAsset.fetchLocators(db: db, ids: photoIds)
             }) ?? []
 
-            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
-            let prefilteredKeywords = analysis.sanitizedKeywords
-            let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
-                rawKeywords: prefilteredKeywords,
-                cacheKey: "diary_keywords_\(layer.id.uuidString)_\(locators.count)"
-            )
-            let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
-            let keywords = promptKeywords.joined(separator: "、")
-            let photoContentLine = keywords.isEmpty
-                ? "照片内容：未提取到稳定主题（请侧重整体氛围，不要硬编细节）"
-                : "照片内容：\(keywords)"
+            // let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
+            // let prefilteredKeywords = analysis.sanitizedKeywords
+            // let aiFilteredKeywords = await AITextEngine.shared.filterVisionKeywords(
+            //     rawKeywords: prefilteredKeywords,
+            //     cacheKey: "diary_keywords_\(layer.id.uuidString)_\(locators.count)"
+            // )
+            // let promptKeywords = aiFilteredKeywords.isEmpty ? prefilteredKeywords : aiFilteredKeywords
+            // let keywords = promptKeywords.joined(separator: "、")
+            // let photoContentLine = keywords.isEmpty
+            //     ? "照片内容：未提取到稳定主题（请侧重整体氛围，不要硬编细节）"
+            //     : "照片内容：\(keywords)"
 
             let userPrompt = """
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeText)
-
-            请根据这些信息写一段回忆卡片文字。
+            直接输出正文，不需要加任何非正文的解释性文字来影响观感，输出格式要标准，每段段落前加tab
             """
 
             var imageInputs: [AITextImage] = []
-            for locator in locators.prefix(3) {
+            for locator in locators.prefix(6) {
                 if let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
                     locatorKey: locator.locatorKey,
                     size: Self.aiThumbnailSize

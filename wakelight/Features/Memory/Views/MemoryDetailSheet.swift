@@ -246,8 +246,8 @@ struct MemoryDetailSheet: View {
             AITextEngine.shared.setProvider(.doubao)
 
             let locators: [PhotoAssetLocator] = (try? await loadAllLocatorsForCurrentItem()) ?? []
-            let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
-            let keywords = analysis.topKeywords.joined(separator: "、")
+            // let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
+            // let keywords = analysis.topKeywords.joined(separator: "、")
 
             let systemPrompt = """
             你是回忆卡片的日记文案助手。
@@ -255,6 +255,8 @@ struct MemoryDetailSheet: View {
             要求：
             - 字数控制在40-60字。
             - 判断时间如果在节假日，就结合节假日来写。
+            - 如果在名胜古迹等景点附近，那么可以结合景点来写。
+            - 如果场景内容，地点合适，可以结合一句诗词来写，不合适不用硬加。
             - 文风像个人日记，语气自然。
             - 先介绍一段地点或者景点信息。
             - 只根据提供的信息写，不要编造不存在的细节。
@@ -268,12 +270,11 @@ struct MemoryDetailSheet: View {
             这是用户回忆卡片的一段日记。
             地点：\(location)
             时间：\(timeText)
-
-            请写一段40-60字的自然日记文字，可直接放入回忆卡片。
+            直接输出正文，不需要加任何非正文的解释性文字来影响观感，输出格式要标准，每段段落前加tab
             """
 
             var imageInputs: [AITextImage] = []
-            for locator in locators.prefix(3) {
+            for locator in locators.prefix(6) {
                 guard let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
                     locatorKey: locator.locatorKey,
                     size: Self.aiThumbnailSize
