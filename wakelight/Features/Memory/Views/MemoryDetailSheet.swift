@@ -1,5 +1,6 @@
 import SwiftUI
 import GRDB
+import UIKit
 
 enum MemoryDetailItem: Identifiable {
     case unhandled(VisitLayer)
@@ -42,6 +43,8 @@ struct MemoryDetailSheet: View {
         GridItem(.flexible(), spacing: 2),
         GridItem(.flexible(), spacing: 2)
     ]
+
+    private static let aiThumbnailSize = CGSize(width: 512, height: 512)
 
     private var isStoryItem: Bool {
         if case .story = item { return true }
@@ -240,6 +243,8 @@ struct MemoryDetailSheet: View {
 
         isGeneratingAIText = true
         Task {
+            AITextEngine.shared.setProvider(.doubao)
+
             let locators: [PhotoAssetLocator] = (try? await loadAllLocatorsForCurrentItem()) ?? []
             let analysis = await VisionImageAnalysisService.shared.analyzePhotos(locators: locators)
             let keywords = analysis.topKeywords.joined(separator: "、")
@@ -263,14 +268,27 @@ struct MemoryDetailSheet: View {
             这是用户回忆卡片的一段日记。
             地点：\(location)
             时间：\(timeText)
-            照片内容：\(keywords)
 
             请写一段40-60字的自然日记文字，可直接放入回忆卡片。
             """
 
+            var imageInputs: [AITextImage] = []
+            for locator in locators.prefix(3) {
+                guard let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
+                    locatorKey: locator.locatorKey,
+                    size: Self.aiThumbnailSize
+                ) else {
+                    continue
+                }
+                if let dataURL = thumbnail.toAIDataURL() {
+                    imageInputs.append(dataURL)
+                }
+            }
+
             let request = AITextRequest(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
+                images: imageInputs,
                 cacheKey: cacheKeyForSmartText(location: location, hour: hour, count: count),
                 fallbackText: fallback,
                 temperature: 0.35,

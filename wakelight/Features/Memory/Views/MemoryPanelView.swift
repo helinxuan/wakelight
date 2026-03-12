@@ -509,6 +509,8 @@ struct MemoryPanelView: View {
 }
 
 private struct MergeVisitLayersSheet: View {
+    private static let aiThumbnailSize = CGSize(width: 512, height: 512)
+
     let visitLayers: [VisitLayer]
     let clusterNames: [UUID: String]
     @Binding var summaryText: String
@@ -678,6 +680,8 @@ private struct MergeVisitLayersSheet: View {
         isGeneratingAI = true
 
         Task {
+            AITextEngine.shared.setProvider(.doubao)
+
             let allLocators: [PhotoAssetLocator] = (try? await DatabaseContainer.shared.db.reader.read { db in
                 let layerIds = visitLayers.map { $0.id }
                 let links = try VisitLayerPhotoAsset.filter(layerIds.contains(Column("visitLayerId"))).fetchAll(db)
@@ -727,14 +731,25 @@ private struct MergeVisitLayersSheet: View {
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeRange ?? "")
-            \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。
             """
 
+            var imageInputs: [AITextImage] = []
+            for locator in allLocators.prefix(3) {
+                if let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
+                    locatorKey: locator.locatorKey,
+                    size: Self.aiThumbnailSize
+                ),
+                let dataURL = thumbnail.toAIDataURL() {
+                    imageInputs.append(dataURL)
+                }
+            }
+
             let request = AITextRequest(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
+                images: imageInputs,
                 cacheKey: "merge_diary_\(visitLayers.first?.id.uuidString ?? "")_\(visitLayers.count)",
                 fallbackText: "\(timeRange)，留下了 \(count) 个瞬间。",
                 temperature: 0.35,
@@ -867,6 +882,8 @@ final class MemoryPanelViewModel: ObservableObject {
 }
 
 private struct StoryNodeRowView: View {
+    private static let aiThumbnailSize = CGSize(width: 512, height: 512)
+
     let node: StoryNode
     let onPreview: ([String], Int) -> Void
     let onEdit: () -> Void
@@ -987,6 +1004,8 @@ private struct StoryNodeRowView: View {
 }
 
 private struct VisitLayerRowView: View {
+    private static let aiThumbnailSize = CGSize(width: 512, height: 512)
+
     let layer: VisitLayer
     let isMultiSelectMode: Bool
     let isSelected: Bool
@@ -1097,6 +1116,8 @@ private struct VisitLayerRowView: View {
         """
 
         Task {
+            AITextEngine.shared.setProvider(.doubao)
+
             let locators: [PhotoAssetLocator] = (try? await DatabaseContainer.shared.db.reader.read { db in
                 let links = try VisitLayerPhotoAsset.filter(Column("visitLayerId") == layer.id).fetchAll(db)
                 if links.isEmpty { return [PhotoAssetLocator]() }
@@ -1120,14 +1141,25 @@ private struct VisitLayerRowView: View {
             这是用户回忆卡片的一段日记。
             地点：\(loc)
             时间：\(timeText)
-            \(photoContentLine)
 
             请根据这些信息写一段回忆卡片文字。
             """
 
+            var imageInputs: [AITextImage] = []
+            for locator in locators.prefix(3) {
+                if let thumbnail = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(
+                    locatorKey: locator.locatorKey,
+                    size: Self.aiThumbnailSize
+                ),
+                let dataURL = thumbnail.toAIDataURL() {
+                    imageInputs.append(dataURL)
+                }
+            }
+
             let request = AITextRequest(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
+                images: imageInputs,
                 cacheKey: cacheKey,
                 fallbackText: fallback,
                 temperature: 0.35,
