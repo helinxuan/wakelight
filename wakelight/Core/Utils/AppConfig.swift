@@ -15,6 +15,9 @@ struct AppConfig {
     /// 默认 12 小时。
     var visitSplitThreshold: TimeInterval = 12 * 60 * 60
 
+    /// 地点聚类半径（米）。默认 200m。
+    var placeClusterRadiusMeters: Double = 800
+
     /// 当前生效的光点样式
     var lightPointStyle = LightPointStyle(
         defaultColorHex: "#FFFFFF",     // 默认纯白

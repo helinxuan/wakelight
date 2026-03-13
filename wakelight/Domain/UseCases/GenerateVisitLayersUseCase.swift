@@ -1,10 +1,17 @@
 import Foundation
 import GRDB
+import CoreLocation
 
 /// 在同一 PlaceCluster 内按时间切分 VisitLayer（MVP：阈值切分）。
 final class GenerateVisitLayersUseCase {
     private let writer: DatabaseWriter
     private let config: AppConfig
+
+    private func parseGeoGridPrecision(from geohash: String) -> Double? {
+        guard let range = geohash.range(of: "_p") else { return nil }
+        let precisionString = String(geohash[range.upperBound...])
+        return Double(precisionString)
+    }
 
     init(
         writer: DatabaseWriter = DatabaseContainer.shared.writer,
@@ -38,9 +45,15 @@ final class GenerateVisitLayersUseCase {
                 let allPhotos = try PhotoAsset
                     .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
                     .fetchAll(db)
+
+                let radiusMeters = AppConfig.default.placeClusterRadiusMeters
+                let clusterPrecision = parseGeoGridPrecision(from: cluster.geohash) ?? 0.001
                 let bucketPhotos = allPhotos.filter { p in
                     guard let lat = p.latitude, let lon = p.longitude else { return false }
-                    return GeoGrid.key(latitude: lat, longitude: lon) == cluster.geohash
+                    let distance = CLLocation(latitude: lat, longitude: lon)
+                        .distance(from: CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude))
+                    let key = GeoGrid.key(latitude: lat, longitude: lon, precisionDegrees: clusterPrecision)
+                    return distance < radiusMeters && key == cluster.geohash
                 }
                 .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
 

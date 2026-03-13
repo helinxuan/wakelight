@@ -412,9 +412,9 @@ flowchart TD
 
   K --> L[写入/更新 PhotoAsset]
   L --> M[WebDAV: upsert RemoteMediaAsset 版本指纹]
-  M --> N[按 geohash 分桶]
-  N --> O[桶内半径聚类/DBSCAN]
-  O --> P[生成/更新 PlaceCluster]
+  M --> N[按粗网格分桶]
+  N --> O[Union-Find 半径聚类(200m) + 时间窗口(2h)]
+  O --> P[选代表点(最近真实照片)并生成/更新 PlaceCluster]
   P --> Q[同 cluster 内按时间切 VisitLayer]
   Q --> R[写入 VisitLayer 及关系]
   R --> S[更新 photoCount/visitCount/lastVisitedAt]
@@ -805,7 +805,9 @@ flowchart LR
 
 - **永远只在客户端**：聚类属于体验推导，CloudKit 不参与计算。
 - **实现位置**：`Core/Location/ClusteringService`。
-- **算法建议**：DBSCAN（自研轻量）或等价的半径聚类；输入来自 `CDPhotoAsset`（lat/lon/time）。
+- **算法建议**：Union-Find 半径聚类（解决链式邻近），搭配时间窗口；输入来自 `CDPhotoAsset`（lat/lon/time）。
+- **代表点策略**：聚类中心取“最接近平均中心的真实照片位置”，避免虚点。
+- **参数建议**：`radius = 200m`，`timeWindow = 2h`（照片回忆类产品体验稳定）。
 - **同步边界**：
   - 可同步 `CDPlaceCluster` 的“聚类结果快照”（用于换机快速恢复体验），但聚类仍可在本地重建。
 

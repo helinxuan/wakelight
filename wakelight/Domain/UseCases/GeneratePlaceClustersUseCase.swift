@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import CryptoKit
+import CoreLocation
 
 /// 从 PhotoAsset 生成 PlaceCluster 的最小用例（MVP：网格聚合）。
 final class GeneratePlaceClustersUseCase {
@@ -17,45 +18,25 @@ final class GeneratePlaceClustersUseCase {
                 .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
                 .fetchAll(db)
 
-            // (key -> [photo]) 聚合
-            var buckets: [String: [PhotoAsset]] = [:]
-            buckets.reserveCapacity(128)
+            let radiusMeters = AppConfig.default.placeClusterRadiusMeters
+            let timeWindow = AppConfig.default.visitSplitThreshold
+            let gridPrecision = 0.05 // 约 5-6km，用于粗分桶降低 O(n^2)
+            let clusterKeyPrecision = max(radiusMeters / 111_000.0, 0.001) // 约 100-200m 级别精度
 
-            for p in photos {
-                guard let lat = p.latitude, let lon = p.longitude else { continue }
-                let key = GeoGrid.key(latitude: lat, longitude: lon)
-                buckets[key, default: []].append(p)
-            }
+            let clusters = buildClusters(
+                photos: photos,
+                radiusMeters: radiusMeters,
+                timeWindow: timeWindow,
+                gridPrecision: gridPrecision,
+                clusterKeyPrecision: clusterKeyPrecision
+            )
 
             var upserted = 0
-            let newKeys = Set(buckets.keys)
+            let newKeys = Set(clusters.map { $0.geohash })
 
-            for (key, items) in buckets {
-                guard !items.isEmpty else { continue }
-                // ... 原有逻辑保持不变 ...
-                let centerLat = items.compactMap { $0.latitude }.reduce(0.0, +) / Double(items.count)
-                let centerLon = items.compactMap { $0.longitude }.reduce(0.0, +) / Double(items.count)
-
-                let id = UUID(uuidString: UUID.v5String(namespace: UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!, name: key)) ?? UUID()
-
-                let cluster = PlaceCluster(
-                    id: id,
-                    centerLatitude: centerLat,
-                    centerLongitude: centerLon,
-                    geohash: key,
-                    cityName: nil,
-                    detailedAddress: nil,
-                    poiName: nil,
-                    poiType: nil,
-                    photoCount: items.count,
-                    visitCount: 1,
-                    fogState: .revealed,
-                    hasStory: false,
-                    lastVisitedAt: items.compactMap { $0.creationDate }.max()
-                )
-
+            for cluster in clusters {
                 let existing = try PlaceCluster
-                    .filter(Column("geohash") == key)
+                    .filter(Column("geohash") == cluster.geohash)
                     .fetchOne(db)
 
                 if var existing {
@@ -76,12 +57,174 @@ final class GeneratePlaceClustersUseCase {
             let deletedCount = try PlaceCluster
                 .filter(!newKeys.contains(Column("geohash")))
                 .deleteAll(db)
-            
+
             if deletedCount > 0 {
                 print("[GenerateClusters] Deleted \(deletedCount) stale clusters with no photos")
             }
 
             return upserted
+        }
+    }
+}
+
+private extension GeneratePlaceClustersUseCase {
+    struct ClusterCandidate {
+        let geohash: String
+        let centerLatitude: Double
+        let centerLongitude: Double
+        let photoCount: Int
+        let lastVisitedAt: Date?
+        let sourcePhotos: [PhotoAsset]
+    }
+
+    func buildClusters(
+        photos: [PhotoAsset],
+        radiusMeters: Double,
+        timeWindow: TimeInterval,
+        gridPrecision: Double,
+        clusterKeyPrecision: Double
+    ) -> [PlaceCluster] {
+        let indexed = photos.enumerated().compactMap { index, photo -> (Int, PhotoAsset)? in
+            guard photo.latitude != nil, photo.longitude != nil else { return nil }
+            return (index, photo)
+        }
+
+        let n = indexed.count
+        guard n > 0 else { return [] }
+
+        var parent = Array(0..<n)
+
+        func find(_ x: Int) -> Int {
+            if parent[x] != x { parent[x] = find(parent[x]) }
+            return parent[x]
+        }
+
+        func union(_ a: Int, _ b: Int) {
+            let pa = find(a)
+            let pb = find(b)
+            if pa != pb { parent[pb] = pa }
+        }
+
+        var buckets: [String: [Int]] = [:]
+        buckets.reserveCapacity(128)
+
+        for (i, (_, photo)) in indexed.enumerated() {
+            guard let lat = photo.latitude, let lon = photo.longitude else { continue }
+            let (latBucket, lonBucket) = GeoGrid.bucketIndices(latitude: lat, longitude: lon, precisionDegrees: gridPrecision)
+            let key = GeoGrid.key(latBucket: latBucket, lonBucket: lonBucket, precisionDegrees: gridPrecision)
+
+            if let localId = photo.localIdentifier,
+               localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
+                print("[ClusterDebug] hit target localIdentifier=\(localId) lat=\(lat) lon=\(lon) creation=\(String(describing: photo.creationDate)) bucket=\(key)")
+            }
+
+            buckets[key, default: []].append(i)
+        }
+
+        for (key, indices) in buckets {
+            let parts = key.split(separator: "_")
+            guard parts.count >= 2, let latBucket = Int(parts[0]), let lonBucket = Int(parts[1]) else { continue }
+
+            for latOffset in -1...1 {
+                for lonOffset in -1...1 {
+                    let neighborKey = GeoGrid.key(
+                        latBucket: latBucket + latOffset,
+                        lonBucket: lonBucket + lonOffset,
+                        precisionDegrees: gridPrecision
+                    )
+                    guard let neighborIndices = buckets[neighborKey] else { continue }
+
+                    for i in indices {
+                        for j in neighborIndices where j > i {
+                            let photoA = indexed[i].1
+                            let photoB = indexed[j].1
+                            guard let latA = photoA.latitude, let lonA = photoA.longitude,
+                                  let latB = photoB.latitude, let lonB = photoB.longitude else { continue }
+
+                            if let dateA = photoA.creationDate, let dateB = photoB.creationDate {
+                                let timeDiff = abs(dateA.timeIntervalSince(dateB))
+                                if timeDiff > timeWindow { continue }
+                            }
+
+                            let distance = CLLocation(latitude: latA, longitude: lonA)
+                                .distance(from: CLLocation(latitude: latB, longitude: lonB))
+
+                            if distance < radiusMeters {
+                                if let localId = photoA.localIdentifier,
+                                   localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
+                                    print("[ClusterDebug] union target with other id=\(String(describing: photoB.localIdentifier)) dist=\(distance) timeWindow=\(timeWindow)")
+                                }
+                                if let localId = photoB.localIdentifier,
+                                   localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
+                                    print("[ClusterDebug] union other id=\(String(describing: photoA.localIdentifier)) with target dist=\(distance) timeWindow=\(timeWindow)")
+                                }
+                                union(i, j)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        var groups: [Int: [PhotoAsset]] = [:]
+        groups.reserveCapacity(128)
+
+        for i in 0..<n {
+            let root = find(i)
+            groups[root, default: []].append(indexed[i].1)
+        }
+
+        let candidates = groups.values.map { group in
+            let lat = group.compactMap { $0.latitude }.reduce(0.0, +) / Double(group.count)
+            let lon = group.compactMap { $0.longitude }.reduce(0.0, +) / Double(group.count)
+            let center = CLLocation(latitude: lat, longitude: lon)
+
+            let representative = group.min { lhs, rhs in
+                guard let latL = lhs.latitude, let lonL = lhs.longitude,
+                      let latR = rhs.latitude, let lonR = rhs.longitude else { return false }
+                let distL = CLLocation(latitude: latL, longitude: lonL).distance(from: center)
+                let distR = CLLocation(latitude: latR, longitude: lonR).distance(from: center)
+                return distL < distR
+            }
+
+            if let rep = representative,
+               let localId = rep.localIdentifier,
+               localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
+                print("[ClusterDebug] rep target chosen lat=\(String(describing: rep.latitude)) lon=\(String(describing: rep.longitude)) centerLat=\(lat) centerLon=\(lon) count=\(group.count)")
+            }
+
+            let centerLat = representative?.latitude ?? lat
+            let centerLon = representative?.longitude ?? lon
+            let geohash = GeoGrid.key(latitude: centerLat, longitude: centerLon, precisionDegrees: clusterKeyPrecision)
+
+            return ClusterCandidate(
+                geohash: geohash,
+                centerLatitude: centerLat,
+                centerLongitude: centerLon,
+                photoCount: group.count,
+                lastVisitedAt: group.compactMap { $0.creationDate }.max(),
+                sourcePhotos: group
+            )
+        }
+
+        return candidates.map { candidate in
+            let id = UUID(uuidString: UUID.v5String(namespace: UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!, name: candidate.geohash)) ?? UUID()
+
+            return PlaceCluster(
+                id: id,
+                centerLatitude: candidate.centerLatitude,
+                centerLongitude: candidate.centerLongitude,
+                geohash: candidate.geohash,
+                cityName: nil,
+                detailedAddress: nil,
+                poiName: nil,
+                poiType: nil,
+                photoCount: candidate.photoCount,
+                visitCount: 1,
+                fogState: .revealed,
+                hasStory: false,
+                lastVisitedAt: candidate.lastVisitedAt
+            )
         }
     }
 }
