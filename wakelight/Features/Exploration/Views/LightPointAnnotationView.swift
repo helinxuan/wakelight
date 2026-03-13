@@ -3,10 +3,12 @@ import MapKit
 
 final class LightPointAnnotationView: MKAnnotationView {
     private let storyGlowLayer = CALayer()
+    private let halfGlowLayer = CALayer()
     private let glowLayer = CALayer()
     private let coreLayer = CALayer()
 
     private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
+    private let halfGlowImage = UIImage(named: "FogHoleSoft")?.cgImage
     
     var isStoryPoint: Bool = false {
         didSet {
@@ -42,10 +44,21 @@ final class LightPointAnnotationView: MKAnnotationView {
         storyGlowLayer.shadowRadius = 12
         storyGlowLayer.shadowOffset = .zero
 
+        halfGlowLayer.masksToBounds = false
+        halfGlowLayer.contents = halfGlowImage
+        halfGlowLayer.contentsGravity = .resizeAspect
+        halfGlowLayer.opacity = 0
+        halfGlowLayer.compositingFilter = "screenBlendMode"
+        halfGlowLayer.shadowColor = UIColor.white.cgColor
+        halfGlowLayer.shadowOpacity = 0.7
+        halfGlowLayer.shadowRadius = 10
+        halfGlowLayer.shadowOffset = .zero
+
         glowLayer.masksToBounds = false
         coreLayer.masksToBounds = true
 
         layer.addSublayer(storyGlowLayer)
+        layer.addSublayer(halfGlowLayer)
         layer.addSublayer(glowLayer)
         layer.addSublayer(coreLayer)
 
@@ -105,6 +118,16 @@ final class LightPointAnnotationView: MKAnnotationView {
             coreLayer.opacity = 1
             glowLayer.opacity = 1
         }
+
+        let halfGlowSize = max(size * 1.8, 56)
+        halfGlowLayer.frame = CGRect(
+            x: (tapSize - halfGlowSize) / 2,
+            y: (tapSize - halfGlowSize) / 2,
+            width: halfGlowSize,
+            height: halfGlowSize
+        )
+        halfGlowLayer.cornerRadius = halfGlowSize / 2
+        halfGlowLayer.opacity = isHalfRevealed && !isStoryPoint ? 0.85 : 0.0
 
         if isStoryPoint {
             let storyGlowSize = max(size * 2.2, 72)
