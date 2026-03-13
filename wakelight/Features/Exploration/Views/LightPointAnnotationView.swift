@@ -2,8 +2,11 @@ import UIKit
 import MapKit
 
 final class LightPointAnnotationView: MKAnnotationView {
+    private let storyGlowLayer = CALayer()
     private let glowLayer = CALayer()
     private let coreLayer = CALayer()
+
+    private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
     
     var isStoryPoint: Bool = false {
         didSet {
@@ -28,14 +31,26 @@ final class LightPointAnnotationView: MKAnnotationView {
     
     private func setupLayers() {
         self.backgroundColor = .clear
-        
+
+        storyGlowLayer.masksToBounds = false
+        storyGlowLayer.contents = storyGlowImage
+        storyGlowLayer.contentsGravity = .resizeAspect
+        storyGlowLayer.opacity = 0
+        storyGlowLayer.compositingFilter = "screenBlendMode"
+        storyGlowLayer.shadowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
+        storyGlowLayer.shadowOpacity = 0.6
+        storyGlowLayer.shadowRadius = 12
+        storyGlowLayer.shadowOffset = .zero
+
         glowLayer.masksToBounds = false
         coreLayer.masksToBounds = true
-        
+
+        layer.addSublayer(storyGlowLayer)
         layer.addSublayer(glowLayer)
         layer.addSublayer(coreLayer)
-        
+
         startBreathingAnimation()
+        startStoryGlowBreathing()
     }
     
     func updateStyle() {
@@ -69,12 +84,12 @@ final class LightPointAnnotationView: MKAnnotationView {
         // 增加点击区域
         let tapSize = max(size * 3, 44.0)
         self.frame = CGRect(x: 0, y: 0, width: tapSize, height: tapSize)
-        
+
         let pointOrigin = (tapSize - size) / 2
         coreLayer.frame = CGRect(x: pointOrigin, y: pointOrigin, width: size, height: size)
         coreLayer.cornerRadius = size / 2
         coreLayer.backgroundColor = color.cgColor
-        
+
         glowLayer.frame = coreLayer.frame
         glowLayer.cornerRadius = coreLayer.cornerRadius
         glowLayer.backgroundColor = color.cgColor
@@ -82,6 +97,28 @@ final class LightPointAnnotationView: MKAnnotationView {
         glowLayer.shadowOffset = .zero
         glowLayer.shadowRadius = glowRadius
         glowLayer.shadowOpacity = glowOpacity
+
+        if isStoryPoint {
+            coreLayer.opacity = 0
+            glowLayer.opacity = 0
+        } else {
+            coreLayer.opacity = 1
+            glowLayer.opacity = 1
+        }
+
+        if isStoryPoint {
+            let storyGlowSize = max(size * 2.2, 72)
+            storyGlowLayer.frame = CGRect(
+                x: (tapSize - storyGlowSize) / 2,
+                y: (tapSize - storyGlowSize) / 2,
+                width: storyGlowSize,
+                height: storyGlowSize
+            )
+            storyGlowLayer.cornerRadius = storyGlowSize / 2
+            storyGlowLayer.opacity = 0.95
+        } else {
+            storyGlowLayer.opacity = 0.0
+        }
     }
     
     private func startBreathingAnimation() {
@@ -93,6 +130,17 @@ final class LightPointAnnotationView: MKAnnotationView {
         animation.repeatCount = .infinity
         animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         glowLayer.add(animation, forKey: "breathing")
+    }
+
+    private func startStoryGlowBreathing() {
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 0.6
+        animation.toValue = 0.95
+        animation.duration = 2.2
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        storyGlowLayer.add(animation, forKey: "storyGlowBreathing")
     }
 }
 

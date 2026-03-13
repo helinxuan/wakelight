@@ -607,7 +607,8 @@ struct ExplorationMapView: UIViewRepresentable {
             view.annotation = annotation
             view.canShowCallout = false
             view.isStoryPoint = cluster.hasStory
-            view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id) && parent.isAwakenMode
+            view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id)
+            view.layer.zPosition = cluster.hasStory ? 2 : 1
             view.updateStyle()
             return view
         }
@@ -617,6 +618,7 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            fogScreenView?.markNeedsFullUpdate()
             fogScreenView?.updateIfNeeded(interactionPhase: false)
         }
 
@@ -730,6 +732,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
         fogView.clusters = viewModel.clusters
         fogView.revealedClusterIds = revealedClusterIds
+        fogView.markNeedsFullUpdate()
         fogView.updateIfNeeded(interactionPhase: false)
 
         if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
@@ -742,7 +745,7 @@ struct ExplorationMapView: UIViewRepresentable {
             guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
             guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
 
-            let shouldHalfReveal = isAwakenMode && revealedClusterIds.contains(cluster.id)
+            let shouldHalfReveal = revealedClusterIds.contains(cluster.id)
 
             if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
                 view.isStoryPoint = cluster.hasStory
@@ -765,6 +768,7 @@ final class FogScreenView: UIView {
     }
 
     private let maxVisibleGlowLayers: Int = 180
+    private let maxVisibleNonStoryGlowLayers: Int = 180
     private let fogAlpha: CGFloat = 0.65
     private let glowOpacity: Float = 0.55
     private let storyGlowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
@@ -807,6 +811,10 @@ final class FogScreenView: UIView {
         glowContainerLayer.frame = bounds
         needsFullUpdate = true
         updateIfNeeded(interactionPhase: false)
+    }
+
+    func markNeedsFullUpdate() {
+        needsFullUpdate = true
     }
 
     func updateIfNeeded(interactionPhase: Bool) {
@@ -860,30 +868,49 @@ final class FogScreenView: UIView {
 
         let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
 
-        var candidates: [(id: UUID, screenPoint: CGPoint, dist2: CGFloat)] = []
+        var candidates: [(id: UUID, screenPoint: CGPoint, dist2: CGFloat, isStory: Bool)] = []
         candidates.reserveCapacity(256)
 
         let center = CGPoint(x: rect.midX, y: rect.midY)
+
+        #if DEBUG
+        var storyTotal = 0
+        var storyVisible = 0
+        #endif
 
         for c in clusters {
             let isHalfRevealed = revealedClusterIds.contains(c.id)
             let isFullyRevealed = c.hasStory
             let isAnimating = c.id == animatingClusterId
 
-            guard isHalfRevealed || isFullyRevealed || isAnimating else { continue }
+            if isFullyRevealed { storyTotal += 1 }
+
+            // 雾层只负责“大柔光”：故事点 + 动画中的点。
+            // 半解锁的小光晕交给 AnnotationView 来做，避免白色雾光干扰故事黄光。
+            guard isFullyRevealed || isAnimating else { continue }
 
             let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             let p = mapView.convert(coord, toPointTo: self)
             guard visibleRect.contains(p) else { continue }
 
+            if isFullyRevealed { storyVisible += 1 }
+
             let dx = p.x - center.x
             let dy = p.y - center.y
-            candidates.append((c.id, p, dx * dx + dy * dy))
+            candidates.append((c.id, p, dx * dx + dy * dy, c.hasStory))
         }
 
+
         if candidates.count > maxVisibleGlowLayers {
-            candidates.sort { $0.dist2 < $1.dist2 }
-            candidates = Array(candidates.prefix(maxVisibleGlowLayers))
+            let storyCandidates = candidates.filter { $0.isStory }.sorted { $0.dist2 < $1.dist2 }
+            let otherCandidates = candidates.filter { !$0.isStory }.sorted { $0.dist2 < $1.dist2 }
+
+            if storyCandidates.count >= maxVisibleGlowLayers {
+                candidates = Array(storyCandidates.prefix(maxVisibleGlowLayers))
+            } else {
+                let remaining = min(maxVisibleNonStoryGlowLayers, maxVisibleGlowLayers - storyCandidates.count)
+                candidates = storyCandidates + otherCandidates.prefix(remaining)
+            }
         }
 
         let keepIds = Set(candidates.map { $0.id })
@@ -897,6 +924,7 @@ final class FogScreenView: UIView {
         for item in candidates {
             let layer = getOrCreateGlowLayer(for: item.id)
             layer.position = item.screenPoint
+            layer.zPosition = item.isStory ? 2 : 1
         }
 
         updateActiveGlowLayerGeometryOnly()
@@ -927,13 +955,15 @@ final class FogScreenView: UIView {
             let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             layer.position = mapView.convert(coord, toPointTo: self)
             layer.contents = c.hasStory ? storyGlowImage : glowImage
+            layer.compositingFilter = c.hasStory ? "screenBlendMode" : nil
+            layer.zPosition = c.hasStory ? 2 : 1
 
             var finalSize = size
-            var finalOpacity = glowOpacity
+            var finalOpacity = c.hasStory ? max(glowOpacity, 0.78) : glowOpacity
 
             if id == animatingClusterId {
                 finalSize = size * (1.0 + 0.35 * animProgress)
-                finalOpacity = min(0.52, glowOpacity + Float(0.18 * animProgress))
+                finalOpacity = min(c.hasStory ? 0.9 : 0.52, finalOpacity + Float(0.18 * animProgress))
             }
 
             layer.bounds = CGRect(x: 0, y: 0, width: finalSize, height: finalSize)
