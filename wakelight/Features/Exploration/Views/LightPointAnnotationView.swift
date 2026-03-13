@@ -62,7 +62,6 @@ final class LightPointAnnotationView: MKAnnotationView {
         layer.addSublayer(glowLayer)
         layer.addSublayer(coreLayer)
 
-        startBreathingAnimation()
         startStoryGlowBreathing()
     }
     
@@ -111,15 +110,15 @@ final class LightPointAnnotationView: MKAnnotationView {
         glowLayer.shadowRadius = glowRadius
         glowLayer.shadowOpacity = glowOpacity
 
-        if isStoryPoint {
+        if isStoryPoint || isHalfRevealed {
             coreLayer.opacity = 0
             glowLayer.opacity = 0
         } else {
-            coreLayer.opacity = 0
-            glowLayer.opacity = 10
+            coreLayer.opacity = 1
+            glowLayer.opacity = 1
         }
 
-        // 小 PNG 柔光：拖拽时稳定可见（和 Story 点的柔光“观感强度”对齐）
+        // 白色半解锁点不再使用 AnnotationView 叠加柔光，交给 FogScreenView
         let halfGlowSize = max(size * 2.2, 72)
         halfGlowLayer.frame = CGRect(
             x: (tapSize - halfGlowSize) / 2,
@@ -128,7 +127,7 @@ final class LightPointAnnotationView: MKAnnotationView {
             height: halfGlowSize
         )
         halfGlowLayer.cornerRadius = halfGlowSize / 2
-        halfGlowLayer.opacity = isHalfRevealed && !isStoryPoint ? 0.95 : 0.0
+        halfGlowLayer.opacity = 0.0
 
         if isStoryPoint {
             let storyGlowSize = max(size * 2.2, 72)
