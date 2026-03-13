@@ -81,10 +81,10 @@ final class LightPointAnnotationView: MKAnnotationView {
             glowRadius = CGFloat(style.glowIntensity * 12)
             glowOpacity = Float(style.glowIntensity)
         } else if isHalfRevealed {
-            // 状态 2: 半解锁 (Half-Revealed) -> 纯白色，中等呼吸光晕
+            // 状态 2: 半解锁 (Half-Revealed) -> 纯白色，亮度/范围对齐 Story 点
             color = .white
-            size = style.defaultSize * 1.2
-            glowRadius = CGFloat(style.glowIntensity * 8)
+            size = style.highlightedSize
+            glowRadius = CGFloat(style.glowIntensity * 12)
             glowOpacity = Float(style.glowIntensity)
         } else {
             // 状态 1: 未解锁 (Locked) -> 灰色/暗淡，弱光晕
@@ -115,11 +115,12 @@ final class LightPointAnnotationView: MKAnnotationView {
             coreLayer.opacity = 0
             glowLayer.opacity = 0
         } else {
-            coreLayer.opacity = 1
-            glowLayer.opacity = 1
+            coreLayer.opacity = 0
+            glowLayer.opacity = 10
         }
 
-        let halfGlowSize = max(size * 1.8, 56)
+        // 小 PNG 柔光：拖拽时稳定可见（和 Story 点的柔光“观感强度”对齐）
+        let halfGlowSize = max(size * 2.2, 72)
         halfGlowLayer.frame = CGRect(
             x: (tapSize - halfGlowSize) / 2,
             y: (tapSize - halfGlowSize) / 2,
@@ -127,7 +128,7 @@ final class LightPointAnnotationView: MKAnnotationView {
             height: halfGlowSize
         )
         halfGlowLayer.cornerRadius = halfGlowSize / 2
-        halfGlowLayer.opacity = isHalfRevealed && !isStoryPoint ? 0.85 : 0.0
+        halfGlowLayer.opacity = isHalfRevealed && !isStoryPoint ? 0.95 : 0.0
 
         if isStoryPoint {
             let storyGlowSize = max(size * 2.2, 72)

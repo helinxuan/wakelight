@@ -885,9 +885,9 @@ final class FogScreenView: UIView {
 
             if isFullyRevealed { storyTotal += 1 }
 
-            // 雾层只负责“大柔光”：故事点 + 动画中的点。
-            // 半解锁的小光晕交给 AnnotationView 来做，避免白色雾光干扰故事黄光。
-            guard isFullyRevealed || isAnimating else { continue }
+            // 雾层负责所有可见点的“大柔光”：故事点 + 半解锁点 + 动画中的点。
+            guard isFullyRevealed || isHalfRevealed || isAnimating else { continue }
+
 
             let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             let p = mapView.convert(coord, toPointTo: self)
@@ -925,6 +925,8 @@ final class FogScreenView: UIView {
             let layer = getOrCreateGlowLayer(for: item.id)
             layer.position = item.screenPoint
             layer.zPosition = item.isStory ? 2 : 1
+            layer.contents = item.isStory ? storyGlowImage : glowImage
+            layer.compositingFilter = "screenBlendMode"
         }
 
         updateActiveGlowLayerGeometryOnly()
