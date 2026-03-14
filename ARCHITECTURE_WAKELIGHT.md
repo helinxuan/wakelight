@@ -635,14 +635,22 @@ flowchart LR
 
 ### 7.1.1 渲染架构（性能极致版 1.3）
 
-- **渲染承载方式（最终方案）**：
+- **渲染承载方式（最终方案，混合方案 C）**：
   - **静态迷雾层**：在 `MKMapView` 上方覆盖一层 `FogView`，使用一个纯黑色半透明的 `CALayer`（`overlayLayer`）作为全局迷雾。该层不使用 mask，不进行重绘。
-  - **纹理光晕层（Glow）**：在迷雾层上方叠加一个 `glowContainerLayer`，通过在其内部动态放置 `CALayer` 实例来实现“驱散”效果。
-  - **GPU 合成**：每个光晕点使用预渲染的柔边 PNG（`FogHoleSoft`）作为 `contents`。通过调整 layer 的 `opacity`（建议 0.32~0.42）和 `compositingFilter`（如 `screenBlendMode`）实现“照亮/变薄”的视觉感。
+  - **大柔光（FogScreenView）**：在迷雾层上方叠加 `glowContainerLayer`，仅用于“**故事点**”的大范围柔光。其定位基于 MapKit 坐标系（`mapView.convert`），在 `regionDidChangeAnimated` 进行低频刷新，交互中仅更新已存在 layer 的几何信息。
+  - **小光晕（AnnotationView）**：每个光点的**小光晕**由 `MKAnnotationView` 自身绘制（PNG + shadow），与 MapKit 同步移动，避免拖拽滞后。
+  - **GPU 合成**：
+    - Story（黄光）：`FogHoleSoftYellow` + `screenBlendMode`
+    - Half-Revealed（白光）：`FogHoleSoft` + `screenBlendMode`
+
+- **光点状态渲染（统一口径）**：
+  - **Locked**：灰色点（无小光晕）
+  - **Half-Revealed**：白色小光晕（AnnotationView），雾层不参与
+  - **Story**：黄色小光晕（AnnotationView）+ 大柔光（FogScreenView）
 
 - **性能约束（红线）**：
   - ✅ **Layer 复用池**：即使有几万个点，屏幕内同时活跃的 glow layer 必须控制在硬上限内（建议 `maxVisibleGlowLayers = 180`）。
-  - ✅ **可见性筛选**：仅对 `visibleMapRect` 内且已解锁（revealed）或正在动画（animating）的点创建/显示 layer。
+  - ✅ **可见性筛选**：只对 **故事点**（Story）或动画中的点创建雾层 glow；Half-Revealed 仅走 AnnotationView 小光晕。
   - ✅ **跟手优化**：地图缩放/平移期间，禁止重建任何 path 或触发 `setNeedsDisplay`。仅更新已存在 layer 的 `position` 和 `bounds`。
   - ❌ **禁止**：在 `draw(_:)` 中循环绘制、使用 `CGGradient` 在 CPU 做径向渐变、以及每帧重建复杂的 `CAShapeLayer` 路径。
 
@@ -650,8 +658,10 @@ flowchart LR
   - 采用“局部照亮/变薄”方案替代“硬性挖洞”。这在大量点场景下性能最稳，且视觉上更具梦幻光晕感。
 
 ### 7.1.2 交互与更新策略
-- **交互中**：仅更新可见 Glow Layer 的屏幕坐标与尺寸，确保 60fps 绝对顺滑。
-- **交互结束**：执行一次完整的可见集重算与过期 Layer 回收。
+- **交互中**：
+  - 小光晕随 `MKAnnotationView` 同步移动（无滞后）。
+  - 雾层仅更新已有 glow layer 的几何信息（不重建）。
+- **交互结束**：在 `regionDidChangeAnimated` 触发一次完整可见集重算与过期 Layer 回收。
 
 ### 7.1.3 动画与视觉（MVP 约束）
 

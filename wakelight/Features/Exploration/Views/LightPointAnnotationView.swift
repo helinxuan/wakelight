@@ -6,6 +6,7 @@ final class LightPointAnnotationView: MKAnnotationView {
     private let halfGlowLayer = CALayer()
     private let glowLayer = CALayer()
     private let coreLayer = CALayer()
+    private let centerHighlightLayer = CALayer()
 
     private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
     private let halfGlowImage = UIImage(named: "FogHoleSoft")?.cgImage
@@ -39,9 +40,9 @@ final class LightPointAnnotationView: MKAnnotationView {
         storyGlowLayer.contentsGravity = .resizeAspect
         storyGlowLayer.opacity = 0
         storyGlowLayer.compositingFilter = "screenBlendMode"
-        storyGlowLayer.shadowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
-        storyGlowLayer.shadowOpacity = 0.6
-        storyGlowLayer.shadowRadius = 12
+        storyGlowLayer.shadowColor = UIColor(red: 1.0, green: 0.72, blue: 0.2, alpha: 1.0).cgColor
+        storyGlowLayer.shadowOpacity = 0.75
+        storyGlowLayer.shadowRadius = 16
         storyGlowLayer.shadowOffset = .zero
 
         halfGlowLayer.masksToBounds = false
@@ -61,6 +62,7 @@ final class LightPointAnnotationView: MKAnnotationView {
         layer.addSublayer(halfGlowLayer)
         layer.addSublayer(glowLayer)
         layer.addSublayer(coreLayer)
+        layer.addSublayer(centerHighlightLayer)
 
         startStoryGlowBreathing()
     }
@@ -74,8 +76,8 @@ final class LightPointAnnotationView: MKAnnotationView {
         let glowOpacity: Float
 
         if isStoryPoint {
-            // 状态 3: 完全解锁 (Story) -> 金黄色，强光晕
-            color = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0)
+            // 状态 3: 完全解锁 (Story) -> 更偏金色
+            color = UIColor(red: 1.0, green: 0.72, blue: 0.15, alpha: 1.0)
             size = style.highlightedSize
             glowRadius = CGFloat(style.glowIntensity * 12)
             glowOpacity = Float(style.glowIntensity)
@@ -118,6 +120,25 @@ final class LightPointAnnotationView: MKAnnotationView {
             glowLayer.opacity = 1
         }
 
+        if isStoryPoint {
+            let highlightSize = size * 0.5
+            centerHighlightLayer.frame = CGRect(
+                x: (tapSize - highlightSize) / 2,
+                y: (tapSize - highlightSize) / 2,
+                width: highlightSize,
+                height: highlightSize
+            )
+            centerHighlightLayer.cornerRadius = highlightSize / 2
+            centerHighlightLayer.backgroundColor = UIColor.white.cgColor
+            centerHighlightLayer.shadowColor = UIColor.white.cgColor
+            centerHighlightLayer.shadowOpacity = 1.0
+            centerHighlightLayer.shadowRadius = 12
+            centerHighlightLayer.shadowOffset = .zero
+            centerHighlightLayer.opacity = 1.0
+        } else {
+            centerHighlightLayer.opacity = 0.0
+        }
+
         // 白色半解锁点不再使用 AnnotationView 叠加柔光，交给 FogScreenView
         let halfGlowSize = max(size * 2.2, 72)
         halfGlowLayer.frame = CGRect(
@@ -130,7 +151,7 @@ final class LightPointAnnotationView: MKAnnotationView {
         halfGlowLayer.opacity = 0.0
 
         if isStoryPoint {
-            let storyGlowSize = max(size * 2.2, 72)
+            let storyGlowSize = max(size * 2.4, 80)
             storyGlowLayer.frame = CGRect(
                 x: (tapSize - storyGlowSize) / 2,
                 y: (tapSize - storyGlowSize) / 2,
