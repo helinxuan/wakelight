@@ -103,6 +103,13 @@ struct ImportCurationBucketListView: View {
                                     .font(.callout.weight(.semibold))
                                     .lineLimit(1)
 
+                                if isTrashMode, let kept = group.keptRepresentative {
+                                    Text("保留：\(displayName(for: kept))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+
                                 Spacer(minLength: 0)
 
                                 Text("重复 \(group.items.count) 张")
@@ -118,12 +125,22 @@ struct ImportCurationBucketListView: View {
                                         .clipShape(RoundedRectangle(cornerRadius: 12))
 
                                     HStack(spacing: 6) {
-                                        if group.recommended?.id == group.representative.id {
+                                        if !isTrashMode, group.recommended?.id == group.representative.id {
                                             Text("AI推荐")
                                                 .font(.caption2.weight(.semibold))
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 4)
                                                 .background(Color.yellow.opacity(0.85))
+                                                .foregroundStyle(.black)
+                                                .clipShape(Capsule())
+                                        }
+
+                                        if isTrashMode, !isArchived(group.representative) {
+                                            Text("已保留")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(Color.white.opacity(0.85))
                                                 .foregroundStyle(.black)
                                                 .clipShape(Capsule())
                                         }
@@ -347,7 +364,7 @@ struct ImportCurationBucketListView: View {
             }
 
             var grouped: [String: [Row]] = [:]
-            for item in groupRows {
+            for item in fetched + groupRows {
                 guard let gid = item.burstGroupId else { continue }
                 grouped[gid, default: []].append(item)
             }
@@ -1123,5 +1140,9 @@ private struct DisplayGroup: Identifiable {
 
     var representative: Row {
         recommended ?? items.first!
+    }
+
+    var keptRepresentative: Row? {
+        items.first(where: { $0.curationBucket == ImportDecisionBucket.keep.rawValue })
     }
 }
