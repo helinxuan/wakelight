@@ -10,7 +10,7 @@ struct ImportCurationBucketListView: View {
         var title: String {
             switch self {
             case .review: return "待确认组"
-            case .archived: return "已过滤可恢复"
+            case .archived: return "回收站"
             }
         }
     }
@@ -39,6 +39,22 @@ struct ImportCurationBucketListView: View {
         let message: String
     }
 
+    private enum DeleteScope {
+        case current
+        case all
+
+        var actionTitle: String {
+            switch self {
+            case .current: return "删除当前页"
+            case .all: return "清空回收站"
+            }
+        }
+    }
+
+    private var isTrashMode: Bool {
+        filter == .archived
+    }
+
     let filter: BucketFilter
 
     @State private var rows: [Row] = []
@@ -58,6 +74,11 @@ struct ImportCurationBucketListView: View {
     @State private var displayNameMap: [String: String] = [:]
     @State private var locatorKeyMap: [UUID: String] = [:]
     @State private var keepSelections: [String: Set<UUID>] = [:]
+
+    @State private var deleteScope: DeleteScope = .current
+    @State private var showDeleteConfirm = false
+    @State private var deleteMessage: String = ""
+    @State private var deleteTargets: [Row]? = nil
 
 
     var body: some View {
@@ -123,7 +144,7 @@ struct ImportCurationBucketListView: View {
                                 HStack(spacing: 8) {
                                     ForEach(group.items) { item in
                                         Button {
-                                            toggleKeep(groupId: group.id, itemId: item.id)
+                                            toggleKeep(groupId: group.id, item: item)
                                         } label: {
                                             ThumbnailView(locatorKey: locatorKey(for: item), size: CGSize(width: 52, height: 52))
                                                 .overlay {
@@ -140,31 +161,58 @@ struct ImportCurationBucketListView: View {
                                                             .foregroundStyle(.black)
                                                             .clipShape(Capsule())
                                                             .offset(x: 4, y: 4)
+                                                    } else if isTrashMode, !isArchived(item) {
+                                                        Text("已保留")
+                                                            .font(.system(size: 9, weight: .semibold))
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color.white.opacity(0.85))
+                                                            .foregroundStyle(.black)
+                                                            .clipShape(Capsule())
+                                                            .offset(x: 4, y: 4)
                                                     }
                                                 }
+                                                .opacity(isTrashMode && !isArchived(item) ? 0.6 : 1)
                                         }
                                         .buttonStyle(.plain)
+                                        .disabled(isTrashMode && !isArchived(item))
                                     }
                                 }
                                 .padding(.vertical, 2)
                             }
 
                             HStack(spacing: 10) {
-                                Button("保留已选") {
-                                    Task {
-                                        await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                if isTrashMode {
+                                    Button("恢复已选") {
+                                        Task {
+                                            await recoverSelected(groupId: group.id, allIds: group.items.map(\.id))
+                                        }
                                     }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(keepIds.isEmpty)
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(selectedArchivedIds(groupId: group.id).isEmpty)
 
-                                Button("删除其他") {
-                                    Task {
-                                        await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                    Button("彻底删除已选") {
+                                        promptDeleteSelected(groupId: group.id, allIds: group.items)
                                     }
+                                    .buttonStyle(.bordered)
+                                    .disabled(selectedArchivedIds(groupId: group.id).isEmpty)
+                                } else {
+                                    Button("保留已选") {
+                                        Task {
+                                            await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(keepIds.isEmpty)
+
+                                    Button("删除其他") {
+                                        Task {
+                                            await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(keepIds.isEmpty)
                                 }
-                                .buttonStyle(.bordered)
-                                .disabled(keepIds.isEmpty)
                             }
                             .font(.caption)
                         }
@@ -178,10 +226,28 @@ struct ImportCurationBucketListView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !groupedDisplayItems.isEmpty {
-                    Button("智能保留最佳") {
-                        Task {
-                            await applyKeepBestForAllGroups()
+                    if isTrashMode {
+                        Button("全部恢复") {
+                            Task {
+                                await recoverAllArchived()
+                            }
                         }
+                    } else {
+                        Button("智能保留最佳") {
+                            Task {
+                                await applyKeepBestForAllGroups()
+                            }
+                        }
+                    }
+                }
+            }
+
+            ToolbarItem(placement: .topBarLeading) {
+                if isTrashMode, !groupedDisplayItems.isEmpty {
+                    Button(role: .destructive) {
+                        promptDelete(scope: .all)
+                    } label: {
+                        Label("清空回收站", systemImage: "trash")
                     }
                 }
             }
@@ -204,6 +270,16 @@ struct ImportCurationBucketListView: View {
             Button("我知道了", role: .cancel) { errorAlert = nil }
         } message: { err in
             Text(err.message)
+        }
+        .alert("确认彻底删除", isPresented: $showDeleteConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("彻底删除", role: .destructive) {
+                Task {
+                    await performDelete(scope: deleteScope)
+                }
+            }
+        } message: {
+            Text(deleteMessage)
         }
         .fullScreenCover(isPresented: $isShowingPreview) {
             GroupPreviewSheet(
@@ -238,8 +314,16 @@ struct ImportCurationBucketListView: View {
         await MainActor.run { isLoading = true }
         do {
             let fetched: [Row] = try await DatabaseContainer.shared.db.reader.read { db in
-                try Row
+                let query = Row
                     .filter(Column("curationBucket") == filter.rawValue)
+
+                if filter == .archived {
+                    return try query
+                        .order(Column("archivedAt").desc, Column("bestShotScore").desc)
+                        .fetchAll(db)
+                }
+
+                return try query
                     .order(Column("bestShotScore").desc)
                     .fetchAll(db)
             }
@@ -247,6 +331,15 @@ struct ImportCurationBucketListView: View {
             let groupIds = fetched.compactMap(\.burstGroupId)
             let groupRows: [Row] = try await DatabaseContainer.shared.db.reader.read { db in
                 guard !groupIds.isEmpty else { return [] }
+
+                if filter == .archived {
+                    return try Row
+                        .filter(groupIds.contains(Column("burstGroupId")))
+                        .filter(Column("curationBucket") == ImportDecisionBucket.keep.rawValue)
+                        .order(Column("bestShotScore").desc)
+                        .fetchAll(db)
+                }
+
                 return try Row
                     .filter(groupIds.contains(Column("burstGroupId")))
                     .order(Column("bestShotScore").desc)
@@ -304,8 +397,31 @@ struct ImportCurationBucketListView: View {
         return ""
     }
 
+    private func localIdentifier(for row: Row) -> String? {
+        if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
+            return localIdentifier
+        }
+        if let key = locatorKeyMap[row.id], let locator = MediaLocator.parse(key), case .library(let id) = locator {
+            return id
+        }
+        return nil
+    }
+
+    private func isArchived(_ row: Row) -> Bool {
+        row.curationBucket == ImportDecisionBucket.archived.rawValue
+    }
+
+    private func selectedArchivedIds(groupId: String) -> [UUID] {
+        let selections = keepSelections[groupId] ?? []
+        guard !selections.isEmpty else { return [] }
+
+        let items = groupedDisplayItems.first(where: { $0.id == groupId })?.items ?? []
+        return items.filter { selections.contains($0.id) && isArchived($0) }.map(\.id)
+    }
 
     private func updateRows(ids: [UUID], target: ActionTarget) async throws {
+        let archivedAt: Date? = target == .archived ? Date() : nil
+
         try await DatabaseContainer.shared.writer.write { db in
             _ = try PhotoAsset
                 .filter(ids.contains(Column("id")))
@@ -313,12 +429,143 @@ struct ImportCurationBucketListView: View {
                     db,
                     Column("curationBucket").set(to: target.bucket),
                     Column("selectionReason").set(to: target.reason),
-                    Column("isRecoverableArchived").set(to: target.isRecoverableArchived)
+                    Column("isRecoverableArchived").set(to: target.isRecoverableArchived),
+                    Column("archivedAt").set(to: archivedAt)
                 )
         }
 
         await MainActor.run {
             PhotoImportManager.shared.scheduleRecluster(reason: "curation-bucket-updated")
+        }
+    }
+
+    private func promptDelete(scope: DeleteScope) {
+        Task {
+            await prepareDeleteConfirmation(scope: scope, targetsOverride: nil)
+        }
+    }
+
+    private func promptDeleteSelected(groupId: String, allIds: [Row]) {
+        let selectedIds = selectedArchivedIds(groupId: groupId)
+        guard !selectedIds.isEmpty else { return }
+        let targets = allIds.filter { selectedIds.contains($0.id) }
+        Task {
+            await prepareDeleteConfirmation(scope: .current, targetsOverride: targets)
+        }
+    }
+
+    private func prepareDeleteConfirmation(scope: DeleteScope, targetsOverride: [Row]?) async {
+        do {
+            let targets: [Row]
+            if let targetsOverride {
+                targets = targetsOverride
+            } else {
+                targets = try await archivedRows(for: scope)
+            }
+            guard !targets.isEmpty else {
+                await MainActor.run {
+                    errorAlert = ErrorMessage(message: "回收站里没有可删除的照片")
+                }
+                return
+            }
+
+            let localTargets = targets.filter { localIdentifier(for: $0) != nil }
+            let webdavCount = targets.count - localTargets.count
+
+            let base = "将从系统相册彻底删除 \(localTargets.count) 张照片，并清理本地记录。该操作不可恢复。"
+            let note = webdavCount > 0 ? "\n\n包含 \(webdavCount) 张 WebDAV 照片，暂不支持物理删除，将会保留。" : ""
+
+            await MainActor.run {
+                deleteScope = scope
+                deleteMessage = base + note
+                deleteTargets = targets
+                showDeleteConfirm = true
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func performDelete(scope: DeleteScope) async {
+        do {
+            let targets: [Row]
+            if let deleteTargets {
+                targets = deleteTargets
+            } else {
+                targets = try await archivedRows(for: scope)
+            }
+            self.deleteTargets = nil
+            guard !targets.isEmpty else {
+                await MainActor.run {
+                    errorAlert = ErrorMessage(message: "回收站里没有可删除的照片")
+                }
+                return
+            }
+
+            let localTargets = targets.compactMap { row -> (Row, String)? in
+                guard let identifier = localIdentifier(for: row) else { return nil }
+                return (row, identifier)
+            }
+
+            guard !localTargets.isEmpty else {
+                await MainActor.run {
+                    errorAlert = ErrorMessage(message: "当前回收站没有可删除的本地照片（WebDAV 暂不支持）")
+                }
+                return
+            }
+
+            let localIdentifiers = localTargets.map { $0.1 }
+            try await deleteLocalAssets(localIdentifiers: localIdentifiers)
+
+            let deletedIds = localTargets.map { $0.0.id }
+            try await PhotoImportManager.shared.cleanupDeletedPhotoAssets(photoIds: deletedIds)
+
+            await load()
+            await MainActor.run {
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                let webdavCount = targets.count - localTargets.count
+                let suffix = webdavCount > 0 ? "，WebDAV \(webdavCount) 张未处理" : ""
+                showSuccessToast("已彻底删除 \(localTargets.count) 张\(suffix)")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func archivedRows(for scope: DeleteScope) async throws -> [Row] {
+        switch scope {
+        case .current:
+            return rows
+        case .all:
+            return try await DatabaseContainer.shared.db.reader.read { db in
+                try Row
+                    .filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue)
+                    .order(Column("bestShotScore").desc)
+                    .fetchAll(db)
+            }
+        }
+    }
+
+    private func deleteLocalAssets(localIdentifiers: [String]) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil)
+        guard assets.count > 0 else {
+            throw NSError(domain: "ImportCurationBucketListView", code: -404, userInfo: [NSLocalizedDescriptionKey: "未在系统相册找到可删除的照片"])
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets)
+            } completionHandler: { success, error in
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: error ?? NSError(domain: "ImportCurationBucketListView", code: -1, userInfo: [NSLocalizedDescriptionKey: "系统相册删除失败"]))
+                }
+            }
         }
     }
 
@@ -423,12 +670,61 @@ struct ImportCurationBucketListView: View {
         }
     }
 
-    private func toggleKeep(groupId: String, itemId: UUID) {
+    private func recoverSelected(groupId: String, allIds: [UUID]) async {
+        guard !allIds.isEmpty else { return }
+        let keepIds = selectedArchivedIds(groupId: groupId)
+        guard !keepIds.isEmpty else { return }
+
+        do {
+            try await updateRows(ids: keepIds, target: .keep)
+            await load()
+            await MainActor.run {
+                keepSelections[groupId] = []
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("已恢复 \(keepIds.count) 张")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func recoverAllArchived() async {
+        do {
+            let targets = try await archivedRows(for: .all)
+            let ids = targets.map(\.id)
+            guard !ids.isEmpty else {
+                await MainActor.run {
+                    errorAlert = ErrorMessage(message: "回收站为空")
+                }
+                return
+            }
+
+            try await updateRows(ids: ids, target: .keep)
+            await load()
+            await MainActor.run {
+                keepSelections = [:]
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("已恢复 \(ids.count) 张")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func toggleKeep(groupId: String, item: Row) {
+        if isTrashMode, !isArchived(item) {
+            return
+        }
+
         var current = keepSelections[groupId] ?? []
-        if current.contains(itemId) {
-            current.remove(itemId)
+        if current.contains(item.id) {
+            current.remove(item.id)
         } else {
-            current.insert(itemId)
+            current.insert(item.id)
         }
         keepSelections[groupId] = current
     }
@@ -814,6 +1110,7 @@ private struct Row: Identifiable, FetchableRecord, TableRecord, Decodable {
     var selectionReason: String?
     var curationBucket: String?
     var burstGroupId: String?
+    var archivedAt: Date?
 }
 
 private struct DisplayGroup: Identifiable {

@@ -33,6 +33,7 @@ struct PhotoAsset: Codable, FetchableRecord, PersistableRecord {
     var selectionReason: String?
     var curationBucket: String?
     var isRecoverableArchived: Bool?
+    var archivedAt: Date?
     var recognizedTextConfidence: Double?
 
     // MARK: - Sync / bookkeeping

@@ -44,6 +44,7 @@ struct AppDatabase {
                 t.column("selectionReason", .text)
                 t.column("curationBucket", .text)
                 t.column("isRecoverableArchived", .boolean)
+                t.column("archivedAt", .datetime)
                 t.column("recognizedTextConfidence", .double)
 
                 // Sync / bookkeeping
