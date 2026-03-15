@@ -44,148 +44,146 @@ struct ImportCurationBucketListView: View {
     @State private var rows: [Row] = []
     @State private var groupedRows: [String: [Row]] = [:]
     @State private var isLoading = false
-    @State private var selectedIds = Set<UUID>()
-    @State private var isApplyingBatch = false
-    @State private var batchTarget: ActionTarget = .review
 
     @State private var successToast: String?
     @State private var errorAlert: ErrorMessage?
 
-    @Environment(\.editMode) private var editMode
 
     @State private var previewItems: [Row] = []
     @State private var previewSelection: UUID?
+    @State private var previewKeepIds = Set<UUID>()
+    @State private var previewGroupId: String?
     @State private var isShowingPreview = false
 
     @State private var displayNameMap: [String: String] = [:]
     @State private var locatorKeyMap: [UUID: String] = [:]
+    @State private var keepSelections: [String: Set<UUID>] = [:]
 
-    private var batchOptions: [ActionTarget] {
-        switch filter {
-        case .archived: return [.review, .keep]
-        case .review: return [.keep, .archived]
-        }
-    }
 
     var body: some View {
         Group {
             if rows.isEmpty, !isLoading {
                 ContentUnavailableView("暂无数据", systemImage: "tray", description: Text("当前分组下没有可展示的照片记录"))
             } else {
-                List(selection: $selectedIds) {
-                    ForEach(rows) { row in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(alignment: .top, spacing: 10) {
-                                Button {
-                                    openPreview(for: row, in: nil)
-                                } label: {
-                                    ThumbnailView(locatorKey: locatorKey(for: row), size: CGSize(width: 62, height: 62))
+                List {
+                    ForEach(Array(groupedDisplayItems.enumerated()), id: \.element.id) { index, group in
+                        let keepIds = keepSelections[group.id] ?? []
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .center, spacing: 10) {
+                                Text("组 \(index + 1)")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Capsule())
+
+                                Text(displayName(for: group.representative))
+                                    .font(.callout.weight(.semibold))
+                                    .lineLimit(1)
+
+                                Spacer(minLength: 0)
+
+                                Text("重复 \(group.items.count) 张")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Button {
+                                openPreview(for: group.representative, in: group.items)
+                            } label: {
+                                ZStack(alignment: .bottomLeading) {
+                                    ThumbnailView(locatorKey: locatorKey(for: group.representative), size: CGSize(width: 220, height: 140))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                                    HStack(spacing: 6) {
+                                        if group.recommended?.id == group.representative.id {
+                                            Text("AI推荐")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(Color.yellow.opacity(0.85))
+                                                .foregroundStyle(.black)
+                                                .clipShape(Capsule())
+                                        }
+
+                                        Text("清晰度 \(String(format: "%.1f", group.representative.bestShotScore ?? 0))")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(.ultraThinMaterial)
+                                            .clipShape(Capsule())
+                                    }
+                                    .padding(10)
                                 }
-                                .buttonStyle(.plain)
+                            }
+                            .buttonStyle(.plain)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(displayName(for: row))
-                                        .font(.caption)
-                                        .lineLimit(1)
-
-                                    Text("分类: \(ImportCurationBucketListViewHelper.userCategoryText(bucket: row.curationBucket, reason: row.selectionReason, groupId: row.burstGroupId)) · 分数: \(Int(row.bestShotScore ?? 0))")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-
-                                    if let groupId = row.burstGroupId,
-                                       let siblings = groupedRows[groupId],
-                                       siblings.count > 1 {
-                                        HStack(spacing: 6) {
-                                            Text("同组对比（保留/待确认/归档）")
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        ScrollView(.horizontal, showsIndicators: false) {
-                                            HStack(spacing: 8) {
-                                                ForEach(siblings) { item in
-                                                    Button {
-                                                        openPreview(for: item, in: siblings)
-                                                    } label: {
-                                                        VStack(spacing: 4) {
-                                                            ThumbnailView(locatorKey: locatorKey(for: item), size: CGSize(width: 48, height: 48))
-                                                                .overlay {
-                                                                    RoundedRectangle(cornerRadius: 6)
-                                                                        .stroke(
-                                                                            item.id == row.id ? Color.accentColor : Color.clear,
-                                                                            lineWidth: item.id == row.id ? 2 : 0
-                                                                        )
-                                                                }
-                                                            Text(ImportCurationBucketListViewHelper.bucketTag(item.curationBucket))
-                                                                .font(.system(size: 9, weight: .semibold))
-                                                                .padding(.horizontal, 4)
-                                                                .padding(.vertical, 2)
-                                                                .background(.ultraThinMaterial)
-                                                                .clipShape(Capsule())
-                                                        }
-                                                    }
-                                                    .buttonStyle(.plain)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(group.items) { item in
+                                        Button {
+                                            toggleKeep(groupId: group.id, itemId: item.id)
+                                        } label: {
+                                            ThumbnailView(locatorKey: locatorKey(for: item), size: CGSize(width: 52, height: 52))
+                                                .overlay {
+                                                    RoundedRectangle(cornerRadius: 8)
+                                                        .stroke(keepIds.contains(item.id) ? Color.yellow : Color.clear, lineWidth: keepIds.contains(item.id) ? 2 : 0)
                                                 }
-                                            }
-                                            .padding(.vertical, 2)
+                                                .overlay(alignment: .topLeading) {
+                                                    if keepIds.contains(item.id) {
+                                                        Text("保留")
+                                                            .font(.system(size: 9, weight: .semibold))
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color.yellow.opacity(0.85))
+                                                            .foregroundStyle(.black)
+                                                            .clipShape(Capsule())
+                                                            .offset(x: 4, y: 4)
+                                                    }
+                                                }
                                         }
+                                        .buttonStyle(.plain)
                                     }
                                 }
-                                Spacer(minLength: 0)
+                                .padding(.vertical, 2)
                             }
 
-                            actionButtons(for: row)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-            }
-        }
-        .navigationTitle(filter.title)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                if editMode?.wrappedValue.isEditing == true {
-                    Button(selectedIds.count == rows.count ? "取消全选" : "全选") {
-                        if selectedIds.count == rows.count {
-                            selectedIds.removeAll()
-                        } else {
-                            selectedIds = Set(rows.map(\.id))
-                        }
-                    }
-                }
-            }
+                            HStack(spacing: 10) {
+                                Button("保留已选") {
+                                    Task {
+                                        await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(keepIds.isEmpty)
 
-            ToolbarItem(placement: .topBarTrailing) {
-                EditButton()
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if !selectedIds.isEmpty {
-                VStack(spacing: 10) {
-                    HStack {
-                        Text("已选择 \(selectedIds.count) 项")
+                                Button("删除其他") {
+                                    Task {
+                                        await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(keepIds.isEmpty)
+                            }
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-
-                    HStack {
-                        Picker("批量操作", selection: $batchTarget) {
-                            ForEach(batchOptions) { target in
-                                Text(actionLabel(target)).tag(target)
-                            }
                         }
-                        .pickerStyle(.segmented)
-
-                        Button(isApplyingBatch ? "处理中..." : "执行") {
-                            Task { await applyBatch(target: batchTarget) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isApplyingBatch)
+                        .padding(.vertical, 6)
                     }
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 10)
-                .background(.ultraThinMaterial)
+                .listStyle(.plain)
+            }
+        }
+        .navigationTitle(screenTitle)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if !groupedDisplayItems.isEmpty {
+                    Button("智能保留最佳") {
+                        Task {
+                            await applyKeepBestForAllGroups()
+                        }
+                    }
+                }
             }
         }
         .overlay(alignment: .top) {
@@ -211,41 +209,30 @@ struct ImportCurationBucketListView: View {
             GroupPreviewSheet(
                 items: previewItems,
                 selection: $previewSelection,
-                locatorKeyForRow: { row in locatorKey(for: row) }
+                keepIds: $previewKeepIds,
+                locatorKeyForRow: { row in locatorKey(for: row) },
+                onApplyGroupKeep: { selectedId, allIds in
+                    await applyGroupKeep(selectedId: selectedId, allIds: allIds)
+                },
+                onApplyGroupKeepMultiple: { keepIds, allIds in
+                    await applyGroupKeepMultiple(groupId: previewGroupId ?? "", allIds: allIds)
+                }
             ) { rowId, bucket in
                 await applyFromPreview(rowId: rowId, bucket: bucket)
             }
+            .onDisappear {
+                if let groupId = previewGroupId {
+                    keepSelections[groupId] = previewKeepIds
+                }
+                previewKeepIds = []
+                previewGroupId = nil
+            }
         }
         .task {
-            batchTarget = batchOptions.first ?? .review
             await load()
         }
     }
 
-    @ViewBuilder
-    private func actionButtons(for row: Row) -> some View {
-        switch filter {
-        case .archived:
-            HStack(spacing: 8) {
-                Button("恢复到待确认") { Task { await applySingle(row: row, target: .review) } }
-                    .buttonStyle(.bordered)
-
-                Button("恢复到保留") { Task { await applySingle(row: row, target: .keep) } }
-                    .buttonStyle(.borderedProminent)
-            }
-            .font(.caption2)
-
-        case .review:
-            HStack(spacing: 8) {
-                Button("确认保留") { Task { await applySingle(row: row, target: .keep) } }
-                    .buttonStyle(.borderedProminent)
-
-                Button("归档过滤") { Task { await applySingle(row: row, target: .archived) } }
-                    .buttonStyle(.bordered)
-            }
-            .font(.caption2)
-        }
-    }
 
     private func load() async {
         await MainActor.run { isLoading = true }
@@ -282,7 +269,6 @@ struct ImportCurationBucketListView: View {
                 groupedRows = grouped
                 locatorKeyMap = locators
                 displayNameMap = names
-                selectedIds = selectedIds.intersection(Set(fetched.map(\.id)))
                 isLoading = false
             }
         } catch {
@@ -291,7 +277,6 @@ struct ImportCurationBucketListView: View {
                 groupedRows = [:]
                 locatorKeyMap = [:]
                 displayNameMap = [:]
-                selectedIds.removeAll()
                 isLoading = false
             }
         }
@@ -319,42 +304,6 @@ struct ImportCurationBucketListView: View {
         return ""
     }
 
-    private func applySingle(row: Row, target: ActionTarget) async {
-        do {
-            try await updateRows(ids: [row.id], target: target)
-            await load()
-            await MainActor.run {
-                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                showSuccessToast("操作成功：1 项")
-            }
-        } catch {
-            await MainActor.run {
-                errorAlert = ErrorMessage(message: error.localizedDescription)
-            }
-        }
-    }
-
-    private func applyBatch(target: ActionTarget) async {
-        guard !selectedIds.isEmpty else { return }
-        await MainActor.run { isApplyingBatch = true }
-
-        let ids = Array(selectedIds)
-        do {
-            try await updateRows(ids: ids, target: target)
-            await MainActor.run { selectedIds.removeAll() }
-            await load()
-            await MainActor.run {
-                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                isApplyingBatch = false
-                showSuccessToast("操作成功：\(ids.count) 项")
-            }
-        } catch {
-            await MainActor.run {
-                isApplyingBatch = false
-                errorAlert = ErrorMessage(message: error.localizedDescription)
-            }
-        }
-    }
 
     private func updateRows(ids: [UUID], target: ActionTarget) async throws {
         try await DatabaseContainer.shared.writer.write { db in
@@ -383,6 +332,8 @@ struct ImportCurationBucketListView: View {
 
         previewItems = sorted
         previewSelection = row.id
+        previewGroupId = sorted.first?.burstGroupId ?? row.id.uuidString
+        previewKeepIds = keepSelections[previewGroupId ?? ""] ?? []
 
         let key = locatorKey(for: row)
         Task(priority: .userInitiated) {
@@ -416,6 +367,70 @@ struct ImportCurationBucketListView: View {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
             }
         }
+    }
+
+    private func applyGroupKeep(selectedId: UUID, allIds: [UUID]) async {
+        guard !allIds.isEmpty else { return }
+        let archivedIds = allIds.filter { $0 != selectedId }
+
+        do {
+            try await updateRows(ids: [selectedId], target: .keep)
+            if !archivedIds.isEmpty {
+                try await updateRows(ids: archivedIds, target: .archived)
+            }
+            await load()
+            await MainActor.run {
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("操作成功：保留 1，归档 \(archivedIds.count)")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func applyGroupKeepMultiple(groupId: String, allIds: [UUID]) async {
+        guard !allIds.isEmpty else { return }
+        let keepIds = Array(keepSelections[groupId] ?? [])
+        guard !keepIds.isEmpty else { return }
+        let archivedIds = allIds.filter { !keepIds.contains($0) }
+
+        do {
+            try await updateRows(ids: keepIds, target: .keep)
+            if !archivedIds.isEmpty {
+                try await updateRows(ids: archivedIds, target: .archived)
+            }
+            await load()
+            await MainActor.run {
+                keepSelections[groupId] = []
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("操作成功：保留 \(keepIds.count)，归档 \(archivedIds.count)")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func applyKeepBestForAllGroups() async {
+        for group in groupedDisplayItems {
+            if let best = group.recommended {
+                let allIds = group.items.map(\.id)
+                await applyGroupKeep(selectedId: best.id, allIds: allIds)
+            }
+        }
+    }
+
+    private func toggleKeep(groupId: String, itemId: UUID) {
+        var current = keepSelections[groupId] ?? []
+        if current.contains(itemId) {
+            current.remove(itemId)
+        } else {
+            current.insert(itemId)
+        }
+        keepSelections[groupId] = current
     }
 
     @MainActor
@@ -500,19 +515,32 @@ struct ImportCurationBucketListView: View {
         return locatorKey
     }
 
-    private func actionLabel(_ target: ActionTarget) -> String {
-        switch target {
-        case .keep: return "保留"
-        case .review: return "到待确认"
-        case .archived: return "归档"
+    private var groupedDisplayItems: [DisplayGroup] {
+        let grouped = groupedRows.values.filter { $0.count > 1 }
+        if grouped.isEmpty {
+            return rows.map { DisplayGroup(id: $0.id.uuidString, items: [$0]) }
         }
+        return grouped.map { items in
+            let sorted = items.sorted { ($0.bestShotScore ?? 0) > ($1.bestShotScore ?? 0) }
+            let id = sorted.first?.burstGroupId ?? sorted.first?.id.uuidString ?? UUID().uuidString
+            return DisplayGroup(id: id, items: sorted)
+        }
+    }
+
+    private var screenTitle: String {
+        let groupCount = groupedDisplayItems.count
+        let total = groupedDisplayItems.reduce(0) { $0 + $1.items.count }
+        return "\(filter.title)（\(groupCount) 组 · 共 \(total) 张重复照片）"
     }
 }
 
 private struct GroupPreviewSheet: View {
     let items: [Row]
     @Binding var selection: UUID?
+    @Binding var keepIds: Set<UUID>
     let locatorKeyForRow: (Row) -> String
+    let onApplyGroupKeep: @Sendable (UUID, [UUID]) async -> Void
+    let onApplyGroupKeepMultiple: @Sendable ([UUID], [UUID]) async -> Void
     let onApply: @Sendable (UUID, ImportDecisionBucket) async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var isApplying = false
@@ -520,6 +548,15 @@ private struct GroupPreviewSheet: View {
     private var currentItem: Row? {
         guard let sel = selection else { return items.first }
         return items.first(where: { $0.id == sel }) ?? items.first
+    }
+
+    private var recommendedItem: Row? {
+        items.max { ($0.bestShotScore ?? 0) < ($1.bestShotScore ?? 0) }
+    }
+
+    private var selectionIndex: Int? {
+        guard let sel = selection else { return nil }
+        return items.firstIndex(where: { $0.id == sel })
     }
 
     var body: some View {
@@ -533,75 +570,171 @@ private struct GroupPreviewSheet: View {
                         set: { selection = $0 }
                     )) {
                         ForEach(items) { item in
-                            VStack(spacing: 12) {
-                                FullImageView(locatorKey: locatorKeyForRow(item))
-                                    .background(Color.black)
+                            ZStack(alignment: .topTrailing) {
+                                VStack(spacing: 12) {
+                                    ZStack(alignment: .topTrailing) {
+                                        FullImageView(locatorKey: locatorKeyForRow(item))
+                                            .background(Color.black)
 
-                                HStack(spacing: 8) {
-                                    Text(ImportCurationBucketListViewHelper.bucketTag(item.curationBucket))
-                                        .font(.caption)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(.ultraThinMaterial)
-                                        .clipShape(Capsule())
+                                        HStack(spacing: 6) {
+                                            if recommendedItem?.id == item.id {
+                                                Text("AI推荐")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 4)
+                                                    .background(Color.yellow.opacity(0.85))
+                                                    .foregroundStyle(.black)
+                                                    .clipShape(Capsule())
+                                            }
 
-                                    Text("分数 \(Int(item.bestShotScore ?? 0))")
+                                            Text("清晰度 \(String(format: "%.1f", item.bestShotScore ?? 0))")
+                                                .font(.caption2)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(.ultraThinMaterial)
+                                                .clipShape(Capsule())
+                                        }
+                                        .padding(.trailing, 12)
+                                        .padding(.top, 12)
+                                    }
+
+                                    Text(topSubtitle(for: item))
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(.white.opacity(0.9))
                                 }
-                                .foregroundStyle(.white)
-
-                                Text("分类：\(ImportCurationBucketListViewHelper.userCategoryText(bucket: item.curationBucket, reason: item.selectionReason, groupId: item.burstGroupId))")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.9))
                             }
                             .tag(item.id as UUID?)
-                            .padding(.bottom, 18)
+                            .padding(.bottom, 12)
                         }
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .always))
+                    .tabViewStyle(.page(indexDisplayMode: .never))
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if let current = currentItem {
-                    let keepPrimary = current.curationBucket == ImportDecisionBucket.keep.rawValue
-                    let reviewPrimary = current.curationBucket == ImportDecisionBucket.review.rawValue
-                    let archivedPrimary = current.curationBucket == ImportDecisionBucket.archived.rawValue
-
-                    HStack(spacing: 8) {
-                        actionChip(title: "保留", isPrimary: keepPrimary, disabled: isApplying) {
-                            Task {
-                                isApplying = true
-                                await onApply(current.id, .keep)
-                                isApplying = false
-                            }
-                        }
-
-                        actionChip(title: "待确认", isPrimary: reviewPrimary, disabled: isApplying) {
-                            Task {
-                                isApplying = true
-                                await onApply(current.id, .review)
-                                isApplying = false
-                            }
-                        }
-
-                        actionChip(title: "归档", isPrimary: archivedPrimary, disabled: isApplying) {
-                            Task {
-                                isApplying = true
-                                await onApply(current.id, .archived)
-                                isApplying = false
-                            }
-                        }
+                VStack(spacing: 10) {
+                    if !items.isEmpty {
+                        thumbnailsStrip
+                            .padding(.horizontal, 8)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+
+                    if let current = currentItem {
+                        HStack(spacing: 10) {
+                            Button {
+                                if keepIds.contains(current.id) {
+                                    keepIds.remove(current.id)
+                                } else {
+                                    keepIds.insert(current.id)
+                                }
+                            } label: {
+                                Text(keepIds.contains(current.id) ? "取消保留" : "保留这张")
+                                    .font(.callout.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button {
+                                Task {
+                                    isApplying = true
+                                    await onApplyGroupKeepMultiple(Array(keepIds), items.map(\.id))
+                                    isApplying = false
+                                    dismiss()
+                                }
+                            } label: {
+                                Text("删除其他")
+                                    .font(.callout.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .disabled(isApplying)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 2)
+                    }
                 }
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
                 }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    if let recommended = recommendedItem {
+                        Button("智能保留最佳") {
+                            Task {
+                                isApplying = true
+                                await onApplyGroupKeep(recommended.id, items.map(\.id))
+                                isApplying = false
+                                dismiss()
+                            }
+                        }
+                        .disabled(isApplying)
+                    }
+                }
             }
+        }
+        .onAppear {
+            if selection == nil {
+                selection = recommendedItem?.id ?? items.first?.id
+            }
+        }
+    }
+
+    private func topSubtitle(for item: Row) -> String {
+        let tag = ImportCurationBucketListViewHelper.bucketTag(item.curationBucket)
+        let reason = ImportCurationBucketListViewHelper.userCategoryText(bucket: item.curationBucket, reason: item.selectionReason, groupId: item.burstGroupId)
+        return "\(tag) · \(reason)"
+    }
+
+    private var thumbnailsStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(items) { item in
+                    Button {
+                        selection = item.id
+                        if keepIds.contains(item.id) {
+                            keepIds.remove(item.id)
+                        } else {
+                            keepIds.insert(item.id)
+                        }
+                    } label: {
+                        ZStack(alignment: .topLeading) {
+                            ThumbnailView(locatorKey: locatorKeyForRow(item), size: CGSize(width: 52, height: 52))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(keepIds.contains(item.id) ? Color.yellow : Color.clear, lineWidth: keepIds.contains(item.id) ? 2 : 0)
+                                }
+
+                            if item.id == selection {
+                                Text("当前")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.yellow.opacity(0.85))
+                                    .foregroundStyle(.black)
+                                    .clipShape(Capsule())
+                                    .offset(x: 4, y: 4)
+                            }
+
+                            if keepIds.contains(item.id) {
+                                Text("保留")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.yellow.opacity(0.85))
+                                    .foregroundStyle(.black)
+                                    .clipShape(Capsule())
+                                    .offset(x: 4, y: 24)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 4)
         }
     }
 
@@ -681,4 +814,17 @@ private struct Row: Identifiable, FetchableRecord, TableRecord, Decodable {
     var selectionReason: String?
     var curationBucket: String?
     var burstGroupId: String?
+}
+
+private struct DisplayGroup: Identifiable {
+    let id: String
+    let items: [Row]
+
+    var recommended: Row? {
+        items.max { ($0.bestShotScore ?? 0) < ($1.bestShotScore ?? 0) }
+    }
+
+    var representative: Row {
+        recommended ?? items.first!
+    }
 }
