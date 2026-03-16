@@ -23,33 +23,55 @@ final class PhotoThumbnailLoader {
     }
 
     private actor FallbackLoadLimiter {
+        private struct Waiter {
+            let id: UUID
+            let continuation: CheckedContinuation<Bool, Never>
+        }
+
         private let maxConcurrent: Int
         private var running: Int = 0
-        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var waiters: [Waiter] = []
 
         init(maxConcurrent: Int) {
             self.maxConcurrent = max(1, maxConcurrent)
         }
 
-        func acquire() async {
+        func acquire(timeoutNs: UInt64 = 3_000_000_000) async -> Bool {
             if running < maxConcurrent {
                 running += 1
-                return
+                print("[ThumbLoader] fallback-queue acquired id=immediate running=\(running) waiters=\(waiters.count)")
+                return true
             }
 
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
+            let id = UUID()
+            print("[ThumbLoader] fallback-queue enqueue id=\(id) running=\(running) waiters=\(waiters.count)")
+
+            return await withCheckedContinuation { continuation in
+                waiters.append(Waiter(id: id, continuation: continuation))
+
+                Task {
+                    try? await Task.sleep(nanoseconds: timeoutNs)
+                    await self.timeoutWaiter(id: id)
+                }
             }
-            running += 1
         }
 
         func release() {
             if !waiters.isEmpty {
                 let next = waiters.removeFirst()
-                next.resume()
+                print("[ThumbLoader] fallback-queue release-wake id=\(next.id) running=\(running) waiters=\(waiters.count)")
+                next.continuation.resume(returning: true)
             } else {
                 running = max(0, running - 1)
+                print("[ThumbLoader] fallback-queue release running=\(running) waiters=\(waiters.count)")
             }
+        }
+
+        private func timeoutWaiter(id: UUID) {
+            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+            let waiter = waiters.remove(at: index)
+            print("[ThumbLoader] fallback-queue timeout id=\(id) running=\(running) waiters=\(waiters.count)")
+            waiter.continuation.resume(returning: false)
         }
     }
 
@@ -85,18 +107,31 @@ final class PhotoThumbnailLoader {
         }
 
         if let cachedPath = lookup?.thumbnailPath {
-            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) path=\(cachedPath) exists=\(FileManager.default.fileExists(atPath: cachedPath))")
+            let exists = FileManager.default.fileExists(atPath: cachedPath)
+            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) path=\(cachedPath) exists=\(exists)")
+
+            if !exists, let locator = MediaLocator.parse(locatorKey) {
+                // 路径失效：提前触发补齐（不依赖 fallback 成功）
+                triggerBackfill(locator: locator, locatorKey: locatorKey)
+            }
         } else {
             print("[ThumbLoader] source=disk-miss locator=\(locatorKey) reason=no-thumbnailPath")
         }
 
         // 3. 没找到磁盘缓存，走受限并发的 fallback（避免首轮解码洪峰）
-        await fallbackLoadLimiter.acquire()
+        print("[ThumbLoader] fallback-acquire locator=\(locatorKey)")
+        let acquired = await fallbackLoadLimiter.acquire()
+        print("[ThumbLoader] fallback-acquire-done locator=\(locatorKey) success=\(acquired)")
+
         let image: UIImage?
-        do {
+        if acquired {
+            print("[ThumbLoader] fallback-start locator=\(locatorKey) size=\(Int(size.width))x\(Int(size.height))")
             image = await loadThumbnail(locatorKey: locatorKey, size: size)
+            await fallbackLoadLimiter.release()
+        } else {
+            image = nil
         }
-        await fallbackLoadLimiter.release()
+
         print("[ThumbLoader] source=fallback-loader locator=\(locatorKey) success=\(image != nil)")
 
         // 4. 异步触发后台补齐（将该图落盘，下次就快）
@@ -221,10 +256,13 @@ final class PhotoThumbnailLoader {
 
         let cacheKey = "full-\(locator.stableKey)" as NSString
         if let cached = fullImageCache.object(forKey: cacheKey) {
+            print("[ThumbLoader] full source=memory-hit locator=\(locator.stableKey)")
             return cached
         }
 
+        print("[ThumbLoader] full-start locator=\(locator.stableKey)")
         let image = await loadFullImage(locator: locator)
+        print("[ThumbLoader] full-done locator=\(locator.stableKey) success=\(image != nil)")
         if let image {
             fullImageCache.setObject(image, forKey: cacheKey)
         }
@@ -351,14 +389,26 @@ final class PhotoThumbnailLoader {
 
     private func loadThumbnailFromPhotos(localIdentifier: String, size: CGSize) async -> UIImage? {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-        guard let asset = assets.firstObject else { return nil }
-        return await requestImage(for: asset, targetSize: size, contentMode: .aspectFill, delivery: .opportunistic)
+        guard let asset = assets.firstObject else {
+            print("[ThumbLoader] photos-thumb asset-not-found localIdentifier=\(localIdentifier)")
+            return nil
+        }
+
+        let image = await requestImage(for: asset, targetSize: size, contentMode: .aspectFill, delivery: .opportunistic)
+        print("[ThumbLoader] photos-thumb result localIdentifier=\(localIdentifier) success=\(image != nil)")
+        return image
     }
 
     private func loadFullImageFromPhotos(localIdentifier: String) async -> UIImage? {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-        guard let asset = assets.firstObject else { return nil }
-        return await requestImage(for: asset, targetSize: PHImageManagerMaximumSize, contentMode: .aspectFit, delivery: .highQualityFormat)
+        guard let asset = assets.firstObject else {
+            print("[ThumbLoader] photos-full asset-not-found localIdentifier=\(localIdentifier)")
+            return nil
+        }
+
+        let image = await requestImage(for: asset, targetSize: PHImageManagerMaximumSize, contentMode: .aspectFit, delivery: .highQualityFormat)
+        print("[ThumbLoader] photos-full result localIdentifier=\(localIdentifier) success=\(image != nil)")
+        return image
     }
 
     private func requestImage(
@@ -367,13 +417,32 @@ final class PhotoThumbnailLoader {
         contentMode: PHImageContentMode,
         delivery: PHImageRequestOptionsDeliveryMode
     ) async -> UIImage? {
-        await withCheckedContinuation { continuation in
+        let requestId = UUID().uuidString
+        let sizeText = "\(Int(targetSize.width))x\(Int(targetSize.height))"
+        print("[ThumbLoader] photos-request start id=\(requestId) localIdentifier=\(asset.localIdentifier) size=\(sizeText) delivery=\(delivery)")
+
+        return await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = delivery
             options.resizeMode = .none
             options.isNetworkAccessAllowed = true
 
             var resumed = false
+            var bestImage: UIImage?
+
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !resumed else { return }
+                if let bestImage {
+                    print("[ThumbLoader] photos-request timeout id=\(requestId) localIdentifier=\(asset.localIdentifier) fallback=degraded")
+                    resumed = true
+                    continuation.resume(returning: bestImage)
+                } else {
+                    print("[ThumbLoader] photos-request timeout id=\(requestId) localIdentifier=\(asset.localIdentifier) fallback=nil")
+                    resumed = true
+                    continuation.resume(returning: nil)
+                }
+            }
 
             imageManager.requestImage(
                 for: asset,
@@ -384,9 +453,17 @@ final class PhotoThumbnailLoader {
                 guard !resumed else { return }
 
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if isDegraded { return }
+                if isDegraded {
+                    bestImage = image
+                    print("[ThumbLoader] photos-request degraded id=\(requestId) localIdentifier=\(asset.localIdentifier)")
+                    return
+                }
+
+                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let errorText = (info?[PHImageErrorKey] as? NSError).map { "\($0.domain)(\($0.code)) \($0.localizedDescription)" } ?? "none"
 
                 resumed = true
+                print("[ThumbLoader] photos-request done id=\(requestId) localIdentifier=\(asset.localIdentifier) success=\(image != nil) cancelled=\(cancelled) error=\(errorText)")
                 continuation.resume(returning: image)
             }
         }
