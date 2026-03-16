@@ -303,12 +303,20 @@ struct ImportCurationBucketListView: View {
                 items: previewItems,
                 selection: $previewSelection,
                 keepIds: $previewKeepIds,
+                isTrashMode: isTrashMode,
                 locatorKeyForRow: { row in locatorKey(for: row) },
+                displayNameForRow: { row in displayName(for: row) },
                 onApplyGroupKeep: { selectedId, allIds in
                     await applyGroupKeep(selectedId: selectedId, allIds: allIds)
                 },
                 onApplyGroupKeepMultiple: { keepIds, allIds in
                     await applyGroupKeepMultiple(groupId: previewGroupId ?? "", allIds: allIds)
+                },
+                onRecoverSelected: { ids in
+                    await recoverSelectedFromPreview(ids: ids)
+                },
+                onDeleteSelected: { rows in
+                    await promptDeleteRows(rows)
                 }
             ) { rowId, bucket in
                 await applyFromPreview(rowId: rowId, bucket: bucket)
@@ -687,6 +695,31 @@ struct ImportCurationBucketListView: View {
         }
     }
 
+    private func recoverSelectedFromPreview(ids: [UUID]) async {
+        guard !ids.isEmpty else { return }
+
+        do {
+            try await updateRows(ids: ids, target: .keep)
+            await load()
+            await MainActor.run {
+                if let groupId = previewGroupId {
+                    keepSelections[groupId] = []
+                }
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("已恢复 \(ids.count) 张")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func promptDeleteRows(_ rows: [Row]) async {
+        guard !rows.isEmpty else { return }
+        await prepareDeleteConfirmation(scope: .current, targetsOverride: rows)
+    }
+
     private func recoverSelected(groupId: String, allIds: [UUID]) async {
         guard !allIds.isEmpty else { return }
         let keepIds = selectedArchivedIds(groupId: groupId)
@@ -851,12 +884,32 @@ private struct GroupPreviewSheet: View {
     let items: [Row]
     @Binding var selection: UUID?
     @Binding var keepIds: Set<UUID>
+    let isTrashMode: Bool
     let locatorKeyForRow: (Row) -> String
+    let displayNameForRow: (Row) -> String
     let onApplyGroupKeep: @Sendable (UUID, [UUID]) async -> Void
     let onApplyGroupKeepMultiple: @Sendable ([UUID], [UUID]) async -> Void
+    let onRecoverSelected: @Sendable ([UUID]) async -> Void
+    let onDeleteSelected: @Sendable ([Row]) async -> Void
     let onApply: @Sendable (UUID, ImportDecisionBucket) async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var isApplying = false
+
+    private func isArchived(_ row: Row) -> Bool {
+        row.curationBucket == ImportDecisionBucket.archived.rawValue
+    }
+
+    private func selectedArchivedIds() -> [UUID] {
+        let selected = keepIds
+        guard !selected.isEmpty else { return [] }
+        return items.filter { selected.contains($0.id) && isArchived($0) }.map(\.id)
+    }
+
+    private func selectedArchivedRows() -> [Row] {
+        let selected = keepIds
+        guard !selected.isEmpty else { return [] }
+        return items.filter { selected.contains($0.id) && isArchived($0) }
+    }
 
     private var currentItem: Row? {
         guard let sel = selection else { return items.first }
@@ -890,12 +943,22 @@ private struct GroupPreviewSheet: View {
                                             .background(Color.black)
 
                                         HStack(spacing: 6) {
-                                            if recommendedItem?.id == item.id {
+                                            if !isTrashMode, recommendedItem?.id == item.id {
                                                 Text("AI推荐")
                                                     .font(.caption2.weight(.semibold))
                                                     .padding(.horizontal, 8)
                                                     .padding(.vertical, 4)
                                                     .background(Color.yellow.opacity(0.85))
+                                                    .foregroundStyle(.black)
+                                                    .clipShape(Capsule())
+                                            }
+
+                                            if isTrashMode, !isArchived(item) {
+                                                Text("已保留")
+                                                    .font(.caption2.weight(.semibold))
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 4)
+                                                    .background(Color.white.opacity(0.85))
                                                     .foregroundStyle(.black)
                                                     .clipShape(Capsule())
                                             }
@@ -911,9 +974,16 @@ private struct GroupPreviewSheet: View {
                                         .padding(.top, 12)
                                     }
 
-                                    Text(topSubtitle(for: item))
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.9))
+                                    VStack(spacing: 6) {
+                                        Text(displayNameForRow(item))
+                                            .font(.callout.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+
+                                        Text(topSubtitle(for: item))
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.9))
+                                    }
                                 }
                             }
                             .tag(item.id as UUID?)
@@ -932,34 +1002,83 @@ private struct GroupPreviewSheet: View {
 
                     if let current = currentItem {
                         HStack(spacing: 10) {
-                            Button {
-                                if keepIds.contains(current.id) {
-                                    keepIds.remove(current.id)
-                                } else {
-                                    keepIds.insert(current.id)
+                            if isTrashMode {
+                                Button {
+                                    if keepIds.contains(current.id) {
+                                        keepIds.remove(current.id)
+                                    } else if isArchived(current) {
+                                        keepIds.insert(current.id)
+                                    }
+                                } label: {
+                                    Text(keepIds.contains(current.id) ? "取消选择" : "选择这张")
+                                        .font(.callout.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
                                 }
-                            } label: {
-                                Text(keepIds.contains(current.id) ? "取消保留" : "保留这张")
-                                    .font(.callout.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                            }
-                            .buttonStyle(.borderedProminent)
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!isArchived(current))
 
-                            Button {
-                                Task {
-                                    isApplying = true
-                                    await onApplyGroupKeepMultiple(Array(keepIds), items.map(\.id))
-                                    isApplying = false
-                                    dismiss()
+                                Button {
+                                    Task {
+                                        isApplying = true
+                                        await onRecoverSelected(selectedArchivedIds())
+                                        isApplying = false
+                                        dismiss()
+                                    }
+                                } label: {
+                                    Text("恢复已选")
+                                        .font(.callout.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
                                 }
-                            } label: {
-                                Text("删除其他")
-                                    .font(.callout.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
+                                .buttonStyle(.bordered)
+                                .disabled(selectedArchivedIds().isEmpty)
+
+                                Button {
+                                    Task {
+                                        isApplying = true
+                                        await onDeleteSelected(selectedArchivedRows())
+                                        isApplying = false
+                                        dismiss()
+                                    }
+                                } label: {
+                                    Text("彻底删除")
+                                        .font(.callout.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(selectedArchivedIds().isEmpty)
+                            } else {
+                                Button {
+                                    if keepIds.contains(current.id) {
+                                        keepIds.remove(current.id)
+                                    } else {
+                                        keepIds.insert(current.id)
+                                    }
+                                } label: {
+                                    Text(keepIds.contains(current.id) ? "取消保留" : "保留这张")
+                                        .font(.callout.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                Button {
+                                    Task {
+                                        isApplying = true
+                                        await onApplyGroupKeepMultiple(Array(keepIds), items.map(\.id))
+                                        isApplying = false
+                                        dismiss()
+                                    }
+                                } label: {
+                                    Text("删除其他")
+                                        .font(.callout.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.bordered)
                         }
                         .disabled(isApplying)
                         .padding(.horizontal, 12)
@@ -975,7 +1094,7 @@ private struct GroupPreviewSheet: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    if let recommended = recommendedItem {
+                    if !isTrashMode, let recommended = recommendedItem {
                         Button("智能保留最佳") {
                             Task {
                                 isApplying = true
@@ -1010,7 +1129,7 @@ private struct GroupPreviewSheet: View {
                         selection = item.id
                         if keepIds.contains(item.id) {
                             keepIds.remove(item.id)
-                        } else {
+                        } else if !isTrashMode || isArchived(item) {
                             keepIds.insert(item.id)
                         }
                     } label: {
@@ -1020,6 +1139,7 @@ private struct GroupPreviewSheet: View {
                                     RoundedRectangle(cornerRadius: 8)
                                         .stroke(keepIds.contains(item.id) ? Color.yellow : Color.clear, lineWidth: keepIds.contains(item.id) ? 2 : 0)
                                 }
+                                .opacity(isTrashMode && !isArchived(item) ? 0.6 : 1)
 
                             if item.id == selection {
                                 Text("当前")
@@ -1041,10 +1161,20 @@ private struct GroupPreviewSheet: View {
                                     .foregroundStyle(.black)
                                     .clipShape(Capsule())
                                     .offset(x: 4, y: 24)
+                            } else if isTrashMode, !isArchived(item) {
+                                Text("已保留")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.85))
+                                    .foregroundStyle(.black)
+                                    .clipShape(Capsule())
+                                    .offset(x: 4, y: 24)
                             }
                         }
                     }
                     .buttonStyle(.plain)
+                    .disabled(isTrashMode && !isArchived(item))
                 }
             }
             .padding(.vertical, 4)
