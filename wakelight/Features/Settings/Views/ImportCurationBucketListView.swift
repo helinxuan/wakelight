@@ -218,21 +218,12 @@ struct ImportCurationBucketListView: View {
                                     .buttonStyle(.bordered)
                                     .disabled(selectedArchivedIds(groupId: group.id).isEmpty)
                                 } else {
-                                    Button("保留已选") {
+                                    Button("删除其他") {
                                         Task {
-                                            await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
+                                            await applyKeepBestForGroup(group)
                                         }
                                     }
                                     .buttonStyle(.borderedProminent)
-                                    .disabled(keepIds.isEmpty)
-
-                                    Button("删除其他") {
-                                        Task {
-                                            await applyGroupKeepMultiple(groupId: group.id, allIds: group.items.map(\.id))
-                                        }
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .disabled(keepIds.isEmpty)
                                 }
                             }
                             .font(.caption)
@@ -716,10 +707,56 @@ struct ImportCurationBucketListView: View {
     }
 
     private func applyKeepBestForAllGroups() async {
-        for group in groupedDisplayItems {
+        let groups = groupedDisplayItems
+        guard !groups.isEmpty else { return }
+
+        var keepIds: [UUID] = []
+        var archivedIds: [UUID] = []
+
+        for group in groups {
             if let best = group.recommended {
-                let allIds = group.items.map(\.id)
-                await applyGroupKeep(selectedId: best.id, allIds: allIds)
+                keepIds.append(best.id)
+                archivedIds.append(contentsOf: group.items.filter { $0.id != best.id }.map(\.id))
+            }
+        }
+
+        guard !keepIds.isEmpty else { return }
+
+        do {
+            try await updateRows(ids: keepIds, target: .keep)
+            if !archivedIds.isEmpty {
+                try await updateRows(ids: archivedIds, target: .archived)
+            }
+            await load()
+            await MainActor.run {
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("操作成功：保留 \(keepIds.count)，归档 \(archivedIds.count)")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func applyKeepBestForGroup(_ group: DisplayGroup) async {
+        guard let best = group.recommended else { return }
+        let allIds = group.items.map(\.id)
+        let archivedIds = allIds.filter { $0 != best.id }
+
+        do {
+            try await updateRows(ids: [best.id], target: .keep)
+            if !archivedIds.isEmpty {
+                try await updateRows(ids: archivedIds, target: .archived)
+            }
+            await load()
+            await MainActor.run {
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("操作成功：保留 1，归档 \(archivedIds.count)")
+            }
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
             }
         }
     }
@@ -924,7 +961,7 @@ struct ImportCurationBucketListView: View {
     private var screenTitle: String {
         let groupCount = groupedDisplayItems.count
         let total = groupedDisplayItems.reduce(0) { $0 + $1.items.count }
-        return "\(filter.title)（\(groupCount) 组 · 共 \(total) 张重复照片）"
+        return filter.title
     }
 }
 
@@ -1056,21 +1093,6 @@ private struct GroupPreviewSheet: View {
                         HStack(spacing: 10) {
                             if isTrashMode {
                                 Button {
-                                    if keepIds.contains(current.id) {
-                                        keepIds.remove(current.id)
-                                    } else if isArchived(current) {
-                                        keepIds.insert(current.id)
-                                    }
-                                } label: {
-                                    Text(keepIds.contains(current.id) ? "取消选择" : "选择这张")
-                                        .font(.callout.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(!isArchived(current))
-
-                                Button {
                                     Task {
                                         isApplying = true
                                         await onRecoverSelected(selectedArchivedIds())
@@ -1083,7 +1105,7 @@ private struct GroupPreviewSheet: View {
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 12)
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.borderedProminent)
                                 .disabled(selectedArchivedIds().isEmpty)
 
                                 Button {
@@ -1103,23 +1125,9 @@ private struct GroupPreviewSheet: View {
                                 .disabled(selectedArchivedIds().isEmpty)
                             } else {
                                 Button {
-                                    if keepIds.contains(current.id) {
-                                        keepIds.remove(current.id)
-                                    } else {
-                                        keepIds.insert(current.id)
-                                    }
-                                } label: {
-                                    Text(keepIds.contains(current.id) ? "取消保留" : "保留这张")
-                                        .font(.callout.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                }
-                                .buttonStyle(.borderedProminent)
-
-                                Button {
                                     Task {
                                         isApplying = true
-                                        await onApplyGroupKeepMultiple(Array(keepIds), items.map(\.id))
+                                        await onApplyGroupKeep(current.id, items.map(\.id))
                                         isApplying = false
                                         dismiss()
                                     }
@@ -1129,7 +1137,7 @@ private struct GroupPreviewSheet: View {
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 12)
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.borderedProminent)
                             }
                         }
                         .disabled(isApplying)
@@ -1146,16 +1154,8 @@ private struct GroupPreviewSheet: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    if !isTrashMode, let recommended = recommendedItem {
-                        Button("智能保留最佳") {
-                            Task {
-                                isApplying = true
-                                await onApplyGroupKeep(recommended.id, items.map(\.id))
-                                isApplying = false
-                                dismiss()
-                            }
-                        }
-                        .disabled(isApplying)
+                    if !isTrashMode {
+                        EmptyView()
                     }
                 }
             }
