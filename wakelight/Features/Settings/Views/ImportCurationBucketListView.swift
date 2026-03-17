@@ -39,6 +39,14 @@ struct ImportCurationBucketListView: View {
         let message: String
     }
 
+    private struct PreviewPayload: Identifiable {
+        let id = UUID()
+        var items: [Row]
+        var selection: UUID?
+        var groupId: String
+        var keepIds: Set<UUID>
+    }
+
     private enum DeleteScope {
         case current
         case all
@@ -65,11 +73,7 @@ struct ImportCurationBucketListView: View {
     @State private var errorAlert: ErrorMessage?
 
 
-    @State private var previewItems: [Row] = []
-    @State private var previewSelection: UUID?
-    @State private var previewKeepIds = Set<UUID>()
-    @State private var previewGroupId: String?
-    @State private var isShowingPreview = false
+    @State private var previewPayload: PreviewPayload?
 
     @State private var displayNameMap: [String: String] = [:]
     @State private var locatorKeyMap: [UUID: String] = [:]
@@ -298,11 +302,17 @@ struct ImportCurationBucketListView: View {
         } message: {
             Text(deleteMessage)
         }
-        .fullScreenCover(isPresented: $isShowingPreview) {
+        .fullScreenCover(item: $previewPayload) { payload in
             GroupPreviewSheet(
-                items: previewItems,
-                selection: $previewSelection,
-                keepIds: $previewKeepIds,
+                items: payload.items,
+                selection: Binding(
+                    get: { previewPayload?.selection },
+                    set: { previewPayload?.selection = $0 }
+                ),
+                keepIds: Binding(
+                    get: { previewPayload?.keepIds ?? [] },
+                    set: { previewPayload?.keepIds = $0 }
+                ),
                 isTrashMode: isTrashMode,
                 locatorKeyForRow: { row in locatorKey(for: row) },
                 displayNameForRow: { row in displayName(for: row) },
@@ -310,7 +320,7 @@ struct ImportCurationBucketListView: View {
                     await applyGroupKeep(selectedId: selectedId, allIds: allIds)
                 },
                 onApplyGroupKeepMultiple: { keepIds, allIds in
-                    await applyGroupKeepMultiple(groupId: previewGroupId ?? "", allIds: allIds)
+                    await applyGroupKeepMultiple(groupId: payload.groupId, allIds: allIds)
                 },
                 onRecoverSelected: { ids in
                     await recoverSelectedFromPreview(ids: ids)
@@ -322,11 +332,8 @@ struct ImportCurationBucketListView: View {
                 await applyFromPreview(rowId: rowId, bucket: bucket)
             }
             .onDisappear {
-                if let groupId = previewGroupId {
-                    keepSelections[groupId] = previewKeepIds
-                }
-                previewKeepIds = []
-                previewGroupId = nil
+                keepSelections[payload.groupId] = previewPayload?.keepIds ?? []
+                previewPayload = nil
             }
         }
         .task {
@@ -374,7 +381,11 @@ struct ImportCurationBucketListView: View {
             var grouped: [String: [Row]] = [:]
             for item in fetched + groupRows {
                 guard let gid = item.burstGroupId else { continue }
-                grouped[gid, default: []].append(item)
+                var items = grouped[gid, default: []]
+                if !items.contains(where: { $0.id == item.id }) {
+                    items.append(item)
+                }
+                grouped[gid] = items
             }
 
             let allRows = fetched + groupRows
@@ -594,6 +605,7 @@ struct ImportCurationBucketListView: View {
         }
     }
 
+    @MainActor
     private func openPreview(for row: Row, in siblings: [Row]?) {
         let sorted: [Row]
         if let siblings, !siblings.isEmpty {
@@ -602,18 +614,23 @@ struct ImportCurationBucketListView: View {
             sorted = [row]
         }
 
-        previewItems = sorted
-        previewSelection = row.id
-        previewGroupId = sorted.first?.burstGroupId ?? row.id.uuidString
-        previewKeepIds = keepSelections[previewGroupId ?? ""] ?? []
+        let groupId = sorted.first?.burstGroupId ?? row.id.uuidString
+        let keepIds = keepSelections[groupId] ?? []
+
+        previewPayload = PreviewPayload(
+            items: sorted,
+            selection: row.id,
+            groupId: groupId,
+            keepIds: keepIds
+        )
 
         let key = locatorKey(for: row)
+        print("[CurationPreview] open locator=\(key) rowId=\(row.id) groupId=\(groupId) items=\(sorted.count)")
+
         Task(priority: .userInitiated) {
             _ = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: key, size: CGSize(width: 1200, height: 1200))
             _ = await PhotoThumbnailLoader.shared.loadFullImage(locatorKey: key)
         }
-
-        isShowingPreview = true
     }
 
     private func applyFromPreview(rowId: UUID, bucket: ImportDecisionBucket) async {
@@ -629,7 +646,11 @@ struct ImportCurationBucketListView: View {
             await load()
             await MainActor.run {
                 if let updated = rows.first(where: { $0.id == rowId }) {
-                    previewItems = previewItems.map { $0.id == rowId ? updated : $0 }
+                    if let payload = previewPayload {
+                        var updatedPayload = payload
+                        updatedPayload.items = payload.items.map { $0.id == rowId ? updated : $0 }
+                        previewPayload = updatedPayload
+                    }
                 }
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("操作成功：1 项")
@@ -702,7 +723,7 @@ struct ImportCurationBucketListView: View {
             try await updateRows(ids: ids, target: .keep)
             await load()
             await MainActor.run {
-                if let groupId = previewGroupId {
+                if let groupId = previewPayload?.groupId {
                     keepSelections[groupId] = []
                 }
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
@@ -973,6 +994,10 @@ private struct GroupPreviewSheet: View {
                                         .padding(.trailing, 12)
                                         .padding(.top, 12)
                                     }
+                                    .onAppear {
+                                        let key = locatorKeyForRow(item)
+                                        print("[GroupPreview] item appear locator=\(key) id=\(item.id)")
+                                    }
 
                                     VStack(spacing: 6) {
                                         Text(displayNameForRow(item))
@@ -1109,6 +1134,7 @@ private struct GroupPreviewSheet: View {
             }
         }
         .onAppear {
+            print("[GroupPreview] sheet appear items=\(items.count) selection=\(selection?.uuidString ?? "nil")")
             if selection == nil {
                 selection = recommendedItem?.id ?? items.first?.id
             }

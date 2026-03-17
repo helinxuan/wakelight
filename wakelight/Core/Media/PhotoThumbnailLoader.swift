@@ -606,21 +606,35 @@ struct FullImageView: View {
             }
         }
         .task(id: locatorKey) {
-            isLoading = true
-            
-            // 1. 优先从磁盘缓存读取缩略图作为极速预览
-            image = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: CGSize(width: 320, height: 320))
-            
-            // 2. 如果没能加载到缩略图（比如还没落盘），则尝试加载一个中等尺寸的作为预览（走内存缓存/即时解码）
-            if image == nil {
-                image = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: 800, height: 800))
+            await MainActor.run {
+                isLoading = true
+                image = nil
             }
-            
+
+            // 1. 优先从磁盘缓存读取缩略图作为极速预览
+            let diskPreview = await PhotoThumbnailLoader.shared.loadThumbnailWithDiskCache(locatorKey: locatorKey, size: CGSize(width: 320, height: 320))
+            await MainActor.run {
+                image = diskPreview
+            }
+
+            // 2. 如果没能加载到缩略图（比如还没落盘），则尝试加载一个中等尺寸的作为预览（走内存缓存/即时解码）
+            if diskPreview == nil {
+                let fallbackPreview = await PhotoThumbnailLoader.shared.loadThumbnail(locatorKey: locatorKey, size: CGSize(width: 800, height: 800))
+                await MainActor.run {
+                    image = fallbackPreview
+                }
+            }
+
             // 3. 最后加载全量大图
             if let fullRes = await PhotoThumbnailLoader.shared.loadFullImage(locatorKey: locatorKey) {
-                image = fullRes
+                await MainActor.run {
+                    image = fullRes
+                }
             }
-            isLoading = false
+
+            await MainActor.run {
+                isLoading = false
+            }
         }
     }
 }
