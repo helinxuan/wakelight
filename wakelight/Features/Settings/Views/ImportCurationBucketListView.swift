@@ -356,7 +356,7 @@ struct ImportCurationBucketListView: View {
                 }
 
                 return try query
-                    .order(Column("bestShotScore").desc)
+                    .order(Column("creationDate").desc, Column("bestShotScore").desc)
                     .fetchAll(db)
             }
 
@@ -369,6 +369,14 @@ struct ImportCurationBucketListView: View {
                         .filter(groupIds.contains(Column("burstGroupId")))
                         .filter(Column("curationBucket") == ImportDecisionBucket.keep.rawValue)
                         .order(Column("bestShotScore").desc)
+                        .fetchAll(db)
+                }
+
+                if filter == .review {
+                    return try Row
+                        .filter(groupIds.contains(Column("burstGroupId")))
+                        .filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue)
+                        .order(Column("creationDate").desc, Column("bestShotScore").desc)
                         .fetchAll(db)
                 }
 
@@ -690,7 +698,7 @@ struct ImportCurationBucketListView: View {
         let archivedIds = allIds.filter { !keepIds.contains($0) }
 
         do {
-            try await updateRows(ids: keepIds, target: .keep)
+            try await updateRows(ids: keepIds, target: .review)
             if !archivedIds.isEmpty {
                 try await updateRows(ids: archivedIds, target: .archived)
             }
@@ -720,7 +728,7 @@ struct ImportCurationBucketListView: View {
         guard !ids.isEmpty else { return }
 
         do {
-            try await updateRows(ids: ids, target: .keep)
+            try await updateRows(ids: ids, target: .review)
             await load()
             await MainActor.run {
                 if let groupId = previewPayload?.groupId {
@@ -743,16 +751,16 @@ struct ImportCurationBucketListView: View {
 
     private func recoverSelected(groupId: String, allIds: [UUID]) async {
         guard !allIds.isEmpty else { return }
-        let keepIds = selectedArchivedIds(groupId: groupId)
-        guard !keepIds.isEmpty else { return }
+        let ids = selectedArchivedIds(groupId: groupId)
+        guard !ids.isEmpty else { return }
 
         do {
-            try await updateRows(ids: keepIds, target: .keep)
+            try await updateRows(ids: ids, target: .review)
             await load()
             await MainActor.run {
                 keepSelections[groupId] = []
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                showSuccessToast("已恢复 \(keepIds.count) 张")
+                showSuccessToast("已恢复 \(ids.count) 张")
             }
         } catch {
             await MainActor.run {
@@ -772,7 +780,7 @@ struct ImportCurationBucketListView: View {
                 return
             }
 
-            try await updateRows(ids: ids, target: .keep)
+            try await updateRows(ids: ids, target: .review)
             await load()
             await MainActor.run {
                 keepSelections = [:]
@@ -887,10 +895,29 @@ struct ImportCurationBucketListView: View {
         if grouped.isEmpty {
             return rows.map { DisplayGroup(id: $0.id.uuidString, items: [$0]) }
         }
-        return grouped.map { items in
+
+        let groups = grouped.map { items in
             let sorted = items.sorted { ($0.bestShotScore ?? 0) > ($1.bestShotScore ?? 0) }
             let id = sorted.first?.burstGroupId ?? sorted.first?.id.uuidString ?? UUID().uuidString
             return DisplayGroup(id: id, items: sorted)
+        }
+
+        if isTrashMode {
+            return groups.sorted { lhs, rhs in
+                let lhsKey = lhs.latestArchivedAt ?? .distantPast
+                let rhsKey = rhs.latestArchivedAt ?? .distantPast
+                if lhsKey != rhsKey { return lhsKey > rhsKey }
+                if lhs.bestScore != rhs.bestScore { return lhs.bestScore > rhs.bestScore }
+                return lhs.id < rhs.id
+            }
+        }
+
+        return groups.sorted { lhs, rhs in
+            let lhsDate = lhs.latestCreationDate ?? .distantPast
+            let rhsDate = rhs.latestCreationDate ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            if lhs.bestScore != rhs.bestScore { return lhs.bestScore > rhs.bestScore }
+            return lhs.id < rhs.id
         }
     }
 
@@ -1279,6 +1306,7 @@ private struct Row: Identifiable, FetchableRecord, TableRecord, Decodable {
 
     var id: UUID
     var localIdentifier: String?
+    var creationDate: Date?
     var bestShotScore: Double?
     var selectionReason: String?
     var curationBucket: String?
@@ -1296,6 +1324,18 @@ private struct DisplayGroup: Identifiable {
 
     var representative: Row {
         recommended ?? items.first!
+    }
+
+    var bestScore: Double {
+        items.map { $0.bestShotScore ?? 0 }.max() ?? 0
+    }
+
+    var latestArchivedAt: Date? {
+        items.compactMap(\.archivedAt).max()
+    }
+
+    var latestCreationDate: Date? {
+        items.compactMap(\.creationDate).max()
     }
 
     var keptRepresentative: Row? {
