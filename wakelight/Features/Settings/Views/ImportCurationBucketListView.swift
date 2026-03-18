@@ -78,6 +78,7 @@ struct ImportCurationBucketListView: View {
     @State private var displayNameMap: [String: String] = [:]
     @State private var locatorKeyMap: [UUID: String] = [:]
     @State private var keepSelections: [String: Set<UUID>] = [:]
+    @State private var groupSortKeyMap: [String: Date] = [:]
 
     @State private var deleteScope: DeleteScope = .current
     @State private var showDeleteConfirm = false
@@ -139,7 +140,15 @@ struct ImportCurationBucketListView: View {
                                                 .clipShape(Capsule())
                                         }
 
-                                        if isTrashMode, !isArchived(group.representative) {
+                                        if !isTrashMode, group.representative.curationBucket == ImportDecisionBucket.keep.rawValue {
+                                            Text("已保留")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(Color.white.opacity(0.85))
+                                                .foregroundStyle(.black)
+                                                .clipShape(Capsule())
+                                        } else if isTrashMode, !isArchived(group.representative) {
                                             Text("已保留")
                                                 .font(.caption2.weight(.semibold))
                                                 .padding(.horizontal, 8)
@@ -182,6 +191,15 @@ struct ImportCurationBucketListView: View {
                                                             .foregroundStyle(.black)
                                                             .clipShape(Capsule())
                                                             .offset(x: 4, y: 4)
+                                                    } else if !isTrashMode, item.curationBucket == ImportDecisionBucket.keep.rawValue {
+                                                        Text("已保留")
+                                                            .font(.system(size: 9, weight: .semibold))
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color.white.opacity(0.85))
+                                                            .foregroundStyle(.black)
+                                                            .clipShape(Capsule())
+                                                            .offset(x: 4, y: 4)
                                                     } else if isTrashMode, !isArchived(item) {
                                                         Text("已保留")
                                                             .font(.system(size: 9, weight: .semibold))
@@ -220,7 +238,7 @@ struct ImportCurationBucketListView: View {
                                 } else {
                                     Button("删除其他") {
                                         Task {
-                                            await applyKeepBestForGroup(group)
+                                            await applyDeleteOthersForGroup(groupId: group.id, items: group.items)
                                         }
                                     }
                                     .buttonStyle(.borderedProminent)
@@ -366,7 +384,10 @@ struct ImportCurationBucketListView: View {
                 if filter == .review {
                     return try Row
                         .filter(groupIds.contains(Column("burstGroupId")))
-                        .filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue)
+                        .filter([
+                            ImportDecisionBucket.review.rawValue,
+                            ImportDecisionBucket.keep.rawValue
+                        ].contains(Column("curationBucket")))
                         .order(Column("creationDate").desc, Column("bestShotScore").desc)
                         .fetchAll(db)
                 }
@@ -392,11 +413,19 @@ struct ImportCurationBucketListView: View {
             let locators = await loadLocatorMap(photoIds: allIds)
             let names = await resolveDisplayNames(rows: allRows, locatorMap: locators)
 
+            let groupSortKeys = await groupSortKeyMap(groupIds: Array(grouped.keys))
+
+            print("[Curation] load filter=\(filter.rawValue) rows=\(fetched.count) groups=\(grouped.count)")
+            if filter == .review && !fetched.isEmpty {
+                print("[Curation] review ids=\(fetched.map(\.id).map(String.init).joined(separator: ","))")
+            }
+
             await MainActor.run {
                 rows = fetched
                 groupedRows = grouped
                 locatorKeyMap = locators
                 displayNameMap = names
+                groupSortKeyMap = groupSortKeys
                 isLoading = false
             }
         } catch {
@@ -579,10 +608,33 @@ struct ImportCurationBucketListView: View {
             return try await DatabaseContainer.shared.db.reader.read { db in
                 try Row
                     .filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue)
-                    .order(Column("bestShotScore").desc)
+                    .order(Column("archivedAt").desc, Column("bestShotScore").desc)
                     .fetchAll(db)
             }
         }
+    }
+
+    private func groupSortKeyMap(groupIds: [String]) async -> [String: Date] {
+        guard !groupIds.isEmpty else { return [:] }
+
+        return (try? await DatabaseContainer.shared.db.reader.read { db in
+            let rows = try Row
+                .filter(groupIds.contains(Column("burstGroupId")))
+                .filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue)
+                .fetchAll(db)
+
+            var result: [String: Date] = [:]
+            for row in rows {
+                guard let groupId = row.burstGroupId else { continue }
+                guard let createdAt = row.creationDate else { continue }
+                if let existing = result[groupId] {
+                    if createdAt > existing { result[groupId] = createdAt }
+                } else {
+                    result[groupId] = createdAt
+                }
+            }
+            return result
+        }) ?? [:]
     }
 
     private func deleteLocalAssets(localIdentifiers: [String]) async throws {
@@ -689,7 +741,7 @@ struct ImportCurationBucketListView: View {
         let archivedIds = allIds.filter { !keepIds.contains($0) }
 
         do {
-            try await updateRows(ids: keepIds, target: .review)
+            try await updateRows(ids: keepIds, target: .keep)
             if !archivedIds.isEmpty {
                 try await updateRows(ids: archivedIds, target: .archived)
             }
@@ -739,21 +791,30 @@ struct ImportCurationBucketListView: View {
         }
     }
 
-    private func applyKeepBestForGroup(_ group: DisplayGroup) async {
-        guard let best = group.recommended else { return }
-        let allIds = group.items.map(\.id)
-        let archivedIds = allIds.filter { $0 != best.id }
+    private func applyDeleteOthersForGroup(groupId: String, items: [Row]) async {
+        let selectedIds = Array(keepSelections[groupId] ?? [])
+        guard !selectedIds.isEmpty else {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: "请先选择要保留的照片")
+            }
+            return
+        }
+
+        let allIds = items.map(\.id)
+        let archivedIds = allIds.filter { !selectedIds.contains($0) }
 
         do {
-            try await updateRows(ids: [best.id], target: .keep)
+            try await updateRows(ids: selectedIds, target: .keep)
             if !archivedIds.isEmpty {
                 try await updateRows(ids: archivedIds, target: .archived)
             }
             await load()
             await MainActor.run {
+                keepSelections[groupId] = []
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                showSuccessToast("操作成功：保留 1，归档 \(archivedIds.count)")
+                showSuccessToast("操作成功：保留 \(selectedIds.count)，归档 \(archivedIds.count)")
             }
+            await logGroupState(ids: selectedIds + archivedIds, context: "delete-others")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -774,6 +835,7 @@ struct ImportCurationBucketListView: View {
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("已恢复 \(ids.count) 张")
             }
+            await logGroupState(ids: ids, context: "recover-selected-preview")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -784,6 +846,24 @@ struct ImportCurationBucketListView: View {
     private func promptDeleteRows(_ rows: [Row]) async {
         guard !rows.isEmpty else { return }
         await prepareDeleteConfirmation(scope: .current, targetsOverride: rows)
+    }
+
+    private func logGroupState(ids: [UUID], context: String) async {
+        guard !ids.isEmpty else { return }
+
+        do {
+            let payload = try await DatabaseContainer.shared.db.reader.read { db in
+                try PhotoAsset
+                    .filter(ids.contains(Column("id")))
+                    .fetchAll(db)
+                    .map { asset in
+                        "id=\(asset.id) bucket=\(asset.curationBucket ?? "-") group=\(asset.burstGroupId ?? "-") created=\(asset.creationDate?.description ?? "-") archivedAt=\(asset.archivedAt?.description ?? "-")"
+                    }
+            }
+            print("[Curation][\(context)]\n" + payload.joined(separator: "\n"))
+        } catch {
+            print("[Curation][\(context)] failed: \(error)")
+        }
     }
 
     private func recoverSelected(groupId: String, allIds: [UUID]) async {
@@ -799,6 +879,7 @@ struct ImportCurationBucketListView: View {
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("已恢复 \(ids.count) 张")
             }
+            await logGroupState(ids: ids, context: "recover-selected")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -824,6 +905,7 @@ struct ImportCurationBucketListView: View {
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("已恢复 \(ids.count) 张")
             }
+            await logGroupState(ids: ids, context: "recover-all")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -928,15 +1010,17 @@ struct ImportCurationBucketListView: View {
     }
 
     private var groupedDisplayItems: [DisplayGroup] {
-        let grouped = groupedRows.values.filter { $0.count > 1 }
-        if grouped.isEmpty {
-            return rows.map { DisplayGroup(id: $0.id.uuidString, items: [$0]) }
-        }
+        let grouped = Array(groupedRows.values)
+        let groupedIds = Set(grouped.flatMap { $0.map(\.id) })
+        let singletonItems = rows.filter { !groupedIds.contains($0.id) }
 
-        let groups = grouped.map { items in
+        var groups = grouped.map { items in
             let sorted = items.sorted { ($0.bestShotScore ?? 0) > ($1.bestShotScore ?? 0) }
             let id = sorted.first?.burstGroupId ?? sorted.first?.id.uuidString ?? UUID().uuidString
             return DisplayGroup(id: id, items: sorted)
+        }
+        if !singletonItems.isEmpty {
+            groups.append(contentsOf: singletonItems.map { DisplayGroup(id: $0.id.uuidString, items: [$0]) })
         }
 
         if isTrashMode {
@@ -950,8 +1034,8 @@ struct ImportCurationBucketListView: View {
         }
 
         return groups.sorted { lhs, rhs in
-            let lhsDate = lhs.latestCreationDate ?? .distantPast
-            let rhsDate = rhs.latestCreationDate ?? .distantPast
+            let lhsDate = groupSortKeyMap[lhs.id] ?? lhs.latestCreationDate ?? .distantPast
+            let rhsDate = groupSortKeyMap[rhs.id] ?? rhs.latestCreationDate ?? .distantPast
             if lhsDate != rhsDate { return lhsDate > rhsDate }
             if lhs.bestScore != rhs.bestScore { return lhs.bestScore > rhs.bestScore }
             return lhs.id < rhs.id
