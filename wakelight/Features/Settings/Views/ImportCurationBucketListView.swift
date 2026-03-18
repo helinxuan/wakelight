@@ -140,15 +140,7 @@ struct ImportCurationBucketListView: View {
                                                 .clipShape(Capsule())
                                         }
 
-                                        if !isTrashMode, group.representative.curationBucket == ImportDecisionBucket.keep.rawValue {
-                                            Text("已保留")
-                                                .font(.caption2.weight(.semibold))
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 4)
-                                                .background(Color.white.opacity(0.85))
-                                                .foregroundStyle(.black)
-                                                .clipShape(Capsule())
-                                        } else if isTrashMode, !isArchived(group.representative) {
+                                        if isTrashMode, !isArchived(group.representative) {
                                             Text("已保留")
                                                 .font(.caption2.weight(.semibold))
                                                 .padding(.horizontal, 8)
@@ -188,15 +180,6 @@ struct ImportCurationBucketListView: View {
                                                             .padding(.horizontal, 6)
                                                             .padding(.vertical, 2)
                                                             .background(Color.yellow.opacity(0.85))
-                                                            .foregroundStyle(.black)
-                                                            .clipShape(Capsule())
-                                                            .offset(x: 4, y: 4)
-                                                    } else if !isTrashMode, item.curationBucket == ImportDecisionBucket.keep.rawValue {
-                                                        Text("已保留")
-                                                            .font(.system(size: 9, weight: .semibold))
-                                                            .padding(.horizontal, 6)
-                                                            .padding(.vertical, 2)
-                                                            .background(Color.white.opacity(0.85))
                                                             .foregroundStyle(.black)
                                                             .clipShape(Capsule())
                                                             .offset(x: 4, y: 4)
