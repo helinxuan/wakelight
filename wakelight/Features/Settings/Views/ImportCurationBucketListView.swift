@@ -84,6 +84,8 @@ struct ImportCurationBucketListView: View {
     @State private var showDeleteConfirm = false
     @State private var deleteMessage: String = ""
     @State private var deleteTargets: [Row]? = nil
+    @State private var showArchiveSingleConfirm = false
+    @State private var archiveSingleTarget: Row? = nil
 
 
     var body: some View {
@@ -150,7 +152,7 @@ struct ImportCurationBucketListView: View {
                                                 .clipShape(Capsule())
                                         }
 
-                                        Text("清晰度 \(String(format: "%.1f", group.representative.bestShotScore ?? 0))")
+                                        Text("评分 \(String(format: "%.1f", group.representative.bestShotScore ?? 0))")
                                             .font(.caption2)
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
@@ -293,6 +295,16 @@ struct ImportCurationBucketListView: View {
             }
         } message: {
             Text(deleteMessage)
+        }
+        .alert("删除这张照片？", isPresented: $showArchiveSingleConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("删除这张", role: .destructive) {
+                Task {
+                    await archiveSingleInGroup()
+                }
+            }
+        } message: {
+            Text("该组只有一张照片，是否将其归档到回收站？")
         }
         .fullScreenCover(item: $previewPayload) { payload in
             GroupPreviewSheet(
@@ -749,16 +761,22 @@ struct ImportCurationBucketListView: View {
         var archivedIds: [UUID] = []
 
         for group in groups {
+            if group.items.count == 1, let only = group.items.first {
+                archivedIds.append(only.id)
+                continue
+            }
             if let best = group.recommended {
                 keepIds.append(best.id)
                 archivedIds.append(contentsOf: group.items.filter { $0.id != best.id }.map(\.id))
             }
         }
 
-        guard !keepIds.isEmpty else { return }
+        guard !keepIds.isEmpty || !archivedIds.isEmpty else { return }
 
         do {
-            try await updateRows(ids: keepIds, target: .keep)
+            if !keepIds.isEmpty {
+                try await updateRows(ids: keepIds, target: .keep)
+            }
             if !archivedIds.isEmpty {
                 try await updateRows(ids: archivedIds, target: .archived)
             }
@@ -776,7 +794,14 @@ struct ImportCurationBucketListView: View {
 
     private func applyDeleteOthersForGroup(groupId: String, items: [Row]) async {
         let selectedIds = Array(keepSelections[groupId] ?? [])
-        guard !selectedIds.isEmpty else {
+        if selectedIds.isEmpty {
+            if items.count == 1, let only = items.first {
+                await MainActor.run {
+                    archiveSingleTarget = only
+                    showArchiveSingleConfirm = true
+                }
+                return
+            }
             await MainActor.run {
                 errorAlert = ErrorMessage(message: "请先选择要保留的照片")
             }
@@ -819,6 +844,31 @@ struct ImportCurationBucketListView: View {
                 showSuccessToast("已恢复 \(ids.count) 张")
             }
             await logGroupState(ids: ids, context: "recover-selected-preview")
+        } catch {
+            await MainActor.run {
+                errorAlert = ErrorMessage(message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func archiveSingleInGroup() async {
+        guard let target = archiveSingleTarget else { return }
+        let targetId = target.id
+        await MainActor.run {
+            archiveSingleTarget = nil
+        }
+
+        do {
+            try await updateRows(ids: [targetId], target: .archived)
+            await load()
+            await MainActor.run {
+                if let groupId = target.burstGroupId {
+                    keepSelections[groupId] = []
+                }
+                PhotoImportManager.shared.refreshCurationCountsFromDatabase()
+                showSuccessToast("已归档 1 张")
+            }
+            await logGroupState(ids: [targetId], context: "archive-single")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -1115,7 +1165,7 @@ private struct GroupPreviewSheet: View {
                                                     .clipShape(Capsule())
                                             }
 
-                                            Text("清晰度 \(String(format: "%.1f", item.bestShotScore ?? 0))")
+                                            Text("评分 \(String(format: "%.1f", item.bestShotScore ?? 0))")
                                                 .font(.caption2)
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 4)
@@ -1238,7 +1288,7 @@ private struct GroupPreviewSheet: View {
     private func topSubtitle(for item: Row) -> String {
         let tag = ImportCurationBucketListViewHelper.bucketTag(item.curationBucket)
         let reason = ImportCurationBucketListViewHelper.userCategoryText(bucket: item.curationBucket, reason: item.selectionReason, groupId: item.burstGroupId)
-        return "\(tag) · \(reason)"
+        return reason
     }
 
     private var thumbnailsStrip: some View {
@@ -1325,7 +1375,7 @@ private enum ImportCurationBucketListViewHelper {
         }
 
         if reason == ImportDecisionReason.needsReview.rawValue, groupId != nil {
-            return "重复照片（待确认）"
+            return "重复照片"
         }
 
         return reasonText(reason)

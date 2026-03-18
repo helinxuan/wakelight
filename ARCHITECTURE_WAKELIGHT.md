@@ -437,6 +437,17 @@ flowchart TD
   - `Smile / Expression`：15%（嘴部 landmarks 几何特征）
   - `Face Frontness`：15%（`yaw/pitch/roll` 综合）
   - `Sharpness`：10%（Laplacian/梯度清晰度）
+- **评分维度与展示口径**：
+  - UI 展示名称统一为 **“评分”**，代表综合最佳图评分，而非单纯“清晰度”。
+  - 评分组成即上面的 5 维权重（人脸质量/睁眼/微笑/正脸/清晰度），用于组内排序与“最佳图”选择。
+- **分类标签（selectionReason）口径**：
+  - `auto_keep` → **保留**
+  - `needs_review` → **待人工判断**（若带 `groupId` 则用于重复照片人工确认）
+  - `duplicate_near_time` → **重复照片**
+  - `filtered_text` → **文本图片**
+  - `filtered_text_high_confidence` → **文本图片（高置信）**
+  - `filtered_text_possible` → **文本图片（可能）**
+  - `missing_critical_metadata` → **待人工判断**
 - **文字检测请求约束（必须）**：
   - 文字相关过滤与判定统一使用 `VNRecognizeTextRequest`，禁止使用 `VNDetectTextRectanglesRequest`。
   - 需要保留识别文本与置信度（`topCandidates().confidence`）用于 `filtered_text` 等原因判定与后续可解释性。
