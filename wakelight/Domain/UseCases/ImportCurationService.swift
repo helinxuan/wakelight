@@ -143,7 +143,7 @@ actor ImportCurationService {
         var currentHashes: [String: PerceptualHash] = [:]
 
         for asset in sorted {
-            let item = AssetLikeItem(photoAssetId: nil, localIdentifier: asset.localIdentifier, creationDate: asset.creationDate, latitude: asset.location?.coordinate.latitude, longitude: asset.location?.coordinate.longitude, phAsset: asset, locator: nil)
+            let item = AssetLikeItem(photoAssetId: nil, localIdentifier: asset.localIdentifier, creationDate: asset.creationDate, latitude: asset.location?.coordinate.latitude, longitude: asset.location?.coordinate.longitude, phAsset: asset, locator: nil, mediaType: mediaType(for: asset))
 
             guard let last = current.last else {
                 current = [item]
@@ -203,7 +203,8 @@ actor ImportCurationService {
                 latitude: record.latitude,
                 longitude: record.longitude,
                 phAsset: nil,
-                locator: locator
+                locator: locator,
+                mediaType: mediaType(for: record)
             )
 
             guard let last = current.last else {
@@ -224,6 +225,8 @@ actor ImportCurationService {
     }
 
     private func shouldMergeByMetadata(lhs: AssetLikeItem, rhs: AssetLikeItem) -> Bool {
+        if lhs.mediaType != rhs.mediaType { return false }
+
         let lhsDate = lhs.creationDate ?? .distantPast
         let rhsDate = rhs.creationDate ?? .distantPast
         let dt = abs(lhsDate.timeIntervalSince(rhsDate))
@@ -280,6 +283,22 @@ actor ImportCurationService {
         }
 
         return item.photoAssetId?.uuidString ?? "-"
+    }
+
+    private func mediaType(for record: PhotoAsset) -> PhotoAsset.MediaType {
+        if let mediaType = record.mediaType {
+            return mediaType
+        }
+        return .photo
+    }
+
+    private func mediaType(for asset: PHAsset) -> PhotoAsset.MediaType {
+        switch asset.mediaType {
+        case .video:
+            return .video
+        default:
+            return .photo
+        }
     }
 
     private func score(group: AssetLikeGroup) async -> [ScoredAsset] {
@@ -395,6 +414,7 @@ private struct AssetLikeItem {
     let longitude: Double?
     let phAsset: PHAsset?
     let locator: MediaLocator?
+    let mediaType: PhotoAsset.MediaType
 
     var hashKey: String {
         if let localIdentifier, !localIdentifier.isEmpty {
