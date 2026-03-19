@@ -84,8 +84,9 @@ struct ImportCurationBucketListView: View {
     @State private var showDeleteConfirm = false
     @State private var deleteMessage: String = ""
     @State private var deleteTargets: [Row]? = nil
-    @State private var showArchiveSingleConfirm = false
-    @State private var archiveSingleTarget: Row? = nil
+    @State private var showArchiveAllConfirm = false
+    @State private var archiveAllGroupId: String? = nil
+    @State private var archiveAllTargets: [UUID] = []
 
 
     var body: some View {
@@ -296,15 +297,15 @@ struct ImportCurationBucketListView: View {
         } message: {
             Text(deleteMessage)
         }
-        .alert("删除这张照片？", isPresented: $showArchiveSingleConfirm) {
+        .alert("本组全部归档？", isPresented: $showArchiveAllConfirm) {
             Button("取消", role: .cancel) {}
-            Button("删除这张", role: .destructive) {
+            Button("全部归档", role: .destructive) {
                 Task {
-                    await archiveSingleInGroup()
+                    await archiveAllInGroup()
                 }
             }
         } message: {
-            Text("该组只有一张照片，是否将其归档到回收站？")
+            Text("你未选择任何保留项，将把本组照片全部归档到回收站。")
         }
         .fullScreenCover(item: $previewPayload) { payload in
             GroupPreviewSheet(
@@ -828,25 +829,26 @@ struct ImportCurationBucketListView: View {
 
     private func applyDeleteOthersForGroup(groupId: String, items: [Row]) async {
         let selectedIds = Array(keepSelections[groupId] ?? [])
+        let allIds = items.map(\.id)
+
         if selectedIds.isEmpty {
-            if items.count == 1, let only = items.first {
-                await MainActor.run {
-                    archiveSingleTarget = only
-                    showArchiveSingleConfirm = true
-                }
-                return
-            }
             await MainActor.run {
-                errorAlert = ErrorMessage(message: "请先选择要保留的照片")
+                archiveAllGroupId = groupId
+                archiveAllTargets = allIds
+                showArchiveAllConfirm = true
             }
             return
         }
 
-        let allIds = items.map(\.id)
+        let finalKeepIds = selectedIds
         let archivedIds = allIds.filter { !selectedIds.contains($0) }
 
+        guard !finalKeepIds.isEmpty || !archivedIds.isEmpty else { return }
+
         do {
-            try await updateRows(ids: selectedIds, target: .keep, preserveReason: true)
+            if !finalKeepIds.isEmpty {
+                try await updateRows(ids: finalKeepIds, target: .keep, preserveReason: true)
+            }
             if !archivedIds.isEmpty {
                 try await updateRows(ids: archivedIds, target: .archived, preserveReason: true)
             }
@@ -854,9 +856,9 @@ struct ImportCurationBucketListView: View {
             await MainActor.run {
                 keepSelections[groupId] = []
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                showSuccessToast("操作成功：保留 \(selectedIds.count)，归档 \(archivedIds.count)")
+                showSuccessToast("操作成功：保留 \(finalKeepIds.count)，归档 \(archivedIds.count)")
             }
-            await logGroupState(ids: selectedIds + archivedIds, context: "delete-others")
+            await logGroupState(ids: finalKeepIds + archivedIds, context: "delete-others")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)
@@ -885,25 +887,28 @@ struct ImportCurationBucketListView: View {
         }
     }
 
-    private func archiveSingleInGroup() async {
-        guard let target = archiveSingleTarget else { return }
-        let targetId = target.id
-        let targetGroupId = target.burstGroupId
+    private func archiveAllInGroup() async {
+        let targetIds = archiveAllTargets
+        let targetGroupId = archiveAllGroupId
+
         await MainActor.run {
-            archiveSingleTarget = nil
+            archiveAllTargets = []
+            archiveAllGroupId = nil
         }
 
+        guard !targetIds.isEmpty else { return }
+
         do {
-            try await updateRows(ids: [targetId], target: .archived, preserveReason: true)
+            try await updateRows(ids: targetIds, target: .archived, preserveReason: true)
             await load()
             await MainActor.run {
                 if let groupId = targetGroupId {
                     keepSelections[groupId] = []
                 }
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
-                showSuccessToast("已归档 1 张")
+                showSuccessToast("已归档 \(targetIds.count) 张")
             }
-            await logGroupState(ids: [targetId], context: "archive-single")
+            await logGroupState(ids: targetIds, context: "archive-all")
         } catch {
             await MainActor.run {
                 errorAlert = ErrorMessage(message: error.localizedDescription)

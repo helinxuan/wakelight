@@ -15,16 +15,15 @@ actor ImportCurationService {
     private let curationDebugLogEnabled = false
     #endif
 
-    private let hashService: ImportPerceptualHashService
     private let scoringService: ImportBestShotScoringService
     private let textFilterService: ImportTextFilterService
 
+    private let featurePrintDistanceThreshold: Float = 0.7
+
     init(
-        hashService: ImportPerceptualHashService = .shared,
         scoringService: ImportBestShotScoringService = .shared,
         textFilterService: ImportTextFilterService = .shared
     ) {
-        self.hashService = hashService
         self.scoringService = scoringService
         self.textFilterService = textFilterService
     }
@@ -62,7 +61,7 @@ actor ImportCurationService {
             return []
         }
 
-        let groups = groupImportedByScene(records: records)
+        let groups = await groupImportedByScene(records: records)
         let decisions = await evaluate(groups: groups, totalCount: records.count, onProgress: onProgress)
         return decisions.map {
             ImportAssetDecision(
@@ -134,37 +133,66 @@ actor ImportCurationService {
     }
 
     private func groupByScene(assets: [PHAsset]) async -> [AssetLikeGroup] {
-        let sorted = assets.sorted {
-            ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast)
-        }
+        let items = assets
+            .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+            .map {
+                AssetLikeItem(
+                    photoAssetId: nil,
+                    localIdentifier: $0.localIdentifier,
+                    creationDate: $0.creationDate,
+                    latitude: $0.location?.coordinate.latitude,
+                    longitude: $0.location?.coordinate.longitude,
+                    phAsset: $0,
+                    locator: nil,
+                    mediaType: mediaType(for: $0)
+                )
+            }
 
+        return await clusterBySceneAndFeaturePrint(items: items)
+    }
+
+    private func groupImportedByScene(records: [PhotoAsset]) async -> [AssetLikeGroup] {
+        let items = records
+            .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+            .map { record in
+                AssetLikeItem(
+                    photoAssetId: record.id,
+                    localIdentifier: record.localIdentifier,
+                    creationDate: record.creationDate,
+                    latitude: record.latitude,
+                    longitude: record.longitude,
+                    phAsset: nil,
+                    locator: buildLocator(record: record),
+                    mediaType: mediaType(for: record)
+                )
+            }
+
+        return await clusterBySceneAndFeaturePrint(items: items)
+    }
+
+    private func clusterBySceneAndFeaturePrint(items: [AssetLikeItem]) async -> [AssetLikeGroup] {
         var groups: [AssetLikeGroup] = []
         var current: [AssetLikeItem] = []
-        var currentHashes: [String: PerceptualHash] = [:]
+        var currentFeaturePrints: [String: VNFeaturePrintObservation] = [:]
 
-        for asset in sorted {
-            let item = AssetLikeItem(photoAssetId: nil, localIdentifier: asset.localIdentifier, creationDate: asset.creationDate, latitude: asset.location?.coordinate.latitude, longitude: asset.location?.coordinate.longitude, phAsset: asset, locator: nil, mediaType: mediaType(for: asset))
-
+        for item in items {
             guard let last = current.last else {
                 current = [item]
-                if let img = await loadImage(item: item),
-                   let h = await hashForItem(item: item, image: img) {
-                    currentHashes[item.hashKey] = h
+                if let fp = await featurePrintForItem(item: item) {
+                    currentFeaturePrints[item.hashKey] = fp
                 }
                 continue
             }
 
+            let shouldConsiderMerge = shouldMergeByMetadata(lhs: last, rhs: item)
             let merge: Bool
-            if shouldMergeByMetadata(lhs: last, rhs: item) {
-                if let lhsHash = currentHashes[last.hashKey],
-                   let img = await loadImage(item: item),
-                   let rhsHash = await hashForItem(item: item, image: img) {
-                    let dist = lhsHash.hammingDistance(to: rhsHash)
-                    merge = dist <= 10
-                    if merge { currentHashes[item.hashKey] = rhsHash }
-                } else {
-                    merge = true
-                }
+
+            if shouldConsiderMerge {
+                merge = await shouldMergeByFeaturePrint(
+                    candidate: item,
+                    currentGroupItems: current,
+                    currentFeaturePrints: &currentFeaturePrints
+                )
             } else {
                 merge = false
             }
@@ -174,54 +202,56 @@ actor ImportCurationService {
             } else {
                 groups.append(AssetLikeGroup(items: current))
                 current = [item]
-                currentHashes.removeAll(keepingCapacity: true)
-                if let img = await loadImage(item: item),
-                   let h = await hashForItem(item: item, image: img) {
-                    currentHashes[item.hashKey] = h
+                currentFeaturePrints.removeAll(keepingCapacity: true)
+                if let fp = await featurePrintForItem(item: item) {
+                    currentFeaturePrints[item.hashKey] = fp
                 }
             }
         }
 
-        if !current.isEmpty { groups.append(AssetLikeGroup(items: current)) }
+        if !current.isEmpty {
+            groups.append(AssetLikeGroup(items: current))
+        }
+
         return groups
     }
 
-    private func groupImportedByScene(records: [PhotoAsset]) -> [AssetLikeGroup] {
-        let sorted = records.sorted {
-            ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast)
+    private func shouldMergeByFeaturePrint(
+        candidate: AssetLikeItem,
+        currentGroupItems: [AssetLikeItem],
+        currentFeaturePrints: inout [String: VNFeaturePrintObservation]
+    ) async -> Bool {
+        guard let candidatePrint = await featurePrintForItem(item: candidate) else {
+            return true
         }
 
-        var groups: [AssetLikeGroup] = []
-        var current: [AssetLikeItem] = []
+        currentFeaturePrints[candidate.hashKey] = candidatePrint
 
-        for record in sorted {
-            let locator = buildLocator(record: record)
-            let item = AssetLikeItem(
-                photoAssetId: record.id,
-                localIdentifier: record.localIdentifier,
-                creationDate: record.creationDate,
-                latitude: record.latitude,
-                longitude: record.longitude,
-                phAsset: nil,
-                locator: locator,
-                mediaType: mediaType(for: record)
-            )
+        var minDistance = Float.greatestFiniteMagnitude
 
-            guard let last = current.last else {
-                current = [item]
+        for existing in currentGroupItems {
+            let existingPrint: VNFeaturePrintObservation?
+            if let cached = currentFeaturePrints[existing.hashKey] {
+                existingPrint = cached
+            } else {
+                existingPrint = await featurePrintForItem(item: existing)
+                if let existingPrint {
+                    currentFeaturePrints[existing.hashKey] = existingPrint
+                }
+            }
+
+            guard let existingPrint,
+                  let distance = featurePrintDistance(from: candidatePrint, to: existingPrint) else {
                 continue
             }
 
-            if shouldMergeByMetadata(lhs: last, rhs: item) {
-                current.append(item)
-            } else {
-                groups.append(AssetLikeGroup(items: current))
-                current = [item]
+            minDistance = min(minDistance, distance)
+            if distance <= featurePrintDistanceThreshold {
+                return true
             }
         }
 
-        if !current.isEmpty { groups.append(AssetLikeGroup(items: current)) }
-        return groups
+        return minDistance.isFinite ? minDistance <= featurePrintDistanceThreshold : true
     }
 
     private func shouldMergeByMetadata(lhs: AssetLikeItem, rhs: AssetLikeItem) -> Bool {
@@ -339,8 +369,47 @@ actor ImportCurationService {
         return "grp_\(ts)_\(first.hashKey.hashValue)"
     }
 
-    private func hashForItem(item: AssetLikeItem, image: UIImage) async -> PerceptualHash? {
-        await hashService.hash(localIdentifier: item.hashKey, image: image)
+    private func featurePrintForItem(item: AssetLikeItem) async -> VNFeaturePrintObservation? {
+        guard let image = await loadImage(item: item) else { return nil }
+        return featurePrint(for: image)
+    }
+
+    private func featurePrint(for image: UIImage) -> VNFeaturePrintObservation? {
+        guard let cgImage = image.cgImage else { return nil }
+
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: cgImagePropertyOrientation(from: image.imageOrientation), options: [:])
+
+        do {
+            try handler.perform([request])
+            return request.results?.first as? VNFeaturePrintObservation
+        } catch {
+            return nil
+        }
+    }
+
+    private func featurePrintDistance(from lhs: VNFeaturePrintObservation, to rhs: VNFeaturePrintObservation) -> Float? {
+        var distance = Float.zero
+        do {
+            try lhs.computeDistance(&distance, to: rhs)
+            return distance
+        } catch {
+            return nil
+        }
+    }
+
+    private func cgImagePropertyOrientation(from orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch orientation {
+        case .up: return .up
+        case .upMirrored: return .upMirrored
+        case .down: return .down
+        case .downMirrored: return .downMirrored
+        case .left: return .left
+        case .leftMirrored: return .leftMirrored
+        case .right: return .right
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
     }
 
     private func loadImage(item: AssetLikeItem) async -> UIImage? {
@@ -463,3 +532,4 @@ private struct DecisionDraft {
     let recognizedTextConfidence: Double?
     let groupId: String?
 }
+

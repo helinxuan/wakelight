@@ -60,7 +60,7 @@
 ## 3.2 Feature 模块职责
 
 - **Exploration（探索）**：地图浏览、足迹光点展示、定位到访高亮、缩略图节点分层渲染
-- **IngestionPreprocess（导入预处理）**：导入任务编排、Burst-like 分组（时间+pHash）、组内最佳图选择（原生 Vision 5 维评分）、可恢复归档
+- **IngestionPreprocess（导入预处理）**：导入任务编排、Burst-like 分组（时间 + Vision FeaturePrint 相似度聚类）、组内最佳图选择（原生 Vision 5 维评分）、可恢复归档
 - **Memory（记忆面板）**：地点容器 + VisitLayers 时间河浏览、照片组预览、写话/标签/语音沉淀
 - **Story（显影/故事）**：Story Node 生成与编辑、地图缩略图显影、推荐队列与批量沉淀
 - **TimeTravel（时光模式）**：只展示 Story Node，按时间光轨连线巡航、节点阅读/回看
@@ -402,7 +402,7 @@ flowchart TD
   C --> D[提取元数据: EXIF/时间/GPS]
   D --> E[SmartPhotoPreprocessor]
 
-  E --> F[按 时间±8s + pHash 相似 自动分组]
+  E --> F[按 时间±8s + Vision FeaturePrint 相似度 自动分组/聚类]
   F --> G[组内 Vision 5维评分选最佳]
   G --> H{分差阈值判断}
   H -->|Top1-Top2 >= 8| I[自动保留最佳1张]
@@ -426,7 +426,7 @@ flowchart TD
 - **模块入口**：`ImportPhotosUseCase` 在完成元数据抽取后，统一调用 `SmartPhotoPreprocessor`。
 - **核心子组件**：
   - `BurstGroupingService`
-    - 依据 `captureTime ± 8s` 与 `pHash` 相似度建立候选组。
+    - 依据 `captureTime ± 8s` 与 `Vision FeaturePrint` 距离建立候选组（先元数据门控，再做特征向量相似度计算与聚类）。
   - `BestShotScoringService`
     - 组内执行 Vision 5 维评分并排序。
   - `RecoveryArchiveService`
