@@ -293,11 +293,19 @@ final class ImportPhotosUseCase {
     func reprocessImportedPhotos(
         onPreprocessProgress: (@MainActor (Int, Int) -> Void)? = nil
     ) async throws -> ImportCurationSummary {
-        let allImportedAssets: [PhotoAsset] = try await writer.read { db in
-            try PhotoAsset.fetchAll(db)
+        // 增量重跑：仅处理“待确认(review)”与“未打桶(新照片)”记录，
+        // 保持 keep/archived 用户决策不被覆盖。
+        let reprocessableAssets: [PhotoAsset] = try await writer.read { db in
+            try PhotoAsset
+                .filter(
+                    Column("curationBucket") == ImportDecisionBucket.review.rawValue
+                    || Column("curationBucket") == nil
+                    || Column("curationBucket") == ""
+                )
+                .fetchAll(db)
         }
 
-        guard !allImportedAssets.isEmpty else {
+        guard !reprocessableAssets.isEmpty else {
             await onPreprocessProgress?(0, 0)
             return ImportCurationSummary(
                 totalImported: 0,
@@ -308,7 +316,7 @@ final class ImportPhotosUseCase {
             )
         }
 
-        let hasLocalAssets = allImportedAssets.contains { asset in
+        let hasLocalAssets = reprocessableAssets.contains { asset in
             if let localId = asset.localIdentifier {
                 return !localId.isEmpty
             }
@@ -325,7 +333,7 @@ final class ImportPhotosUseCase {
             }
         }
 
-        let decisions = await curationService.curateImportedPhotos(records: allImportedAssets) { processed, total in
+        let decisions = await curationService.curateImportedPhotos(records: reprocessableAssets) { processed, total in
             await MainActor.run {
                 onPreprocessProgress?(processed, total)
             }

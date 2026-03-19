@@ -236,7 +236,9 @@ final class PhotoImportManager: ObservableObject {
                     }
                 }
 
-                await self.reportCurationSummary(summary)
+                // 增量预处理时，summary 只覆盖“本次处理子集”。
+                // 这里改为从数据库刷新全局计数，避免列表数字被瞬间重置为 0。
+                await self.refreshCurationCountsFromDatabaseNow(fallback: summary)
 
                 await self.updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
                 _ = try await GeneratePlaceClustersUseCase().run()
@@ -426,6 +428,35 @@ final class PhotoImportManager: ObservableObject {
                 }
             } catch {
                 print("[ImportManager] refreshCurationCountsFromDatabase failed: \(error)")
+            }
+        }
+    }
+
+    private func refreshCurationCountsFromDatabaseNow(fallback: ImportCurationSummary? = nil) async {
+        do {
+            let (keep, review, archived) = try await DatabaseContainer.shared.db.reader.read { db in
+                let keep = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.keep.rawValue).fetchCount(db)
+                let review = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue).fetchCount(db)
+                let archived = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue).fetchCount(db)
+                return (keep, review, archived)
+            }
+
+            await MainActor.run {
+                self.curationProgress.meaningfulKept = keep
+                self.curationProgress.reviewBucketCount = review
+                self.curationProgress.filteredArchivedCount = archived
+                self.saveCurationProgress()
+            }
+        } catch {
+            print("[ImportManager] refreshCurationCountsFromDatabaseNow failed: \(error)")
+
+            if let fallback {
+                await MainActor.run {
+                    self.curationProgress.meaningfulKept = fallback.meaningfulKept
+                    self.curationProgress.reviewBucketCount = fallback.reviewBucketCount
+                    self.curationProgress.filteredArchivedCount = fallback.filteredArchivedCount
+                    self.saveCurationProgress()
+                }
             }
         }
     }
