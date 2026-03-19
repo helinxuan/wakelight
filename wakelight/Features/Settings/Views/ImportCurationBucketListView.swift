@@ -221,7 +221,7 @@ struct ImportCurationBucketListView: View {
                                     .buttonStyle(.bordered)
                                     .disabled(selectedArchivedIds(groupId: group.id).isEmpty)
                                 } else {
-                                    Button("删除其他") {
+                                    Button("执行") {
                                         Task {
                                             await applyDeleteOthersForGroup(groupId: group.id, items: group.items)
                                         }
@@ -354,7 +354,8 @@ struct ImportCurationBucketListView: View {
                     .filter(Column("curationBucket") == filter.rawValue)
 
                 if filter == .archived {
-                    return try query
+                    return try Row
+                        .filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue)
                         .order(Column("archivedAt").desc, Column("bestShotScore").desc)
                         .fetchAll(db)
                 }
@@ -411,9 +412,12 @@ struct ImportCurationBucketListView: View {
             let groupSortKeys = await groupSortKeyMap(groupIds: Array(grouped.keys))
 
             print("[Curation] load filter=\(filter.rawValue) rows=\(fetched.count) groups=\(grouped.count)")
-            if filter == .review && !fetched.isEmpty {
-                print("[Curation] review ids=\(fetched.map(\.id).map(String.init).joined(separator: ","))")
-            }
+            // if filter == .review && !fetched.isEmpty {
+            //     print("[Curation] review ids=\(fetched.map(\.id).map(String.init).joined(separator: ","))")
+            //     if let first = fetched.first {
+            //         print("[Curation] review sample id=\(first.id) bucket=\(first.curationBucket ?? "-") reason=\(first.selectionReason ?? "-")")
+            //     }
+            // }
 
             await MainActor.run {
                 rows = fetched
@@ -478,19 +482,30 @@ struct ImportCurationBucketListView: View {
         return items.filter { selections.contains($0.id) && isArchived($0) }.map(\.id)
     }
 
-    private func updateRows(ids: [UUID], target: ActionTarget) async throws {
+    private func updateRows(ids: [UUID], target: ActionTarget, preserveReason: Bool = false) async throws {
         let archivedAt: Date? = target == .archived ? Date() : nil
 
         try await DatabaseContainer.shared.writer.write { db in
-            _ = try PhotoAsset
-                .filter(ids.contains(Column("id")))
-                .updateAll(
-                    db,
-                    Column("curationBucket").set(to: target.bucket),
-                    Column("selectionReason").set(to: target.reason),
-                    Column("isRecoverableArchived").set(to: target.isRecoverableArchived),
-                    Column("archivedAt").set(to: archivedAt)
-                )
+            if preserveReason {
+                _ = try PhotoAsset
+                    .filter(ids.contains(Column("id")))
+                    .updateAll(
+                        db,
+                        Column("curationBucket").set(to: target.bucket),
+                        Column("isRecoverableArchived").set(to: target.isRecoverableArchived),
+                        Column("archivedAt").set(to: archivedAt)
+                    )
+            } else {
+                _ = try PhotoAsset
+                    .filter(ids.contains(Column("id")))
+                    .updateAll(
+                        db,
+                        Column("curationBucket").set(to: target.bucket),
+                        Column("selectionReason").set(to: target.reason),
+                        Column("isRecoverableArchived").set(to: target.isRecoverableArchived),
+                        Column("archivedAt").set(to: archivedAt)
+                    )
+            }
         }
 
         await MainActor.run {
@@ -713,9 +728,9 @@ struct ImportCurationBucketListView: View {
         let archivedIds = allIds.filter { $0 != selectedId }
 
         do {
-            try await updateRows(ids: [selectedId], target: .keep)
+            try await updateRows(ids: [selectedId], target: .keep, preserveReason: true)
             if !archivedIds.isEmpty {
-                try await updateRows(ids: archivedIds, target: .archived)
+                try await updateRows(ids: archivedIds, target: .archived, preserveReason: true)
             }
             await load()
             await MainActor.run {
@@ -736,9 +751,9 @@ struct ImportCurationBucketListView: View {
         let archivedIds = allIds.filter { !keepIds.contains($0) }
 
         do {
-            try await updateRows(ids: keepIds, target: .keep)
+            try await updateRows(ids: keepIds, target: .keep, preserveReason: true)
             if !archivedIds.isEmpty {
-                try await updateRows(ids: archivedIds, target: .archived)
+                try await updateRows(ids: archivedIds, target: .archived, preserveReason: true)
             }
             await load()
             await MainActor.run {
@@ -761,29 +776,48 @@ struct ImportCurationBucketListView: View {
         var archivedIds: [UUID] = []
 
         for group in groups {
-            if group.items.count == 1, let only = group.items.first {
-                archivedIds.append(only.id)
+            let textFiltered = group.items.filter { isTextFiltered(reason: $0.selectionReason) }
+            if !textFiltered.isEmpty {
+                archivedIds.append(contentsOf: textFiltered.map(\.id))
+            }
+
+            let remaining = group.items.filter { !isTextFiltered(reason: $0.selectionReason) }
+            guard !remaining.isEmpty else { continue }
+
+            if remaining.count == 1, let only = remaining.first {
+                keepIds.append(only.id)
                 continue
             }
-            if let best = group.recommended {
+
+            if let best = remaining.max(by: { ($0.bestShotScore ?? 0) < ($1.bestShotScore ?? 0) }) {
                 keepIds.append(best.id)
-                archivedIds.append(contentsOf: group.items.filter { $0.id != best.id }.map(\.id))
+                archivedIds.append(contentsOf: remaining.filter { $0.id != best.id }.map(\.id))
             }
         }
 
         guard !keepIds.isEmpty || !archivedIds.isEmpty else { return }
 
+        if let sample = archivedIds.first {
+            print("[Curation] keep-best archivedCount=\(archivedIds.count) keepCount=\(keepIds.count) sampleArchived=\(sample)")
+        } else {
+            print("[Curation] keep-best archivedCount=\(archivedIds.count) keepCount=\(keepIds.count)")
+        }
+
         do {
             if !keepIds.isEmpty {
-                try await updateRows(ids: keepIds, target: .keep)
+                try await updateRows(ids: keepIds, target: .keep, preserveReason: true)
             }
             if !archivedIds.isEmpty {
-                try await updateRows(ids: archivedIds, target: .archived)
+                try await updateRows(ids: archivedIds, target: .archived, preserveReason: true)
             }
             await load()
             await MainActor.run {
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("操作成功：保留 \(keepIds.count)，归档 \(archivedIds.count)")
+            }
+            await logBucketCounts(context: "keep-best-post")
+            if let sample = archivedIds.first {
+                await logGroupState(ids: [sample], context: "keep-best-archived-sample")
             }
         } catch {
             await MainActor.run {
@@ -812,9 +846,9 @@ struct ImportCurationBucketListView: View {
         let archivedIds = allIds.filter { !selectedIds.contains($0) }
 
         do {
-            try await updateRows(ids: selectedIds, target: .keep)
+            try await updateRows(ids: selectedIds, target: .keep, preserveReason: true)
             if !archivedIds.isEmpty {
-                try await updateRows(ids: archivedIds, target: .archived)
+                try await updateRows(ids: archivedIds, target: .archived, preserveReason: true)
             }
             await load()
             await MainActor.run {
@@ -834,7 +868,7 @@ struct ImportCurationBucketListView: View {
         guard !ids.isEmpty else { return }
 
         do {
-            try await updateRows(ids: ids, target: .review)
+            try await updateRows(ids: ids, target: .review, preserveReason: true)
             await load()
             await MainActor.run {
                 if let groupId = previewPayload?.groupId {
@@ -854,15 +888,16 @@ struct ImportCurationBucketListView: View {
     private func archiveSingleInGroup() async {
         guard let target = archiveSingleTarget else { return }
         let targetId = target.id
+        let targetGroupId = target.burstGroupId
         await MainActor.run {
             archiveSingleTarget = nil
         }
 
         do {
-            try await updateRows(ids: [targetId], target: .archived)
+            try await updateRows(ids: [targetId], target: .archived, preserveReason: true)
             await load()
             await MainActor.run {
-                if let groupId = target.burstGroupId {
+                if let groupId = targetGroupId {
                     keepSelections[groupId] = []
                 }
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
@@ -899,13 +934,33 @@ struct ImportCurationBucketListView: View {
         }
     }
 
+    private func logBucketCounts(context: String) async {
+        do {
+            let (keep, review, archived) = try await DatabaseContainer.shared.db.reader.read { db in
+                let keep = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.keep.rawValue).fetchCount(db)
+                let review = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.review.rawValue).fetchCount(db)
+                let archived = try PhotoAsset.filter(Column("curationBucket") == ImportDecisionBucket.archived.rawValue).fetchCount(db)
+                return (keep, review, archived)
+            }
+            print("[Curation][\(context)] counts keep=\(keep) review=\(review) archived=\(archived)")
+        } catch {
+            print("[Curation][\(context)] counts failed: \(error)")
+        }
+    }
+
+    private func isTextFiltered(reason: String?) -> Bool {
+        reason == ImportDecisionReason.filteredText.rawValue ||
+        reason == ImportDecisionReason.filteredTextHighConfidence.rawValue ||
+        reason == ImportDecisionReason.filteredTextPossible.rawValue
+    }
+
     private func recoverSelected(groupId: String, allIds: [UUID]) async {
         guard !allIds.isEmpty else { return }
         let ids = selectedArchivedIds(groupId: groupId)
         guard !ids.isEmpty else { return }
 
         do {
-            try await updateRows(ids: ids, target: .review)
+            try await updateRows(ids: ids, target: .review, preserveReason: true)
             await load()
             await MainActor.run {
                 keepSelections[groupId] = []
@@ -931,13 +986,14 @@ struct ImportCurationBucketListView: View {
                 return
             }
 
-            try await updateRows(ids: ids, target: .review)
+            try await updateRows(ids: ids, target: .review, preserveReason: true)
             await load()
             await MainActor.run {
                 keepSelections = [:]
                 PhotoImportManager.shared.refreshCurationCountsFromDatabase()
                 showSuccessToast("已恢复 \(ids.count) 张")
             }
+            await logBucketCounts(context: "recover-all-post")
             await logGroupState(ids: ids, context: "recover-all")
         } catch {
             await MainActor.run {
@@ -1249,7 +1305,7 @@ private struct GroupPreviewSheet: View {
                                         dismiss()
                                     }
                                 } label: {
-                                    Text("删除其他")
+                                    Text("执行")
                                         .font(.callout.weight(.semibold))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 12)

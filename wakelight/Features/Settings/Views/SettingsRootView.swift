@@ -142,6 +142,10 @@ struct SmartPhotoCurationSettingsView: View {
                         .textSelection(.enabled)
                 }
 
+                Text("当前统计: 保留 \(importManager.curationProgress.meaningfulKept) 张，待确认 \(importManager.curationProgress.reviewBucketCount) 张，已过滤 \(importManager.curationProgress.filteredArchivedCount) 张")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
                 if let err = importManager.curationProgress.lastError, !err.isEmpty {
                     Text("错误/提示: \(err)")
                         .foregroundStyle(.red)
