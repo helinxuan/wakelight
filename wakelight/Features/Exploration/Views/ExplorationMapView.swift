@@ -15,6 +15,8 @@ struct ExplorationMapView: UIViewRepresentable {
 
     var onFirstAwakenInSession: ((PlaceCluster, CGPoint) -> Void)?
 
+    private let awakenMaxZoomOutDistance: CLLocationDistance = 450_000
+
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
@@ -729,6 +731,13 @@ struct ExplorationMapView: UIViewRepresentable {
         context.coordinator.showExploreGuideIfNeeded()
 
         mapView.isScrollEnabled = !isAwakenMode
+
+        if isAwakenMode {
+            let zoomRange = MKMapView.CameraZoomRange(maxCenterCoordinateDistance: awakenMaxZoomOutDistance)
+            mapView.setCameraZoomRange(zoomRange, animated: false)
+        } else {
+            mapView.setCameraZoomRange(nil, animated: false)
+        }
 
         fogView.clusters = viewModel.clusters
         fogView.revealedClusterIds = revealedClusterIds

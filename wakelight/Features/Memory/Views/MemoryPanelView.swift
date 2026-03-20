@@ -50,6 +50,7 @@ struct MemoryPanelView: View {
     }
 
     @State private var filterMode: FilterMode = .unhandled
+    @State private var isLocationSectionCollapsed: [UUID: Bool] = [:]
 
     private func exitMultiSelect() {
         isMultiSelectMode = false
@@ -216,50 +217,65 @@ struct MemoryPanelView: View {
 
                         ForEach(sortedClusterIds, id: \.self) { clusterId in
                             Section(header:
-                                HStack(spacing: 4) {
-                                    Image(systemName: "mappin.and.ellipse")
-                                        .font(.system(size: 12, weight: .bold))
-                                    Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
-                                        .font(.system(size: 14, weight: .bold))
+                                Button(action: {
+                                    withAnimation(.easeInOut(duration: 0.18)) {
+                                        toggleLocationSection(clusterId)
+                                    }
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "mappin.and.ellipse")
+                                            .font(.system(size: 12, weight: .bold))
+                                        Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
+                                            .font(.system(size: 14, weight: .bold))
+
+                                        Spacer(minLength: 0)
+
+                                        Image(systemName: isLocationSectionCollapsed[clusterId] == true ? "chevron.right" : "chevron.down")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .foregroundColor(.primary)
+                                    .padding(.vertical, 8)
                                 }
-                                .foregroundColor(.primary)
-                                .padding(.vertical, 8)
+                                .buttonStyle(.plain)
                             ) {
-                                ForEach(groupedLayers[clusterId] ?? [], id: \.id) { layer in
-                                    VisitLayerRowView(
-                                        layer: layer,
-                                        isMultiSelectMode: isMultiSelectMode,
-                                        isSelected: selectedVisitLayerIds.contains(layer.id),
-                                        onToggleSelected: {
-                                            if selectedVisitLayerIds.contains(layer.id) {
-                                                selectedVisitLayerIds.remove(layer.id)
-                                            } else {
+                                if isLocationSectionCollapsed[clusterId] != true {
+                                    ForEach(groupedLayers[clusterId] ?? [], id: \.id) { layer in
+                                        VisitLayerRowView(
+                                            layer: layer,
+                                            isMultiSelectMode: isMultiSelectMode,
+                                            isSelected: selectedVisitLayerIds.contains(layer.id),
+                                            onToggleSelected: {
+                                                if selectedVisitLayerIds.contains(layer.id) {
+                                                    selectedVisitLayerIds.remove(layer.id)
+                                                } else {
+                                                    selectedVisitLayerIds.insert(layer.id)
+                                                }
+                                            },
+                                            onLongPressSelect: {
+                                                if !isMultiSelectMode {
+                                                    isMultiSelectMode = true
+                                                }
                                                 selectedVisitLayerIds.insert(layer.id)
+                                            },
+                                            locationName: viewModel.clusterNames[layer.placeClusterId],
+                                            onPreview: { keys, index in
+                                                previewLocatorKeys = keys
+                                                previewStartIndex = index
                                             }
-                                        },
-                                        onLongPressSelect: {
-                                            if !isMultiSelectMode {
-                                                isMultiSelectMode = true
-                                            }
-                                            selectedVisitLayerIds.insert(layer.id)
-                                        },
-                                        locationName: viewModel.clusterNames[layer.placeClusterId],
-                                        onPreview: { keys, index in
-                                            previewLocatorKeys = keys
-                                            previewStartIndex = index
-                                        }
-                                    )
-                                    .padding(.vertical, 6)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        if isMultiSelectMode {
-                                            if selectedVisitLayerIds.contains(layer.id) {
-                                                selectedVisitLayerIds.remove(layer.id)
+                                        )
+                                        .padding(.vertical, 6)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            if isMultiSelectMode {
+                                                if selectedVisitLayerIds.contains(layer.id) {
+                                                    selectedVisitLayerIds.remove(layer.id)
+                                                } else {
+                                                    selectedVisitLayerIds.insert(layer.id)
+                                                }
                                             } else {
-                                                selectedVisitLayerIds.insert(layer.id)
+                                                selectedDetailItem = .unhandled(layer)
                                             }
-                                        } else {
-                                            selectedDetailItem = .unhandled(layer)
                                         }
                                     }
                                 }
@@ -289,62 +305,77 @@ struct MemoryPanelView: View {
 
                         ForEach(sortedClusterIds, id: \.self) { clusterId in
                             Section(header:
-                                HStack(spacing: 4) {
-                                    Image(systemName: "mappin.and.ellipse")
-                                        .font(.system(size: 12, weight: .bold))
-                                    Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
-                                        .font(.system(size: 14, weight: .bold))
+                                Button(action: {
+                                    withAnimation(.easeInOut(duration: 0.18)) {
+                                        toggleLocationSection(clusterId)
+                                    }
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "mappin.and.ellipse")
+                                            .font(.system(size: 12, weight: .bold))
+                                        Text(viewModel.clusterNames[clusterId] ?? "地点记忆")
+                                            .font(.system(size: 14, weight: .bold))
+
+                                        Spacer(minLength: 0)
+
+                                        Image(systemName: isLocationSectionCollapsed[clusterId] == true ? "chevron.right" : "chevron.down")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .foregroundColor(.primary)
+                                    .padding(.vertical, 8)
                                 }
-                                .foregroundColor(.primary)
-                                .padding(.vertical, 8)
+                                .buttonStyle(.plain)
                             ) {
-                                ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
-                                    StoryNodeRowView(
-                                        node: node,
-                                        onPreview: { keys, index in
-                                            previewLocatorKeys = keys
-                                            previewStartIndex = index
-                                        },
-                                        onEdit: {
+                                if isLocationSectionCollapsed[clusterId] != true {
+                                    ForEach(groupedStories[clusterId] ?? [], id: \.id) { node in
+                                        StoryNodeRowView(
+                                            node: node,
+                                            onPreview: { keys, index in
+                                                previewLocatorKeys = keys
+                                                previewStartIndex = index
+                                            },
+                                            onEdit: {
+                                                selectedDetailItem = .story(node)
+                                            },
+                                            onDelete: {
+                                                deletingStoryTarget = node
+                                                isPresentingDeleteStoryAlert = true
+                                            }
+                                        )
+                                        .padding(.vertical, 6)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
                                             selectedDetailItem = .story(node)
-                                        },
-                                        onDelete: {
-                                            deletingStoryTarget = node
-                                            isPresentingDeleteStoryAlert = true
                                         }
-                                    )
-                                    .padding(.vertical, 6)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        selectedDetailItem = .story(node)
-                                    }
-                                    .contextMenu {
-                                        Button {
-                                            selectedDetailItem = .story(node)
-                                        } label: {
-                                            Label("编辑故事", systemImage: "pencil")
-                                        }
+                                        .contextMenu {
+                                            Button {
+                                                selectedDetailItem = .story(node)
+                                            } label: {
+                                                Label("编辑故事", systemImage: "pencil")
+                                            }
 
-                                        Button(role: .destructive) {
-                                            deletingStoryTarget = node
-                                            isPresentingDeleteStoryAlert = true
-                                        } label: {
-                                            Label("删除故事", systemImage: "trash")
+                                            Button(role: .destructive) {
+                                                deletingStoryTarget = node
+                                                isPresentingDeleteStoryAlert = true
+                                            } label: {
+                                                Label("删除故事", systemImage: "trash")
+                                            }
                                         }
-                                    }
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button {
-                                            selectedDetailItem = .story(node)
-                                        } label: {
-                                            Label("编辑", systemImage: "pencil")
-                                        }
-                                        .tint(.blue)
+                                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                            Button {
+                                                selectedDetailItem = .story(node)
+                                            } label: {
+                                                Label("编辑", systemImage: "pencil")
+                                            }
+                                            .tint(.blue)
 
-                                        Button(role: .destructive) {
-                                            deletingStoryTarget = node
-                                            isPresentingDeleteStoryAlert = true
-                                        } label: {
-                                            Label("删除", systemImage: "trash")
+                                            Button(role: .destructive) {
+                                                deletingStoryTarget = node
+                                                isPresentingDeleteStoryAlert = true
+                                            } label: {
+                                                Label("删除", systemImage: "trash")
+                                            }
                                         }
                                     }
                                 }
@@ -441,6 +472,11 @@ struct MemoryPanelView: View {
         .onChange(of: selectedClusterId) { _, newValue in
             viewModel.selectedClusterId = newValue
         }
+    }
+
+    private func toggleLocationSection(_ clusterId: UUID) {
+        let isCollapsed = isLocationSectionCollapsed[clusterId] ?? false
+        isLocationSectionCollapsed[clusterId] = !isCollapsed
     }
 
     private func appendSelectedLayersToStory(_ story: StoryNode) async {

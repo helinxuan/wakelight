@@ -94,55 +94,63 @@ final class PhotoImportManager: ObservableObject {
 
     func resumeThumbnailBackfillIfNeeded(limit: Int = 300) {
         Task.detached(priority: .background) {
-            do {
-                let pending = try await DatabaseContainer.shared.db.reader.read { db in
-                    let assets = try PhotoAsset
-                        .filter((Column("thumbnailPath") == nil) || (Column("thumbnailPath") == ""))
-                        .order(Column("importedAt").desc)
-                        .limit(limit)
-                        .fetchAll(db)
+            _ = await self.backfillThumbnailsIfNeeded(limit: limit)
+        }
+    }
 
-                    let ids = assets.map(\.id)
-                    let locators = try PhotoAsset.fetchLocators(db: db, ids: ids)
-                    let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
+    @discardableResult
+    func backfillThumbnailsIfNeeded(limit: Int = 300) async -> Int {
+        do {
+            let pending = try await DatabaseContainer.shared.db.reader.read { db in
+                let assets = try PhotoAsset
+                    .filter((Column("thumbnailPath") == nil) || (Column("thumbnailPath") == ""))
+                    .order(Column("importedAt").desc)
+                    .limit(limit)
+                    .fetchAll(db)
 
-                    return assets.compactMap { asset -> (UUID, String, PhotoAsset.MediaType)? in
-                        guard let locator = locatorById[asset.id] else { return nil }
-                        let mediaType = asset.mediaType ?? .photo
-                        return (asset.id, locator.locatorKey, mediaType)
-                    }
+                let ids = assets.map(\.id)
+                let locators = try PhotoAsset.fetchLocators(db: db, ids: ids)
+                let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
+
+                return assets.compactMap { asset -> (UUID, String, PhotoAsset.MediaType)? in
+                    guard let locator = locatorById[asset.id] else { return nil }
+                    let mediaType = asset.mediaType ?? .photo
+                    return (asset.id, locator.locatorKey, mediaType)
                 }
+            }
 
-                guard !pending.isEmpty else {
-                    print("[ThumbBackfill] no pending assets")
-                    return
-                }
+            guard !pending.isEmpty else {
+                print("[ThumbBackfill] no pending assets")
+                return 0
+            }
 
-                print("[ThumbBackfill] resume pending=\(pending.count)")
+            print("[ThumbBackfill] resume pending=\(pending.count)")
 
-                for (photoId, locatorKey, mediaType) in pending {
-                    guard let locator = MediaLocator.parse(locatorKey) else { continue }
-                    await PhotoThumbnailScheduler.shared.schedule {
-                        do {
-                            let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                            try await DatabaseContainer.shared.writer.write { db in
-                                if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
-                                    let alreadyHas = !(asset.thumbnailPath?.isEmpty ?? true)
-                                    if !alreadyHas {
-                                        asset.thumbnailPath = path
-                                        asset.thumbnailUpdatedAt = Date()
-                                        try asset.update(db)
-                                    }
+            for (photoId, locatorKey, mediaType) in pending {
+                guard let locator = MediaLocator.parse(locatorKey) else { continue }
+                await PhotoThumbnailScheduler.shared.schedule {
+                    do {
+                        let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
+                        try await DatabaseContainer.shared.writer.write { db in
+                            if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
+                                let alreadyHas = !(asset.thumbnailPath?.isEmpty ?? true)
+                                if !alreadyHas {
+                                    asset.thumbnailPath = path
+                                    asset.thumbnailUpdatedAt = Date()
+                                    try asset.update(db)
                                 }
                             }
-                        } catch {
-                            print("[ThumbBackfill] failed locator=\(locatorKey) error=\(error)")
                         }
+                    } catch {
+                        print("[ThumbBackfill] failed locator=\(locatorKey) error=\(error)")
                     }
                 }
-            } catch {
-                print("[ThumbBackfill] resume failed: \(error)")
             }
+
+            return pending.count
+        } catch {
+            print("[ThumbBackfill] resume failed: \(error)")
+            return 0
         }
     }
 
@@ -270,24 +278,7 @@ final class PhotoImportManager: ObservableObject {
             guard let self else { return }
 
             do {
-                await self.updateSyncStatus(.importing, phase: .webdav, resetCounts: true)
-
-                let result = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
-                    Task { @MainActor in
-                        PhotoImportManager.shared.reportSyncProgress(processed: processed, total: total)
-                    }
-                }
-
-                if !result.deletedPhotoIds.isEmpty {
-                    try await self.cleanupDeletedPhotoAssets(photoIds: result.deletedPhotoIds)
-                }
-
-                await self.updateSyncStatus(.importing, phase: .generateClusters, resetCounts: false)
-                _ = try await GeneratePlaceClustersUseCase().run()
-
-                await self.updateSyncStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
-                _ = try await GenerateVisitLayersUseCase().run()
-
+                let result = try await self.performWebDAVImportPipeline()
                 await self.completeSync(notice: "WebDAV 同步完成：已导入 \(result.importedCount) 项")
             } catch {
                 await self.failSync(error: error.localizedDescription)
@@ -299,6 +290,108 @@ final class PhotoImportManager: ObservableObject {
                 self.runningTaskType = nil
             }
         }
+    }
+
+    func runWebDAVImportInBackgroundIfPossible(reason: String) async -> Bool {
+        let canRun = await MainActor.run { !self.isRunning }
+        guard canRun else { return false }
+
+        await MainActor.run {
+            self.isSyncRunning = true
+            self.runningTaskType = .sync
+        }
+
+        defer {
+            Task { @MainActor in
+                self.isSyncRunning = false
+                self.runningTaskType = nil
+                self.runningTask = nil
+            }
+        }
+
+        do {
+            let result = try await performWebDAVImportPipeline()
+
+            // 顺序要求：导入 -> 缩略图补全 -> 预处理
+            let _ = await backfillThumbnailsIfNeeded(limit: 600)
+
+            await completeSync(notice: "WebDAV 后台同步完成：已导入 \(result.importedCount) 项")
+
+            let _ = await runCurationInBackgroundIfPossible(reason: "after-webdav-bg-import")
+            return true
+        } catch {
+            await failSync(error: error.localizedDescription)
+            return false
+        }
+    }
+
+    func runCurationInBackgroundIfPossible(reason: String) async -> Bool {
+        let canRun = await MainActor.run { !self.isRunning }
+        guard canRun else { return false }
+
+        await MainActor.run {
+            self.isCurationRunning = true
+            self.runningTaskType = .curation
+        }
+
+        defer {
+            Task { @MainActor in
+                self.isCurationRunning = false
+                self.runningTaskType = nil
+                self.runningTask = nil
+            }
+        }
+
+        do {
+            await updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
+
+            let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
+                Task { @MainActor in
+                    PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
+                }
+            }
+
+            await refreshCurationCountsFromDatabaseNow(fallback: summary)
+
+            await updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
+            _ = try await GeneratePlaceClustersUseCase().run()
+
+            await updateCurationStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+            _ = try await GenerateVisitLayersUseCase().run()
+
+            await completeCuration(
+                notice: "后台预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
+            )
+            return true
+        } catch {
+            await failCuration(error: error.localizedDescription)
+            return false
+        }
+    }
+
+    private func performWebDAVImportPipeline() async throws -> WebDAVImportResult {
+        await updateSyncStatus(.importing, phase: .webdav, resetCounts: true)
+
+        let result = try await ImportWebDAVPhotosUseCase().run(profileId: nil) { processed, total in
+            Task { @MainActor in
+                PhotoImportManager.shared.reportSyncProgress(processed: processed, total: total)
+            }
+        }
+
+        if !result.deletedPhotoIds.isEmpty {
+            try await cleanupDeletedPhotoAssets(photoIds: result.deletedPhotoIds)
+        }
+
+        await updateSyncStatus(.importing, phase: .generateClusters, resetCounts: false)
+        _ = try await GeneratePlaceClustersUseCase().run()
+
+        await updateSyncStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+        _ = try await GenerateVisitLayersUseCase().run()
+
+        // WebDAV 导入后静默补全缩略图（仅补无缩略图项）。
+        resumeThumbnailBackfillIfNeeded()
+
+        return result
     }
 
     @MainActor

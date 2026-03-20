@@ -11,6 +11,10 @@ import SwiftUI
 struct wakelightApp: App {
     @State private var didRunStartupBootstrap = false
 
+    init() {
+        BackgroundImportScheduler.shared.registerTasks()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -27,6 +31,9 @@ struct wakelightApp: App {
                         // Auto-run one curation pass after app launch.
                         PhotoImportManager.shared.startPreprocessImportedPhotos(reason: "app-launch")
                     }
+
+                    // 启动后调度一次后台 WebDAV 自动导入任务。
+                    BackgroundImportScheduler.shared.scheduleWebDAVImportAfterLaunch()
 
                     // Start observing Photos library changes for incremental sync.
                     PhotosLibraryObserver.shared.start()

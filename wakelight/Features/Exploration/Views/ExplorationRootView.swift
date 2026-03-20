@@ -486,6 +486,9 @@ final class BlowDetector: NSObject, ObservableObject, AVAudioRecorderDelegate {
     private var didRequestPermission: Bool = false
     private var baselineDb: Float = -60
     private var consecutiveHits: Int = 0
+    private let minBlowDbThreshold: Float = -18
+    private let blowRelativeRaiseDb: Float = 20
+    private let requiredConsecutiveHits: Int = 4
 
     func startIfNeeded() async {
         guard !isStarted else { return }
@@ -565,7 +568,7 @@ final class BlowDetector: NSObject, ObservableObject, AVAudioRecorderDelegate {
             baselineDb = baselineDb * 0.92 + level * 0.08
         }
 
-        let dynamicThreshold = max(-22, baselineDb + 15)
+        let dynamicThreshold = max(minBlowDbThreshold, baselineDb + blowRelativeRaiseDb)
 
         if level > dynamicThreshold {
             consecutiveHits += 1
@@ -573,7 +576,7 @@ final class BlowDetector: NSObject, ObservableObject, AVAudioRecorderDelegate {
             consecutiveHits = max(0, consecutiveHits - 1)
         }
 
-        if consecutiveHits >= 3 {
+        if consecutiveHits >= requiredConsecutiveHits {
             didDetectBlow = true
             consecutiveHits = 0
         }
