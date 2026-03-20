@@ -9,15 +9,23 @@ import SwiftUI
 
 @main
 struct wakelightApp: App {
+    @State private var didRunStartupBootstrap = false
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .onAppear {
+                    guard !didRunStartupBootstrap else { return }
+                    didRunStartupBootstrap = true
+
                     _ = AchievementService.shared
                     Task { @MainActor in
                         await WebDAVBootstrap.shared.bootstrap()
                         // Resume interrupted thumbnail generation jobs (e.g. app terminated during WebDAV import).
                         PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
+
+                        // Auto-run one curation pass after app launch.
+                        PhotoImportManager.shared.startPreprocessImportedPhotos(reason: "app-launch")
                     }
 
                     // Start observing Photos library changes for incremental sync.
