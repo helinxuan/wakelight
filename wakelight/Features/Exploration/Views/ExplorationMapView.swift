@@ -56,6 +56,15 @@ struct ExplorationMapView: UIViewRepresentable {
         private let blowSweepTriggerCooldown: CFTimeInterval = 0.9
         private var blowSweepHitTargets: [(annotation: ClusterAnnotation, point: CGPoint)] = []
 
+        private var focusDisplayLink: CADisplayLink?
+        private weak var focusMapView: MKMapView?
+        private var focusAnimationStartTime: CFTimeInterval = 0
+        private let focusAnimationDuration: CFTimeInterval = 0.56
+        private var focusFromCenter: CLLocationCoordinate2D?
+        private var focusToCenter: CLLocationCoordinate2D?
+        private var focusFromSpan: MKCoordinateSpan?
+        private let focusTargetSpan = MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25)
+
         weak var scratchGuideView: ScratchGuideOverlayView?
         weak var blowGuideView: BlowGuideBarView?
         weak var exploreGuideView: ExploreTapGuideView?
@@ -597,6 +606,79 @@ struct ExplorationMapView: UIViewRepresentable {
             return sqrt(dx * dx + dy * dy)
         }
 
+        private func animateFocus(to coordinate: CLLocationCoordinate2D, on mapView: MKMapView) {
+            stopFocusAnimationIfNeeded()
+
+            focusMapView = mapView
+            focusFromCenter = mapView.region.center
+            focusFromSpan = mapView.region.span
+            focusToCenter = coordinate
+            focusAnimationStartTime = CACurrentMediaTime()
+
+            let link = CADisplayLink(target: self, selector: #selector(handleFocusFrame))
+            link.add(to: .main, forMode: .common)
+            focusDisplayLink = link
+
+            // 首帧立即同步，避免动画启动延后一帧造成突兀。
+            updateFocusAnimation(on: mapView, progress: 0)
+        }
+
+        @objc private func handleFocusFrame() {
+            guard let mapView = focusMapView else {
+                stopFocusAnimationIfNeeded()
+                return
+            }
+
+            let elapsed = CACurrentMediaTime() - focusAnimationStartTime
+            let progress = min(1, elapsed / focusAnimationDuration)
+            updateFocusAnimation(on: mapView, progress: progress)
+
+            if progress >= 1 {
+                stopFocusAnimationIfNeeded()
+            }
+        }
+
+        private func updateFocusAnimation(on mapView: MKMapView, progress: CGFloat) {
+            guard let fromCenter = focusFromCenter,
+                  let toCenter = focusToCenter,
+                  let fromSpan = focusFromSpan else { return }
+
+            let t = easeInOutCubic(progress)
+            let centerLat = fromCenter.latitude + (toCenter.latitude - fromCenter.latitude) * t
+            let centerLon = fromCenter.longitude + (toCenter.longitude - fromCenter.longitude) * t
+
+            let spanLat = fromSpan.latitudeDelta + (focusTargetSpan.latitudeDelta - fromSpan.latitudeDelta) * t
+            let spanLon = fromSpan.longitudeDelta + (focusTargetSpan.longitudeDelta - fromSpan.longitudeDelta) * t
+
+            let region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon),
+                span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: spanLon)
+            )
+
+            // 关闭隐式动画，完全由 display link 驱动，避免缩放和位移节奏错位。
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            mapView.setRegion(region, animated: false)
+            CATransaction.commit()
+        }
+
+        private func stopFocusAnimationIfNeeded() {
+            focusDisplayLink?.invalidate()
+            focusDisplayLink = nil
+            focusMapView = nil
+            focusFromCenter = nil
+            focusToCenter = nil
+            focusFromSpan = nil
+        }
+
+        private func easeInOutCubic(_ t: CGFloat) -> CGFloat {
+            if t < 0.5 {
+                return 4 * t * t * t
+            } else {
+                return 1 - pow(-2 * t + 2, 3) / 2
+            }
+        }
+
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation { return nil }
             guard let clusterAnnotation = annotation as? ClusterAnnotation else { return nil }
@@ -630,8 +712,7 @@ struct ExplorationMapView: UIViewRepresentable {
                 parent.isAwakenMode = true
                 parent.selectedCluster = ann.cluster
             }
-            let region = MKCoordinateRegion(center: ann.coordinate, span: MKCoordinateSpan(latitudeDelta: 0.25, longitudeDelta: 0.25))
-            mapView.setRegion(region, animated: true)
+            animateFocus(to: ann.coordinate, on: mapView)
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
