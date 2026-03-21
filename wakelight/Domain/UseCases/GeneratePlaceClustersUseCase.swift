@@ -113,11 +113,6 @@ private extension GeneratePlaceClustersUseCase {
             let (latBucket, lonBucket) = GeoGrid.bucketIndices(latitude: lat, longitude: lon, precisionDegrees: gridPrecision)
             let key = GeoGrid.key(latBucket: latBucket, lonBucket: lonBucket, precisionDegrees: gridPrecision)
 
-            if let localId = photo.localIdentifier,
-               localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
-                print("[ClusterDebug] hit target localIdentifier=\(localId) lat=\(lat) lon=\(lon) creation=\(String(describing: photo.creationDate)) bucket=\(key)")
-            }
-
             buckets[key, default: []].append(i)
         }
 
@@ -150,14 +145,6 @@ private extension GeneratePlaceClustersUseCase {
                                 .distance(from: CLLocation(latitude: latB, longitude: lonB))
 
                             if distance < radiusMeters {
-                                if let localId = photoA.localIdentifier,
-                                   localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
-                                    print("[ClusterDebug] union target with other id=\(String(describing: photoB.localIdentifier)) dist=\(distance) timeWindow=\(timeWindow)")
-                                }
-                                if let localId = photoB.localIdentifier,
-                                   localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
-                                    print("[ClusterDebug] union other id=\(String(describing: photoA.localIdentifier)) with target dist=\(distance) timeWindow=\(timeWindow)")
-                                }
                                 union(i, j)
                             }
                         }
@@ -185,12 +172,6 @@ private extension GeneratePlaceClustersUseCase {
                 let distL = CLLocation(latitude: latL, longitude: lonL).distance(from: center)
                 let distR = CLLocation(latitude: latR, longitude: lonR).distance(from: center)
                 return distL < distR
-            }
-
-            if let rep = representative,
-               let localId = rep.localIdentifier,
-               localId.contains("IMG_0172") || localId.contains("11F129CD-C098-4757-9A86-EDF0D6356735") {
-                print("[ClusterDebug] rep target chosen lat=\(String(describing: rep.latitude)) lon=\(String(describing: rep.longitude)) centerLat=\(lat) centerLon=\(lon) count=\(group.count)")
             }
 
             let centerLat = representative?.latitude ?? lat

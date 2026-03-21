@@ -3,9 +3,20 @@ import Foundation
 /// 负责 App 启动时自动加载并注册 WebDAV 配置
 final class WebDAVBootstrap {
     static let shared = WebDAVBootstrap()
-    
+
     private init() {}
-    
+
+    func hasSavedProfile() async -> Bool {
+        do {
+            let container = DatabaseContainer.shared
+            let repo = WebDAVProfileRepository(db: container.db)
+            return try await repo.fetchLatestProfile() != nil
+        } catch {
+            print("[WebDAVBootstrap] 检查已保存配置失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     @MainActor
     func bootstrap() async {
         do {

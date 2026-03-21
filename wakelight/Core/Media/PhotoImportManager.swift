@@ -68,6 +68,8 @@ struct CurationProgress: Codable {
 final class PhotoImportManager: ObservableObject {
     static let shared = PhotoImportManager()
 
+    private static let debugLogEnabled = true
+
     @Published private(set) var syncProgress = SyncProgress()
     @Published private(set) var curationProgress = CurationProgress()
 
@@ -90,6 +92,12 @@ final class PhotoImportManager: ObservableObject {
 
     private init() {
         loadProgress()
+        log("init done, restored sync=\(syncProgress.status.rawValue)/\(syncProgress.phase.rawValue), curation=\(curationProgress.status.rawValue)/\(curationProgress.phase.rawValue)")
+    }
+
+    private func log(_ message: String) {
+        guard Self.debugLogEnabled else { return }
+        print("[ImportManager] \(message)")
     }
 
     func resumeThumbnailBackfillIfNeeded(limit: Int = 300) {
@@ -155,7 +163,11 @@ final class PhotoImportManager: ObservableObject {
     }
 
     func cancelImport() {
-        guard isRunning else { return }
+        guard isRunning else {
+            log("cancelImport ignored: no running task")
+            return
+        }
+        log("cancelImport requested, taskType=\(String(describing: runningTaskType))")
         runningTask?.cancel()
         runningTask = nil
 
@@ -164,13 +176,15 @@ final class PhotoImportManager: ObservableObject {
             isSyncRunning = false
             syncProgress.status = .cancelled
             syncProgress.phase = .idle
-            syncProgress.lastError = "已手动停止同步"
+            syncProgress.lastNotice = "已手动停止同步"
+            syncProgress.lastError = nil
             saveSyncProgress()
         case .curation:
             isCurationRunning = false
             curationProgress.status = .cancelled
             curationProgress.phase = .idle
-            curationProgress.lastError = "已手动停止整理"
+            curationProgress.lastNotice = "已手动停止整理"
+            curationProgress.lastError = nil
             saveCurationProgress()
         case .none:
             break
@@ -189,7 +203,11 @@ final class PhotoImportManager: ObservableObject {
     }
 
     func startLocalPhotosImport(reason: String) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            log("startLocalPhotosImport skipped: already running")
+            return
+        }
+        log("startLocalPhotosImport begin, reason=\(reason)")
         isSyncRunning = true
         runningTaskType = .sync
 
@@ -215,6 +233,8 @@ final class PhotoImportManager: ObservableObject {
                 _ = try await GenerateVisitLayersUseCase().run()
 
                 await self.completeSync(notice: "同步完成：本地照片增量已更新（共处理 \(imported) 项）")
+            } catch is CancellationError {
+                await self.cancelSync(notice: "同步任务已取消")
             } catch {
                 await self.failSync(error: error.localizedDescription)
             }
@@ -228,7 +248,11 @@ final class PhotoImportManager: ObservableObject {
     }
 
     func startPreprocessImportedPhotos(reason: String) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            log("startPreprocessImportedPhotos skipped: already running")
+            return
+        }
+        log("startPreprocessImportedPhotos begin, reason=\(reason)")
         isCurationRunning = true
         runningTaskType = .curation
 
@@ -257,6 +281,8 @@ final class PhotoImportManager: ObservableObject {
                 await self.completeCuration(
                     notice: "预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
                 )
+            } catch is CancellationError {
+                await self.cancelCuration(notice: "整理任务已取消")
             } catch {
                 await self.failCuration(error: error.localizedDescription)
             }
@@ -270,7 +296,11 @@ final class PhotoImportManager: ObservableObject {
     }
 
     func startWebDAVImport(reason: String) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            log("startWebDAVImport skipped: already running")
+            return
+        }
+        log("startWebDAVImport begin, reason=\(reason)")
         isSyncRunning = true
         runningTaskType = .sync
 
@@ -280,6 +310,8 @@ final class PhotoImportManager: ObservableObject {
             do {
                 let result = try await self.performWebDAVImportPipeline()
                 await self.completeSync(notice: "WebDAV 同步完成：已导入 \(result.importedCount) 项")
+            } catch is CancellationError {
+                await self.cancelSync(notice: "WebDAV 同步已取消")
             } catch {
                 await self.failSync(error: error.localizedDescription)
             }
@@ -294,7 +326,11 @@ final class PhotoImportManager: ObservableObject {
 
     func runWebDAVImportInBackgroundIfPossible(reason: String) async -> Bool {
         let canRun = await MainActor.run { !self.isRunning }
-        guard canRun else { return false }
+        guard canRun else {
+            log("runWebDAVImportInBackgroundIfPossible skipped: already running, reason=\(reason)")
+            return false
+        }
+        log("runWebDAVImportInBackgroundIfPossible begin, reason=\(reason)")
 
         await MainActor.run {
             self.isSyncRunning = true
@@ -319,6 +355,9 @@ final class PhotoImportManager: ObservableObject {
 
             let _ = await runCurationInBackgroundIfPossible(reason: "after-webdav-bg-import")
             return true
+        } catch is CancellationError {
+            await cancelSync(notice: "WebDAV 后台同步已取消")
+            return false
         } catch {
             await failSync(error: error.localizedDescription)
             return false
@@ -327,7 +366,11 @@ final class PhotoImportManager: ObservableObject {
 
     func runCurationInBackgroundIfPossible(reason: String) async -> Bool {
         let canRun = await MainActor.run { !self.isRunning }
-        guard canRun else { return false }
+        guard canRun else {
+            log("runCurationInBackgroundIfPossible skipped: already running, reason=\(reason)")
+            return false
+        }
+        log("runCurationInBackgroundIfPossible begin, reason=\(reason)")
 
         await MainActor.run {
             self.isCurationRunning = true
@@ -363,6 +406,9 @@ final class PhotoImportManager: ObservableObject {
                 notice: "后台预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
             )
             return true
+        } catch is CancellationError {
+            await cancelCuration(notice: "后台整理已取消")
+            return false
         } catch {
             await failCuration(error: error.localizedDescription)
             return false
@@ -396,6 +442,7 @@ final class PhotoImportManager: ObservableObject {
 
     @MainActor
     private func updateSyncStatus(_ status: ImportStatus, phase: SyncPhase, resetCounts: Bool) {
+        log("updateSyncStatus status=\(status.rawValue) phase=\(phase.rawValue) reset=\(resetCounts)")
         syncProgress.status = status
         syncProgress.phase = phase
 
@@ -414,6 +461,7 @@ final class PhotoImportManager: ObservableObject {
 
     @MainActor
     private func updateCurationStatus(_ status: ImportStatus, phase: CurationPhase, resetCounts: Bool) {
+        log("updateCurationStatus status=\(status.rawValue) phase=\(phase.rawValue) reset=\(resetCounts)")
         curationProgress.status = status
         curationProgress.phase = phase
 
@@ -435,33 +483,104 @@ final class PhotoImportManager: ObservableObject {
 
     @MainActor
     private func completeSync(notice: String? = nil) {
+        log("completeSync notice=\(notice ?? "nil")")
         syncProgress.status = .completed
         syncProgress.phase = .done
         syncProgress.lastCompletedAt = Date()
         syncProgress.lastNotice = notice
+        syncProgress.lastError = nil
+
+        // 防御性收口：任何完成态都确保运行标记被释放，避免 UI 按钮卡死。
+        isSyncRunning = false
+        if runningTaskType == .sync {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
         saveSyncProgress()
     }
 
     @MainActor
     private func completeCuration(notice: String? = nil) {
+        log("completeCuration notice=\(notice ?? "nil")")
         curationProgress.status = .completed
         curationProgress.phase = .done
         curationProgress.lastCompletedAt = Date()
         curationProgress.lastNotice = notice
+        curationProgress.lastError = nil
+
+        isCurationRunning = false
+        if runningTaskType == .curation {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
+        saveCurationProgress()
+    }
+
+    @MainActor
+    private func cancelSync(notice: String? = nil) {
+        log("cancelSync notice=\(notice ?? "nil")")
+        syncProgress.status = .cancelled
+        syncProgress.phase = .idle
+        syncProgress.lastNotice = notice
+        syncProgress.lastError = nil
+
+        isSyncRunning = false
+        if runningTaskType == .sync {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
+        saveSyncProgress()
+    }
+
+    @MainActor
+    private func cancelCuration(notice: String? = nil) {
+        log("cancelCuration notice=\(notice ?? "nil")")
+        curationProgress.status = .cancelled
+        curationProgress.phase = .idle
+        curationProgress.lastNotice = notice
+        curationProgress.lastError = nil
+
+        isCurationRunning = false
+        if runningTaskType == .curation {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
         saveCurationProgress()
     }
 
     @MainActor
     private func failSync(error: String) {
+        log("failSync error=\(error)")
         syncProgress.status = .failed
         syncProgress.lastError = error
+
+        // 防御性收口：失败态也要释放运行状态，避免超时后界面仍认为任务在运行。
+        isSyncRunning = false
+        if runningTaskType == .sync {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
         saveSyncProgress()
     }
 
     @MainActor
     private func failCuration(error: String) {
+        log("failCuration error=\(error)")
         curationProgress.status = .failed
+        curationProgress.phase = .idle
         curationProgress.lastError = error
+
+        isCurationRunning = false
+        if runningTaskType == .curation {
+            runningTaskType = nil
+            runningTask = nil
+        }
+
         saveCurationProgress()
     }
 
@@ -560,12 +679,14 @@ final class PhotoImportManager: ObservableObject {
     private func saveSyncProgress() {
         if let data = try? JSONEncoder().encode(syncProgress) {
             UserDefaults.standard.set(data, forKey: syncProgressKey)
+            log("saveSyncProgress status=\(syncProgress.status.rawValue) phase=\(syncProgress.phase.rawValue) error=\(syncProgress.lastError ?? "nil") notice=\(syncProgress.lastNotice ?? "nil")")
         }
     }
 
     private func saveCurationProgress() {
         if let data = try? JSONEncoder().encode(curationProgress) {
             UserDefaults.standard.set(data, forKey: curationProgressKey)
+            log("saveCurationProgress status=\(curationProgress.status.rawValue) phase=\(curationProgress.phase.rawValue) error=\(curationProgress.lastError ?? "nil") notice=\(curationProgress.lastNotice ?? "nil")")
         }
     }
 
@@ -573,11 +694,13 @@ final class PhotoImportManager: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: syncProgressKey),
            let saved = try? JSONDecoder().decode(SyncProgress.self, from: data) {
             self.syncProgress = saved
+            log("loadProgress sync restored status=\(saved.status.rawValue) phase=\(saved.phase.rawValue) error=\(saved.lastError ?? "nil") notice=\(saved.lastNotice ?? "nil")")
         }
 
         if let data = UserDefaults.standard.data(forKey: curationProgressKey),
            let saved = try? JSONDecoder().decode(CurationProgress.self, from: data) {
             self.curationProgress = saved
+            log("loadProgress curation restored status=\(saved.status.rawValue) phase=\(saved.phase.rawValue) error=\(saved.lastError ?? "nil") notice=\(saved.lastNotice ?? "nil")")
         }
     }
 
