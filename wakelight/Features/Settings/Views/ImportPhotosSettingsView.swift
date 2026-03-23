@@ -3,28 +3,10 @@ import SwiftUI
 struct ImportPhotosSettingsView: View {
     @StateObject private var importManager = PhotoImportManager.shared
 
-    private enum ProgressSource {
-        case sync
-        case curation
-    }
-
-    private var progressSource: ProgressSource {
-        if importManager.isCurationRunning { return .curation }
-        if importManager.isSyncRunning { return .sync }
-
-        let syncAt = importManager.syncProgress.lastCompletedAt ?? .distantPast
-        let curationAt = importManager.curationProgress.lastCompletedAt ?? .distantPast
-        return curationAt > syncAt ? .curation : .sync
-    }
-
-    private var statusText: String {
-        let status: ImportStatus = progressSource == .curation
-            ? importManager.curationProgress.status
-            : importManager.syncProgress.status
-
+    private func statusText(for status: ImportStatus, runningLabel: String) -> String {
         switch status {
         case .idle: return "空闲"
-        case .importing: return progressSource == .curation ? "整理中" : "同步中"
+        case .importing: return runningLabel
         case .completed: return "完成"
         case .failed: return "失败"
         case .cancelled: return "已停止"
@@ -32,15 +14,6 @@ struct ImportPhotosSettingsView: View {
     }
 
     private var syncPhaseText: String {
-        if progressSource == .curation {
-            switch importManager.curationProgress.phase {
-            case .idle: return "-"
-            case .preprocess: return "智能整理"
-            case .generateClusters, .generateVisitLayers: return "整理收尾中"
-            case .done: return "完成"
-            }
-        }
-
         switch importManager.syncProgress.phase {
         case .idle: return "-"
         case .photos: return "本地增量同步"
@@ -50,41 +23,6 @@ struct ImportPhotosSettingsView: View {
         }
     }
 
-    private var effectiveIsImporting: Bool {
-        progressSource == .curation
-            ? importManager.curationProgress.status == .importing
-            : importManager.syncProgress.status == .importing
-    }
-
-    private var effectiveProcessedItems: Int {
-        progressSource == .curation
-            ? importManager.curationProgress.processedItems
-            : importManager.syncProgress.processedItems
-    }
-
-    private var effectiveTotalItems: Int {
-        progressSource == .curation
-            ? importManager.curationProgress.totalItems
-            : importManager.syncProgress.totalItems
-    }
-
-    private var effectiveProgress: Double {
-        progressSource == .curation
-            ? importManager.curationProgress.progress
-            : importManager.syncProgress.progress
-    }
-
-    private var effectiveLastError: String? {
-        progressSource == .curation
-            ? importManager.curationProgress.lastError
-            : importManager.syncProgress.lastError
-    }
-
-    private var effectiveLastNotice: String? {
-        progressSource == .curation
-            ? importManager.curationProgress.lastNotice
-            : importManager.syncProgress.lastNotice
-    }
 
     var body: some View {
         Form {
@@ -106,7 +44,7 @@ struct ImportPhotosSettingsView: View {
                 HStack {
                     Text("状态")
                     Spacer()
-                    Text(statusText)
+                    Text(statusText(for: importManager.syncProgress.status, runningLabel: "同步中"))
                         .foregroundStyle(.secondary)
                 }
 
@@ -117,15 +55,27 @@ struct ImportPhotosSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if effectiveIsImporting {
-                    if effectiveTotalItems > 0 {
-                        ProgressView(value: effectiveProgress) {
-                            Text("\(effectiveProcessedItems) / \(effectiveTotalItems)")
+                if importManager.isSyncRunning {
+                    if importManager.syncProgress.totalItems > 0 {
+                        ProgressView(value: importManager.syncProgress.progress) {
+                            Text("\(importManager.syncProgress.processedItems) / \(importManager.syncProgress.totalItems)")
                         }
                     } else {
                         ProgressView()
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                }
+
+                if let notice = importManager.syncProgress.lastNotice, !notice.isEmpty {
+                    Text("同步结果: \(notice)")
+                        .foregroundStyle(.green)
+                        .textSelection(.enabled)
+                }
+
+                if let err = importManager.syncProgress.lastError, !err.isEmpty {
+                    Text("同步错误/提示: \(err)")
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
                 }
 
                 if let last = importManager.syncProgress.lastCompletedAt {
@@ -135,18 +85,6 @@ struct ImportPhotosSettingsView: View {
                         Text(last.formatted(date: .numeric, time: .standard))
                             .foregroundStyle(.secondary)
                     }
-                }
-
-                if let notice = effectiveLastNotice, !notice.isEmpty {
-                    Text("结果提示: \(notice)")
-                        .foregroundStyle(.green)
-                        .textSelection(.enabled)
-                }
-
-                if let err = effectiveLastError, !err.isEmpty {
-                    Text("错误/提示: \(err)")
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
                 }
             }
 

@@ -92,6 +92,7 @@ final class PhotoImportManager: ObservableObject {
 
     private init() {
         loadProgress()
+        reconcileRestoredProgressIfNeeded()
         log("init done, restored sync=\(syncProgress.status.rawValue)/\(syncProgress.phase.rawValue), curation=\(curationProgress.status.rawValue)/\(curationProgress.phase.rawValue)")
     }
 
@@ -641,6 +642,37 @@ final class PhotoImportManager: ObservableObject {
             } catch {
                 print("[ImportManager] refreshCurationCountsFromDatabase failed: \(error)")
             }
+        }
+    }
+
+    private func reconcileRestoredProgressIfNeeded() {
+        var didChangeSync = false
+        var didChangeCuration = false
+
+        if syncProgress.status == .importing && !isSyncRunning {
+            syncProgress.status = .cancelled
+            syncProgress.phase = .idle
+            syncProgress.lastError = nil
+            syncProgress.lastNotice = "上次任务中断已停止"
+            didChangeSync = true
+        }
+
+        if curationProgress.status == .importing && !isCurationRunning {
+            curationProgress.status = .cancelled
+            curationProgress.phase = .idle
+            curationProgress.lastError = nil
+            curationProgress.lastNotice = "上次任务中断已停止"
+            didChangeCuration = true
+        }
+
+        if didChangeSync {
+            saveSyncProgress()
+            log("reconcile restored sync importing -> cancelled")
+        }
+
+        if didChangeCuration {
+            saveCurationProgress()
+            log("reconcile restored curation importing -> cancelled")
         }
     }
 

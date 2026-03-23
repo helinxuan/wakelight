@@ -87,7 +87,7 @@ struct SmartPhotoCurationSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if importManager.curationProgress.status == .importing {
+                if importManager.isCurationRunning {
                     if importManager.curationProgress.totalItems > 0 {
                         ProgressView(value: importManager.curationProgress.progress) {
                             Text("\(importManager.curationProgress.processedItems) / \(importManager.curationProgress.totalItems)")

@@ -532,6 +532,21 @@ final class ImportWebDAVPhotosUseCase {
             return sizeChanged || dateChanged
         }
 
+        let locator = MediaLocator.webdav(profileId: profile.id.uuidString, remotePath: remotePath)
+        let thumbnailPath: String?
+        do {
+            thumbnailPath = try await PhotoThumbnailGenerator.shared.generateThumbnail(
+                for: locator,
+                mediaType: metadata.mediaType,
+                preferredLocalFileURL: tempURL
+            )
+        } catch {
+            thumbnailPath = nil
+            print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
+        }
+
+        let thumbnailUpdatedAt = thumbnailPath == nil ? nil : Date()
+
         try await writer.write { db in
             if var existing = try RemoteMediaAsset
                 .filter(Column("profileId") == profile.id && Column("remotePath") == remotePath)
@@ -553,21 +568,14 @@ final class ImportWebDAVPhotosUseCase {
                         pixelWidth: metadata.pixelWidth,
                         pixelHeight: metadata.pixelHeight,
                         duration: metadata.duration,
-                        thumbnailPath: nil,
-                        thumbnailUpdatedAt: nil,
+                        thumbnailPath: thumbnailPath,
+                        thumbnailUpdatedAt: thumbnailUpdatedAt,
                         thumbnailCacheKey: nil,
                         modificationDate: nil,
                         lastSeenAt: scanAt,
                         importedAt: importedAt
                     )
                     try record.insert(db)
-
-                    self.scheduleWebDAVThumbnailGeneration(
-                        profileId: profile.id,
-                        remotePath: remotePath,
-                        photoId: newPhotoId,
-                        mediaType: metadata.mediaType
-                    )
 
                     existing.photoAssetId = newPhotoId
                     existing.etag = item.etag
@@ -592,41 +600,21 @@ final class ImportWebDAVPhotosUseCase {
                 id: photoId,
                 localIdentifier: nil,
                 creationDate: creationDate,
-                latitude: resolvedLatitude,
-                longitude: resolvedLongitude,
+                latitude: finalLatitude,
+                longitude: finalLongitude,
                 mediaType: metadata.mediaType,
                 uti: metadata.uti,
                 pixelWidth: metadata.pixelWidth,
                 pixelHeight: metadata.pixelHeight,
                 duration: metadata.duration,
-                thumbnailPath: nil,
-                thumbnailUpdatedAt: nil,
+                thumbnailPath: thumbnailPath,
+                thumbnailUpdatedAt: thumbnailUpdatedAt,
                 thumbnailCacheKey: nil,
                 modificationDate: nil,
                 lastSeenAt: scanAt,
                 importedAt: importedAt
             )
             try record.insert(db)
-
-            // Trigger background thumbnail generation for new asset (throttled)
-            let locator = MediaLocator.webdav(profileId: profile.id.uuidString, remotePath: remotePath)
-            let mediaType = metadata.mediaType
-            Task {
-                await PhotoThumbnailScheduler.shared.schedule {
-                    do {
-                        let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                        try await DatabaseContainer.shared.writer.write { db in
-                            if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
-                                asset.thumbnailPath = path
-                                asset.thumbnailUpdatedAt = Date()
-                                try asset.update(db)
-                            }
-                        }
-                    } catch {
-                        print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
-                    }
-                }
-            }
 
             let remote = RemoteMediaAsset(
                 id: UUID(),
@@ -667,15 +655,15 @@ final class ImportWebDAVPhotosUseCase {
                                 id: newPhotoId2,
                                 localIdentifier: nil,
                                 creationDate: creationDate,
-                                latitude: resolvedLatitude,
-                                longitude: resolvedLongitude,
+                                latitude: finalLatitude,
+                                longitude: finalLongitude,
                                 mediaType: metadata.mediaType,
                                 uti: metadata.uti,
                                 pixelWidth: metadata.pixelWidth,
                                 pixelHeight: metadata.pixelHeight,
                                 duration: metadata.duration,
-                                thumbnailPath: nil,
-                                thumbnailUpdatedAt: nil,
+                                thumbnailPath: thumbnailPath,
+                                thumbnailUpdatedAt: thumbnailUpdatedAt,
                                 thumbnailCacheKey: nil,
                                 modificationDate: nil,
                                 lastSeenAt: scanAt,

@@ -13,8 +13,13 @@ final class PhotoThumbnailGenerator {
     private init() {}
     
     /// Generates and caches a thumbnail for the given locator.
+    /// - parameter preferredLocalFileURL: Optional local file URL to reuse during import, avoiding an extra network fetch.
     /// Returns the absolute path to the cached thumbnail.
-    func generateThumbnail(for locator: MediaLocator, mediaType: PhotoAsset.MediaType) async throws -> String {
+    func generateThumbnail(
+        for locator: MediaLocator,
+        mediaType: PhotoAsset.MediaType,
+        preferredLocalFileURL: URL? = nil
+    ) async throws -> String {
         let destinationURL = try MediaCache.shared.thumbnailURL(for: locator, size: targetSize)
         
         // If already exists, just return path
@@ -22,7 +27,12 @@ final class PhotoThumbnailGenerator {
             return destinationURL.path
         }
         
-        let resource = try await MediaResolver.shared.resolve(locator: locator)
+        let resource: MediaResource
+        if let preferredLocalFileURL {
+            resource = .url(preferredLocalFileURL)
+        } else {
+            resource = try await MediaResolver.shared.resolve(locator: locator)
+        }
         
         let thumbnail: UIImage
         switch mediaType {
@@ -32,8 +42,14 @@ final class PhotoThumbnailGenerator {
             thumbnail = try await generateImageThumbnail(from: resource)
         }
         
-        // Save to disk as JPEG
-        guard let data = thumbnail.jpegData(compressionQuality: 0.7) else {
+        // Save to disk as JPEG.
+        // JPEG has no alpha channel, so flatten transparent sources first to avoid
+        // unnecessary RGBA->RGB conversion overhead and runtime warnings.
+        let jpegReadyImage = imageHasAlpha(thumbnail)
+            ? flattenToOpaqueJPEGImage(thumbnail, backgroundColor: .white)
+            : thumbnail
+
+        guard let data = jpegReadyImage.jpegData(compressionQuality: 0.7) else {
             throw NSError(domain: "PhotoThumbnailGenerator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to generate JPEG data"])
         }
         
@@ -191,6 +207,29 @@ final class PhotoThumbnailGenerator {
                     continuation.resume(throwing: NSError(domain: "PhotoThumbnailGenerator", code: -6, userInfo: [NSLocalizedDescriptionKey: "AVAsset request failed"]))
                 }
             }
+        }
+    }
+
+    private func imageHasAlpha(_ image: UIImage) -> Bool {
+        guard let alphaInfo = image.cgImage?.alphaInfo else { return false }
+        switch alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func flattenToOpaqueJPEGImage(_ image: UIImage, backgroundColor: UIColor) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = true
+        format.scale = image.scale
+
+        let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+        return renderer.image { context in
+            backgroundColor.setFill()
+            context.fill(CGRect(origin: .zero, size: image.size))
+            image.draw(in: CGRect(origin: .zero, size: image.size))
         }
     }
 }
