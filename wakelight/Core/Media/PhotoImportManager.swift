@@ -378,7 +378,18 @@ final class PhotoImportManager: ObservableObject {
             self.runningTaskType = .curation
         }
 
+        let pipelineStart = Date()
+        let heartbeatTask = Task.detached(priority: .background) { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard let self else { return }
+                let snapshot = await MainActor.run { self.curationProgress }
+                self.log("curation heartbeat phase=\(snapshot.phase.rawValue) progress=\(snapshot.processedItems)/\(snapshot.totalItems)")
+            }
+        }
+
         defer {
+            heartbeatTask.cancel()
             Task { @MainActor in
                 self.isCurationRunning = false
                 self.runningTaskType = nil
@@ -388,29 +399,41 @@ final class PhotoImportManager: ObservableObject {
 
         do {
             await updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
+            log("curation step begin: preprocess")
+            let preprocessStart = Date()
 
             let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
                 Task { @MainActor in
                     PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
                 }
             }
+            log("curation step done: preprocess elapsed=\(Int(Date().timeIntervalSince(preprocessStart)))s")
 
             await refreshCurationCountsFromDatabaseNow(fallback: summary)
 
             await updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
+            log("curation step begin: generateClusters")
+            let clustersStart = Date()
             _ = try await GeneratePlaceClustersUseCase().run()
+            log("curation step done: generateClusters elapsed=\(Int(Date().timeIntervalSince(clustersStart)))s")
 
             await updateCurationStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+            log("curation step begin: generateVisitLayers")
+            let layersStart = Date()
             _ = try await GenerateVisitLayersUseCase().run()
+            log("curation step done: generateVisitLayers elapsed=\(Int(Date().timeIntervalSince(layersStart)))s")
 
             await completeCuration(
                 notice: "后台预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
             )
+            log("runCurationInBackgroundIfPossible done totalElapsed=\(Int(Date().timeIntervalSince(pipelineStart)))s")
             return true
         } catch is CancellationError {
+            log("runCurationInBackgroundIfPossible cancelled after=\(Int(Date().timeIntervalSince(pipelineStart)))s")
             await cancelCuration(notice: "后台整理已取消")
             return false
         } catch {
+            log("runCurationInBackgroundIfPossible failed after=\(Int(Date().timeIntervalSince(pipelineStart)))s error=\(error.localizedDescription)")
             await failCuration(error: error.localizedDescription)
             return false
         }
@@ -612,6 +635,14 @@ final class PhotoImportManager: ObservableObject {
         }
         curationProgress.processedItems = processed
         curationProgress.totalItems = total
+
+        if total > 0 {
+            if processed == 0 || processed % 20 == 0 || processed == total {
+                log("curation progress phase=\(curationProgress.phase.rawValue) \(processed)/\(total)")
+            }
+        } else if processed == 0 {
+            log("curation progress phase=\(curationProgress.phase.rawValue) waiting-total")
+        }
     }
 
     @MainActor

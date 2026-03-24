@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import Vision
+import AVFoundation
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -19,6 +20,15 @@ actor ImportCurationService {
     private let textFilterService: ImportTextFilterService
 
     private let featurePrintDistanceThreshold: Float = 0.7
+    private let featurePrintTimeoutSeconds: Double = 6
+
+    // 调试统计：用于观察整理阶段缩略图命中率。
+    private var debugThumbHitCount: Int = 0
+    private var debugFallbackOriginCount: Int = 0
+    private var debugFallbackFailCount: Int = 0
+    private var debugLoadAttemptCount: Int = 0
+    private var debugFeaturePrintBeginCount: Int = 0
+    private var debugDecisionCount: Int = 0
 
     init(
         scoringService: ImportBestShotScoringService = .shared,
@@ -61,7 +71,37 @@ actor ImportCurationService {
             return []
         }
 
-        let groups = await groupImportedByScene(records: records)
+        // 先上报总量，避免分组阶段较慢时 UI 一直显示 0/0。
+        await onProgress?(0, records.count)
+
+        // 重置本次调试统计
+        debugThumbHitCount = 0
+        debugFallbackOriginCount = 0
+        debugFallbackFailCount = 0
+        debugLoadAttemptCount = 0
+
+        debugFeaturePrintBeginCount = 0
+        debugDecisionCount = 0
+
+        if curationDebugLogEnabled {
+            print("[Curation] curateImportedPhotos begin total=\(records.count)")
+            print("[Curation][ThumbStats] begin hit=0 fallback=0 fail=0")
+        }
+
+        let t0 = Date()
+        let groups = await groupImportedByScene(records: records) { processed, total in
+            await onProgress?(processed, total)
+            if self.curationDebugLogEnabled && (processed == 0 || processed % 50 == 0 || processed == total) {
+                print("[Curation][GroupingProgress] \(processed)/\(total)")
+            }
+        }
+        if curationDebugLogEnabled {
+            let elapsed = Date().timeIntervalSince(t0)
+            let hitRate = debugLoadAttemptCount > 0 ? (Double(debugThumbHitCount) / Double(debugLoadAttemptCount) * 100.0) : 0
+            print("[Curation] grouping done groups=\(groups.count) elapsed=\(String(format: "%.2f", elapsed))s")
+            print("[Curation][ThumbStats] done attempts=\(debugLoadAttemptCount) hit=\(debugThumbHitCount) fallback=\(debugFallbackOriginCount) fail=\(debugFallbackFailCount) hitRate=\(String(format: "%.1f", hitRate))%")
+        }
+
         let decisions = await evaluate(groups: groups, totalCount: records.count, onProgress: onProgress)
         return decisions.map {
             ImportAssetDecision(
@@ -132,7 +172,10 @@ actor ImportCurationService {
         return results
     }
 
-    private func groupByScene(assets: [PHAsset]) async -> [AssetLikeGroup] {
+    private func groupByScene(
+        assets: [PHAsset],
+        onGroupingProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async -> [AssetLikeGroup] {
         let items = assets
             .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
             .map {
@@ -144,14 +187,18 @@ actor ImportCurationService {
                     longitude: $0.location?.coordinate.longitude,
                     phAsset: $0,
                     locator: nil,
+                    thumbnailPath: nil,
                     mediaType: mediaType(for: $0)
                 )
             }
 
-        return await clusterBySceneAndFeaturePrint(items: items)
+        return await clusterBySceneAndFeaturePrint(items: items, onProgress: onGroupingProgress)
     }
 
-    private func groupImportedByScene(records: [PhotoAsset]) async -> [AssetLikeGroup] {
+    private func groupImportedByScene(
+        records: [PhotoAsset],
+        onGroupingProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async -> [AssetLikeGroup] {
         let items = records
             .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
             .map { record in
@@ -163,23 +210,39 @@ actor ImportCurationService {
                     longitude: record.longitude,
                     phAsset: nil,
                     locator: buildLocator(record: record),
+                    thumbnailPath: record.thumbnailPath,
                     mediaType: mediaType(for: record)
                 )
             }
 
-        return await clusterBySceneAndFeaturePrint(items: items)
+        return await clusterBySceneAndFeaturePrint(items: items, onProgress: onGroupingProgress)
     }
 
-    private func clusterBySceneAndFeaturePrint(items: [AssetLikeItem]) async -> [AssetLikeGroup] {
+    private func clusterBySceneAndFeaturePrint(
+        items: [AssetLikeItem],
+        onProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async -> [AssetLikeGroup] {
         var groups: [AssetLikeGroup] = []
         var current: [AssetLikeItem] = []
         var currentFeaturePrints: [String: VNFeaturePrintObservation] = [:]
 
+        let total = items.count
+        var processed = 0
+        await onProgress?(0, total)
+
         for item in items {
+            defer {
+                processed += 1
+            }
+
             guard let last = current.last else {
                 current = [item]
                 if let fp = await featurePrintForItem(item: item) {
                     currentFeaturePrints[item.hashKey] = fp
+                }
+
+                if processed == 0 || processed % 20 == 0 || processed + 1 == total {
+                    await onProgress?(min(processed + 1, total), total)
                 }
                 continue
             }
@@ -206,6 +269,10 @@ actor ImportCurationService {
                 if let fp = await featurePrintForItem(item: item) {
                     currentFeaturePrints[item.hashKey] = fp
                 }
+            }
+
+            if processed == 0 || processed % 20 == 0 || processed + 1 == total {
+                await onProgress?(min(processed + 1, total), total)
             }
         }
 
@@ -275,22 +342,23 @@ actor ImportCurationService {
     private func debugLogDecision(groupId: String, label: String, scored: [ScoredAsset], delta: Double, textSummary: GroupTextSummary) {
         guard curationDebugLogEnabled else { return }
 
-        let details = scored.map { item in
-            let avgText = String(format: "%.2f", item.textAvgConfidence ?? 0)
-            let maxText = String(format: "%.2f", item.textMaxConfidence ?? 0)
-            let area = String(format: "%.4f", item.textAreaRatio)
-            let shot = String(format: "%.2f", item.screenshotScore)
-            let filename = debugFilename(for: item.item)
-            let id = item.item.localIdentifier ?? item.item.photoAssetId?.uuidString ?? "-"
-            return "file=\(filename) id=\(id) s=\(Int(item.score)) shot=\(shot) face=\(item.hasFace ? 1 : 0) txtAvg=\(avgText) txtMax=\(maxText) txtCnt=\(item.textCount) txtArea=\(area)"
-        }.joined(separator: " | ")
+        debugDecisionCount += 1
+        // 仅采样打印，避免大量 SQL(debugDescription) 噪音刷屏。
+        guard debugDecisionCount <= 5 || debugDecisionCount % 20 == 0 else { return }
 
         let deltaText = String(format: "%.2f", delta)
         let avgText = String(format: "%.2f", textSummary.avgConfidence ?? 0)
         let maxText = String(format: "%.2f", textSummary.maxConfidence ?? 0)
         let areaText = String(format: "%.4f", textSummary.totalAreaRatio)
         let shotText = String(format: "%.2f", textSummary.avgScreenshotScore)
-        print("[Curation][\(label)] gid=\(groupId) cnt=\(scored.count) delta=\(deltaText) textAssets=\(textSummary.assetsWithText)/\(textSummary.assetCount) faceAssets=\(textSummary.assetsWithFace) avgShot=\(shotText) textCount=\(textSummary.totalCount) textAreaRatio=\(areaText) textAvgConfidence=\(avgText) textMaxConfidence=\(maxText) \(details)")
+
+        let topFiles = scored.prefix(3).map { item in
+            let filename = debugFilename(for: item.item)
+            let id = item.item.localIdentifier ?? item.item.photoAssetId?.uuidString ?? "-"
+            return "\(filename)#\(id)"
+        }.joined(separator: ",")
+
+        print("[Curation][\(label)] #\(debugDecisionCount) gid=\(groupId) cnt=\(scored.count) delta=\(deltaText) textAssets=\(textSummary.assetsWithText)/\(textSummary.assetCount) faceAssets=\(textSummary.assetsWithFace) avgShot=\(shotText) textCount=\(textSummary.totalCount) textAreaRatio=\(areaText) textAvgConfidence=\(avgText) textMaxConfidence=\(maxText) samples=\(topFiles)")
     }
 
     private func debugFilename(for item: AssetLikeItem) -> String {
@@ -370,8 +438,39 @@ actor ImportCurationService {
     }
 
     private func featurePrintForItem(item: AssetLikeItem) async -> VNFeaturePrintObservation? {
-        guard let image = await loadImage(item: item) else { return nil }
-        return featurePrint(for: image)
+        if curationDebugLogEnabled {
+            debugFeaturePrintBeginCount += 1
+            if debugFeaturePrintBeginCount <= 10 || debugFeaturePrintBeginCount % 100 == 0 {
+                let id = item.localIdentifier ?? item.photoAssetId?.uuidString ?? "-"
+                let name = debugFilename(for: item)
+                print("[Curation][FeaturePrint] begin#\(debugFeaturePrintBeginCount) id=\(id) file=\(name)")
+            }
+        }
+
+        return await withTaskGroup(of: VNFeaturePrintObservation?.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { return nil }
+                guard let image = await self.loadImage(item: item) else { return nil }
+                return await self.featurePrint(for: image)
+            }
+
+            group.addTask { [timeout = featurePrintTimeoutSeconds] in
+                let nanos = UInt64(max(0.1, timeout) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanos)
+                return nil
+            }
+
+            let first = await group.next() ?? nil
+            group.cancelAll()
+
+            if self.curationDebugLogEnabled, first == nil {
+                let id = item.localIdentifier ?? item.photoAssetId?.uuidString ?? "-"
+                let name = self.debugFilename(for: item)
+                print("[Curation][FeaturePrint] timeout-or-failed id=\(id) file=\(name)")
+            }
+
+            return first
+        }
     }
 
     private func featurePrint(for image: UIImage) -> VNFeaturePrintObservation? {
@@ -413,23 +512,120 @@ actor ImportCurationService {
     }
 
     private func loadImage(item: AssetLikeItem) async -> UIImage? {
-        if let asset = item.phAsset {
-            return await loadFromPHAsset(asset)
+        debugLoadAttemptCount += 1
+
+        // 先走已缓存缩略图，减少整理阶段对原图/远端资源的解码与拉取。
+        if let thumbnailPath = item.thumbnailPath,
+           !thumbnailPath.isEmpty,
+           let thumb = UIImage(contentsOfFile: thumbnailPath) {
+            debugThumbHitCount += 1
+            debugLogThumbStatsIfNeeded()
+            return thumb
         }
 
-        guard let locator = item.locator else { return nil }
+        debugFallbackOriginCount += 1
+
+        if let asset = item.phAsset {
+            let image = await loadFromPHAsset(asset)
+            if image == nil {
+                debugFallbackFailCount += 1
+            }
+            debugLogThumbStatsIfNeeded()
+            return image
+        }
+
+        guard let locator = item.locator else {
+            debugFallbackFailCount += 1
+            debugLogThumbStatsIfNeeded()
+            return nil
+        }
+
         do {
             let resource = try await MediaResolver.shared.resolve(locator: locator)
+
+            if item.mediaType == .video {
+                let image = try await loadVideoPreview(from: resource)
+                if image == nil {
+                    debugFallbackFailCount += 1
+                }
+                debugLogThumbStatsIfNeeded()
+                return image
+            }
+
+            let image: UIImage?
             switch resource {
             case .data(let data):
-                return UIImage(data: data)
+                image = UIImage(data: data)
             case .url(let url):
-                return UIImage(contentsOfFile: url.path)
+                image = UIImage(contentsOfFile: url.path)
+                if shouldCleanupTemporaryURL(url) {
+                    try? FileManager.default.removeItem(at: url)
+                }
             case .phAsset(let asset):
-                return await loadFromPHAsset(asset)
+                image = await loadFromPHAsset(asset)
             }
+
+            if image == nil {
+                debugFallbackFailCount += 1
+            }
+            debugLogThumbStatsIfNeeded()
+            return image
         } catch {
+            debugFallbackFailCount += 1
+            debugLogThumbStatsIfNeeded()
             return nil
+        }
+    }
+
+    private func loadVideoPreview(from resource: MediaResource) async throws -> UIImage? {
+        let avAsset: AVAsset
+        var temporaryURL: URL?
+
+        switch resource {
+        case .data(let data):
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".tmp")
+            try data.write(to: tempURL)
+            temporaryURL = tempURL
+            avAsset = AVURLAsset(url: tempURL)
+        case .url(let url):
+            avAsset = AVURLAsset(url: url)
+        case .phAsset(let asset):
+            avAsset = try await requestAVAsset(for: asset)
+        }
+
+        defer {
+            if let temporaryURL {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
+
+        let duration = try await avAsset.load(.duration)
+        let durationSeconds = CMTimeGetSeconds(duration)
+        let snapshotTime = durationSeconds.isFinite && durationSeconds > 0
+            ? CMTime(seconds: max(0.05, durationSeconds / 2.0), preferredTimescale: 600)
+            : CMTime(seconds: 0.05, preferredTimescale: 600)
+
+        let generator = AVAssetImageGenerator(asset: avAsset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1024, height: 1024)
+
+        let (cgImage, _) = try await generator.image(at: snapshotTime)
+        return UIImage(cgImage: cgImage)
+    }
+
+    private func requestAVAsset(for asset: PHAsset) async throws -> AVAsset {
+        try await withCheckedThrowingContinuation { continuation in
+            let options = PHVideoRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
+                if let avAsset {
+                    continuation.resume(returning: avAsset)
+                } else {
+                    continuation.resume(throwing: NSError(domain: "ImportCurationService", code: -7, userInfo: [NSLocalizedDescriptionKey: "AVAsset request failed"]))
+                }
+            }
         }
     }
 
@@ -449,6 +645,21 @@ actor ImportCurationService {
                 continuation.resume(returning: image)
             }
         }
+    }
+
+    private func debugLogThumbStatsIfNeeded() {
+        guard curationDebugLogEnabled else { return }
+        guard debugLoadAttemptCount > 0 else { return }
+        guard debugLoadAttemptCount % 500 == 0 else { return }
+
+        let hitRate = Double(debugThumbHitCount) / Double(debugLoadAttemptCount) * 100.0
+        print("[Curation][ThumbStats] progress attempts=\(debugLoadAttemptCount) hit=\(debugThumbHitCount) fallback=\(debugFallbackOriginCount) fail=\(debugFallbackFailCount) hitRate=\(String(format: "%.1f", hitRate))%")
+    }
+
+    private func shouldCleanupTemporaryURL(_ url: URL) -> Bool {
+        let tmpDir = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let target = url.standardizedFileURL.path
+        return target.hasPrefix(tmpDir)
     }
 
     private func buildLocator(record: PhotoAsset) -> MediaLocator? {
@@ -483,6 +694,7 @@ private struct AssetLikeItem {
     let longitude: Double?
     let phAsset: PHAsset?
     let locator: MediaLocator?
+    let thumbnailPath: String?
     let mediaType: PhotoAsset.MediaType
 
     var hashKey: String {
