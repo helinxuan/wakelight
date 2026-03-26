@@ -111,8 +111,8 @@ final class PhotoImportManager: ObservableObject {
     func backfillThumbnailsIfNeeded(limit: Int = 300) async -> Int {
         do {
             let pending = try await DatabaseContainer.shared.db.reader.read { db in
+                // 不仅补“空路径”，也补“路径存在但文件已被系统清理”的情况。
                 let assets = try PhotoAsset
-                    .filter((Column("thumbnailPath") == nil) || (Column("thumbnailPath") == ""))
                     .order(Column("importedAt").desc)
                     .limit(limit)
                     .fetchAll(db)
@@ -122,7 +122,16 @@ final class PhotoImportManager: ObservableObject {
                 let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
 
                 return assets.compactMap { asset -> (UUID, String, PhotoAsset.MediaType)? in
+                    let hasPath = !(asset.thumbnailPath?.isEmpty ?? true)
+                    let fileExists: Bool = {
+                        guard let path = asset.thumbnailPath, !path.isEmpty else { return false }
+                        return FileManager.default.fileExists(atPath: path)
+                    }()
+
+                    let needsBackfill = !hasPath || !fileExists
+                    guard needsBackfill else { return nil }
                     guard let locator = locatorById[asset.id] else { return nil }
+
                     let mediaType = asset.mediaType ?? .photo
                     return (asset.id, locator.locatorKey, mediaType)
                 }
@@ -263,6 +272,12 @@ final class PhotoImportManager: ObservableObject {
             do {
                 await self.updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
 
+                // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
+                let prefetched = await self.backfillThumbnailsIfNeeded(limit: 1200)
+                await MainActor.run {
+                    self.log("curation preflight thumbnail backfill scheduled=\(prefetched)")
+                }
+
                 let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
                     Task { @MainActor in
                         PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
@@ -401,6 +416,10 @@ final class PhotoImportManager: ObservableObject {
             await updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
             log("curation step begin: preprocess")
             let preprocessStart = Date()
+
+            // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
+            let prefetched = await backfillThumbnailsIfNeeded(limit: 1200)
+            log("curation preflight thumbnail backfill scheduled=\(prefetched)")
 
             let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
                 Task { @MainActor in

@@ -225,6 +225,8 @@ actor ImportCurationService {
         var groups: [AssetLikeGroup] = []
         var current: [AssetLikeItem] = []
         var currentFeaturePrints: [String: VNFeaturePrintObservation] = [:]
+        // A: 全局缓存，避免跨组重复计算同一素材的 feature print。
+        var featurePrintCache: [String: VNFeaturePrintObservation] = [:]
 
         let total = items.count
         var processed = 0
@@ -237,7 +239,7 @@ actor ImportCurationService {
 
             guard let last = current.last else {
                 current = [item]
-                if let fp = await featurePrintForItem(item: item) {
+                if let fp = await featurePrintForItem(item: item, cache: &featurePrintCache) {
                     currentFeaturePrints[item.hashKey] = fp
                 }
 
@@ -251,11 +253,31 @@ actor ImportCurationService {
             let merge: Bool
 
             if shouldConsiderMerge {
-                merge = await shouldMergeByFeaturePrint(
-                    candidate: item,
-                    currentGroupItems: current,
-                    currentFeaturePrints: &currentFeaturePrints
-                )
+                // C: 先做轻量门控，降低 feature print 触发频率。
+                // 若时间非常接近且坐标非常接近，直接认为同组，跳过昂贵视觉特征。
+                let dt = abs((last.creationDate ?? .distantPast).timeIntervalSince(item.creationDate ?? .distantPast))
+                let nearTime = dt <= 1.2
+                let nearLocation: Bool = {
+                    if let lLat = last.latitude, let lLon = last.longitude,
+                       let rLat = item.latitude, let rLon = item.longitude {
+                        let dx = lLat - rLat
+                        let dy = lLon - rLon
+                        let d2 = dx * dx + dy * dy
+                        return d2 <= 0.0000002
+                    }
+                    return false
+                }()
+
+                if nearTime && (nearLocation || last.mediaType == .video || item.mediaType == .video) {
+                    merge = true
+                } else {
+                    merge = await shouldMergeByFeaturePrint(
+                        candidate: item,
+                        currentGroupItems: current,
+                        currentFeaturePrints: &currentFeaturePrints,
+                        featurePrintCache: &featurePrintCache
+                    )
+                }
             } else {
                 merge = false
             }
@@ -266,7 +288,7 @@ actor ImportCurationService {
                 groups.append(AssetLikeGroup(items: current))
                 current = [item]
                 currentFeaturePrints.removeAll(keepingCapacity: true)
-                if let fp = await featurePrintForItem(item: item) {
+                if let fp = await featurePrintForItem(item: item, cache: &featurePrintCache) {
                     currentFeaturePrints[item.hashKey] = fp
                 }
             }
@@ -286,9 +308,15 @@ actor ImportCurationService {
     private func shouldMergeByFeaturePrint(
         candidate: AssetLikeItem,
         currentGroupItems: [AssetLikeItem],
-        currentFeaturePrints: inout [String: VNFeaturePrintObservation]
+        currentFeaturePrints: inout [String: VNFeaturePrintObservation],
+        featurePrintCache: inout [String: VNFeaturePrintObservation]
     ) async -> Bool {
-        guard let candidatePrint = await featurePrintForItem(item: candidate) else {
+        // B: 视频降级——分组阶段不做视频 feature print，交给元数据规则处理。
+        if candidate.mediaType == .video {
+            return true
+        }
+
+        guard let candidatePrint = await featurePrintForItem(item: candidate, cache: &featurePrintCache) else {
             return true
         }
 
@@ -301,7 +329,12 @@ actor ImportCurationService {
             if let cached = currentFeaturePrints[existing.hashKey] {
                 existingPrint = cached
             } else {
-                existingPrint = await featurePrintForItem(item: existing)
+                // B: 对比项若是视频，也跳过 feature print。
+                if existing.mediaType == .video {
+                    continue
+                }
+
+                existingPrint = await featurePrintForItem(item: existing, cache: &featurePrintCache)
                 if let existingPrint {
                     currentFeaturePrints[existing.hashKey] = existingPrint
                 }
@@ -437,7 +470,14 @@ actor ImportCurationService {
         return "grp_\(ts)_\(first.hashKey.hashValue)"
     }
 
-    private func featurePrintForItem(item: AssetLikeItem) async -> VNFeaturePrintObservation? {
+    private func featurePrintForItem(
+        item: AssetLikeItem,
+        cache: inout [String: VNFeaturePrintObservation]
+    ) async -> VNFeaturePrintObservation? {
+        if let cached = cache[item.hashKey] {
+            return cached
+        }
+
         if curationDebugLogEnabled {
             debugFeaturePrintBeginCount += 1
             if debugFeaturePrintBeginCount <= 10 || debugFeaturePrintBeginCount % 100 == 0 {
@@ -447,7 +487,7 @@ actor ImportCurationService {
             }
         }
 
-        return await withTaskGroup(of: VNFeaturePrintObservation?.self) { group in
+        let result = await withTaskGroup(of: VNFeaturePrintObservation?.self) { group in
             group.addTask { [weak self] in
                 guard let self else { return nil }
                 guard let image = await self.loadImage(item: item) else { return nil }
@@ -471,6 +511,11 @@ actor ImportCurationService {
 
             return first
         }
+
+        if let result {
+            cache[item.hashKey] = result
+        }
+        return result
     }
 
     private func featurePrint(for image: UIImage) -> VNFeaturePrintObservation? {
@@ -517,6 +562,7 @@ actor ImportCurationService {
         // 先走已缓存缩略图，减少整理阶段对原图/远端资源的解码与拉取。
         if let thumbnailPath = item.thumbnailPath,
            !thumbnailPath.isEmpty,
+           FileManager.default.fileExists(atPath: thumbnailPath),
            let thumb = UIImage(contentsOfFile: thumbnailPath) {
             debugThumbHitCount += 1
             debugLogThumbStatsIfNeeded()
