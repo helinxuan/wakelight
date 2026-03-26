@@ -275,7 +275,6 @@ struct ExplorationMapView: UIViewRepresentable {
                     if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
                         view.isStoryPoint = hitCluster.hasStory
                         view.isHalfRevealed = true
-                        view.updateStyle()
                     }
 
                     fogScreenView?.triggerDiffusion(for: hitCluster.id)
@@ -305,7 +304,6 @@ struct ExplorationMapView: UIViewRepresentable {
                         if let view = mapView.view(for: annotation) as? LightPointAnnotationView {
                             view.isStoryPoint = hitCluster.hasStory
                             view.isHalfRevealed = true
-                            view.updateStyle()
                         }
                         fogScreenView?.triggerDiffusion(for: hitCluster.id)
                     }
@@ -688,11 +686,15 @@ struct ExplorationMapView: UIViewRepresentable {
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? LightPointAnnotationView
                 ?? LightPointAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
 
+            let isHighlighted = cluster.hasStory || parent.revealedClusterIds.contains(cluster.id)
+
             view.annotation = annotation
             view.canShowCallout = false
+            view.collisionMode = .none
+            view.displayPriority = isHighlighted ? .required : .defaultLow
             view.isStoryPoint = cluster.hasStory
             view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id)
-            view.layer.zPosition = cluster.hasStory ? 2 : 1
+            view.layer.zPosition = isHighlighted ? 20 : 1
             view.updateStyle()
             return view
         }
@@ -831,8 +833,10 @@ struct ExplorationMapView: UIViewRepresentable {
 
         context.coordinator.handleBlowUnlockIfNeeded(on: mapView)
 
+        let clusterById = Dictionary(uniqueKeysWithValues: viewModel.clusters.map { ($0.id, $0) })
+
         for annotation in context.coordinator.currentAnnotations {
-            guard let cluster = viewModel.clusters.first(where: { $0.id == annotation.cluster.id }) else { continue }
+            guard let cluster = clusterById[annotation.cluster.id] else { continue }
             guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
 
             let shouldHalfReveal = revealedClusterIds.contains(cluster.id)
@@ -840,7 +844,6 @@ struct ExplorationMapView: UIViewRepresentable {
             if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
                 view.isStoryPoint = cluster.hasStory
                 view.isHalfRevealed = shouldHalfReveal
-                view.updateStyle()
             }
         }
     }
@@ -850,7 +853,10 @@ final class FogScreenView: UIView {
     weak var mapView: MKMapView?
 
     var clusters: [PlaceCluster] = [] {
-        didSet { needsFullUpdate = true }
+        didSet {
+            rebuildClusterIndex()
+            needsFullUpdate = true
+        }
     }
 
     var revealedClusterIds: Set<UUID> = [] {
@@ -874,6 +880,7 @@ final class FogScreenView: UIView {
     private let glowContainerLayer = CALayer()
     private var activeGlowLayers: [UUID: CALayer] = [:]
     private var idleGlowLayers: [CALayer] = []
+    private var clusterIndexById: [UUID: PlaceCluster] = [:]
 
     private let glowImage = UIImage(named: "FogHoleSoft")?.cgImage
     private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
@@ -891,6 +898,8 @@ final class FogScreenView: UIView {
         overlayLayer.backgroundColor = UIColor.black.withAlphaComponent(fogAlpha).cgColor
         layer.addSublayer(overlayLayer)
         layer.addSublayer(glowContainerLayer)
+
+        rebuildClusterIndex()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -956,67 +965,42 @@ final class FogScreenView: UIView {
         let rect = bounds
         guard rect.width > 0, rect.height > 0 else { return }
 
-        let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
-
-        var candidates: [(id: UUID, screenPoint: CGPoint, dist2: CGFloat, isStory: Bool)] = []
-        candidates.reserveCapacity(256)
-
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-
-        #if DEBUG
-        var storyTotal = 0
-        var storyVisible = 0
-        #endif
-
-        for c in clusters {
-            let isHalfRevealed = revealedClusterIds.contains(c.id)
-            let isFullyRevealed = c.hasStory
-            let isAnimating = c.id == animatingClusterId
-
-            if isFullyRevealed { storyTotal += 1 }
-
-            // 雾层负责所有可见点的“大柔光”：故事点 + 半解锁点 + 动画中的点。
-            guard isFullyRevealed || isHalfRevealed || isAnimating else { continue }
-
-
-            let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
-            let p = mapView.convert(coord, toPointTo: self)
-            guard visibleRect.contains(p) else { continue }
-
-            if isFullyRevealed { storyVisible += 1 }
-
-            let dx = p.x - center.x
-            let dy = p.y - center.y
-            candidates.append((c.id, p, dx * dx + dy * dy, c.hasStory))
-        }
-
-
-        if candidates.count > maxVisibleGlowLayers {
-            let storyCandidates = candidates.filter { $0.isStory }.sorted { $0.dist2 < $1.dist2 }
-            let otherCandidates = candidates.filter { !$0.isStory }.sorted { $0.dist2 < $1.dist2 }
-
-            if storyCandidates.count >= maxVisibleGlowLayers {
-                candidates = Array(storyCandidates.prefix(maxVisibleGlowLayers))
-            } else {
-                let remaining = min(maxVisibleNonStoryGlowLayers, maxVisibleGlowLayers - storyCandidates.count)
-                candidates = storyCandidates + otherCandidates.prefix(remaining)
+        // 只保留“扩散动画”光晕，常驻光点改由 AnnotationView 渲染，避免拖拽时大批量坐标更新。
+        guard let animatingId = animatingClusterId, let animatingCluster = clusterIndexById[animatingId] else {
+            for (id, layer) in activeGlowLayers {
+                layer.removeFromSuperlayer()
+                activeGlowLayers.removeValue(forKey: id)
+                idleGlowLayers.append(layer)
             }
+            return
         }
 
-        let keepIds = Set(candidates.map { $0.id })
+        let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(
+            latitude: animatingCluster.centerLatitude,
+            longitude: animatingCluster.centerLongitude
+        )
+        let p = mapView.convert(coord, toPointTo: self)
 
-        for (id, layer) in activeGlowLayers where !keepIds.contains(id) {
-            layer.removeFromSuperlayer()
+        let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
+        guard visibleRect.contains(p) else {
+            for (id, layer) in activeGlowLayers {
+                layer.removeFromSuperlayer()
+                activeGlowLayers.removeValue(forKey: id)
+                idleGlowLayers.append(layer)
+            }
+            return
+        }
+
+        let layer = getOrCreateGlowLayer(for: animatingId)
+        layer.position = p
+        layer.zPosition = animatingCluster.hasStory ? 2 : 1
+        layer.contents = animatingCluster.hasStory ? storyGlowImage : glowImage
+        layer.compositingFilter = "screenBlendMode"
+
+        for (id, otherLayer) in activeGlowLayers where id != animatingId {
+            otherLayer.removeFromSuperlayer()
             activeGlowLayers.removeValue(forKey: id)
-            idleGlowLayers.append(layer)
-        }
-
-        for item in candidates {
-            let layer = getOrCreateGlowLayer(for: item.id)
-            layer.position = item.screenPoint
-            layer.zPosition = item.isStory ? 2 : 1
-            layer.contents = item.isStory ? storyGlowImage : glowImage
-            layer.compositingFilter = "screenBlendMode"
+            idleGlowLayers.append(otherLayer)
         }
 
         updateActiveGlowLayerGeometryOnly()
@@ -1041,29 +1025,26 @@ final class FogScreenView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
+        // 仅维护扩散动画层的几何更新。
         for (id, layer) in activeGlowLayers {
-            guard let c = clusters.first(where: { $0.id == id }) else { continue }
+            guard let c = clusterIndexById[id] else { continue }
 
             let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(latitude: c.centerLatitude, longitude: c.centerLongitude)
             layer.position = mapView.convert(coord, toPointTo: self)
             layer.contents = c.hasStory ? storyGlowImage : glowImage
-            layer.compositingFilter = c.hasStory ? "screenBlendMode" : nil
+            layer.compositingFilter = "screenBlendMode"
             layer.zPosition = c.hasStory ? 2 : 1
 
             var finalSize = size
-            var finalOpacity = c.hasStory ? max(glowOpacity, 0.78) : glowOpacity
+            var finalOpacity: Float = c.hasStory ? 0.88 : 0.52
 
             if id == animatingClusterId {
                 finalSize = size * (1.0 + 0.35 * animProgress)
-                finalOpacity = min(c.hasStory ? 0.9 : 0.52, finalOpacity + Float(0.18 * animProgress))
+                finalOpacity = min(c.hasStory ? 0.96 : 0.62, finalOpacity + Float(0.18 * animProgress))
             }
 
             layer.bounds = CGRect(x: 0, y: 0, width: finalSize, height: finalSize)
             layer.opacity = finalOpacity
-
-            if layer.compositingFilter == nil {
-                layer.compositingFilter = "screenBlendMode"
-            }
         }
 
         CATransaction.commit()
@@ -1072,6 +1053,15 @@ final class FogScreenView: UIView {
     private func glowZoomFactor(span: Double) -> CGFloat {
         let f = 1.0 / (1.0 + pow(span / 18.0, 0.85))
         return CGFloat(max(0.25, min(1.0, f)))
+    }
+
+    private func rebuildClusterIndex() {
+        var index: [UUID: PlaceCluster] = [:]
+        index.reserveCapacity(clusters.count)
+        for cluster in clusters {
+            index[cluster.id] = cluster
+        }
+        clusterIndexById = index
     }
 
     private func getOrCreateGlowLayer(for id: UUID) -> CALayer {

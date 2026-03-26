@@ -22,6 +22,13 @@ final class LightPointAnnotationView: MKAnnotationView {
             updateStyle()
         }
     }
+
+    var mapZoomLongitudeDelta: Double = 40 {
+        didSet {
+            guard abs(mapZoomLongitudeDelta - oldValue) > 0.001 else { return }
+            updateStyle()
+        }
+    }
     
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -69,7 +76,10 @@ final class LightPointAnnotationView: MKAnnotationView {
     
     func updateStyle() {
         let style = AppConfig.default.lightPointStyle
-        
+
+        let highlightedScale = highlightedScaleForZoom(longitudeDelta: mapZoomLongitudeDelta)
+        let lockedScale = lockedScaleForZoom(longitudeDelta: mapZoomLongitudeDelta)
+
         let color: UIColor
         let size: CGFloat
         let glowRadius: CGFloat
@@ -78,25 +88,25 @@ final class LightPointAnnotationView: MKAnnotationView {
         if isStoryPoint {
             // 状态 3: 完全解锁 (Story) -> 更偏金色
             color = UIColor(red: 1.0, green: 0.72, blue: 0.15, alpha: 1.0)
-            size = style.highlightedSize
-            glowRadius = CGFloat(style.glowIntensity * 12)
-            glowOpacity = Float(style.glowIntensity)
+            size = style.highlightedSize * highlightedScale
+            glowRadius = CGFloat(style.glowIntensity * 12 * highlightedScale)
+            glowOpacity = Float(min(0.96, style.glowIntensity + 0.06))
         } else if isHalfRevealed {
-            // 状态 2: 半解锁 (Half-Revealed) -> 纯白色，亮度/范围对齐 Story 点
+            // 状态 2: 半解锁 (Half-Revealed) -> 纯白色
             color = .white
-            size = style.highlightedSize
-            glowRadius = CGFloat(style.glowIntensity * 12)
-            glowOpacity = Float(style.glowIntensity)
+            size = style.highlightedSize * highlightedScale
+            glowRadius = CGFloat(style.glowIntensity * 10 * highlightedScale)
+            glowOpacity = Float(min(0.9, style.glowIntensity))
         } else {
             // 状态 1: 未解锁 (Locked) -> 灰色/暗淡，弱光晕
             color = .lightGray
-            size = style.defaultSize
-            glowRadius = CGFloat(style.glowIntensity * 4)
-            glowOpacity = 0.3
+            size = style.defaultSize * lockedScale
+            glowRadius = CGFloat(style.glowIntensity * 4 * lockedScale)
+            glowOpacity = 0.24
         }
 
         // 增加点击区域
-        let tapSize = max(size * 3, 44.0)
+        let tapSize = max(size * 3.2, 36.0)
         self.frame = CGRect(x: 0, y: 0, width: tapSize, height: tapSize)
 
         let pointOrigin = (tapSize - size) / 2
@@ -120,24 +130,8 @@ final class LightPointAnnotationView: MKAnnotationView {
             glowLayer.opacity = 1
         }
 
-        if isStoryPoint {
-            let highlightSize = size * 0.5
-            centerHighlightLayer.frame = CGRect(
-                x: (tapSize - highlightSize) / 2,
-                y: (tapSize - highlightSize) / 2,
-                width: highlightSize,
-                height: highlightSize
-            )
-            centerHighlightLayer.cornerRadius = highlightSize / 2
-            centerHighlightLayer.backgroundColor = UIColor.white.cgColor
-            centerHighlightLayer.shadowColor = UIColor.white.cgColor
-            centerHighlightLayer.shadowOpacity = 1.0
-            centerHighlightLayer.shadowRadius = 12
-            centerHighlightLayer.shadowOffset = .zero
-            centerHighlightLayer.opacity = 1.0
-        } else {
-            centerHighlightLayer.opacity = 0.0
-        }
+        // Story 点中心不再叠加白核，避免偏离黄光材质观感
+        centerHighlightLayer.opacity = 0.0
 
         // 白色半解锁点不再使用 AnnotationView 叠加柔光，交给 FogScreenView
         let halfGlowSize = max(size * 2.2, 72)
@@ -151,7 +145,8 @@ final class LightPointAnnotationView: MKAnnotationView {
         halfGlowLayer.opacity = 0.0
 
         if isStoryPoint {
-            let storyGlowSize = max(size * 2.4, 80)
+            let minGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 46 : (mapZoomLongitudeDelta >= 30 ? 56 : 70)
+            let storyGlowSize = max(size * 2.05, minGlow)
             storyGlowLayer.frame = CGRect(
                 x: (tapSize - storyGlowSize) / 2,
                 y: (tapSize - storyGlowSize) / 2,
@@ -159,10 +154,26 @@ final class LightPointAnnotationView: MKAnnotationView {
                 height: storyGlowSize
             )
             storyGlowLayer.cornerRadius = storyGlowSize / 2
-            storyGlowLayer.opacity = 0.95
+            storyGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.78 : 0.9
         } else {
             storyGlowLayer.opacity = 0.0
         }
+    }
+
+    private func highlightedScaleForZoom(longitudeDelta: Double) -> CGFloat {
+        if longitudeDelta >= 90 { return 0.58 }
+        if longitudeDelta >= 60 { return 0.64 }
+        if longitudeDelta >= 30 { return 0.76 }
+        if longitudeDelta >= 15 { return 0.88 }
+        return 1.0
+    }
+
+    private func lockedScaleForZoom(longitudeDelta: Double) -> CGFloat {
+        if longitudeDelta >= 90 { return 0.72 }
+        if longitudeDelta >= 60 { return 0.78 }
+        if longitudeDelta >= 30 { return 0.88 }
+        if longitudeDelta >= 15 { return 0.94 }
+        return 1.0
     }
     
     private func startBreathingAnimation() {
