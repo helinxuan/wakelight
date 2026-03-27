@@ -23,6 +23,13 @@ final class LightPointAnnotationView: MKAnnotationView {
         }
     }
 
+    // 仅用于缩小视角时弱化锁定灰点，避免遮挡高亮点
+    var lockedOverviewAttenuation: CGFloat = 1.0 {
+        didSet {
+            updateStyle()
+        }
+    }
+
     var mapZoomLongitudeDelta: Double = 40 {
         didSet {
             guard abs(mapZoomLongitudeDelta - oldValue) > 0.001 else { return }

@@ -692,6 +692,7 @@ struct ExplorationMapView: UIViewRepresentable {
             view.canShowCallout = false
             view.collisionMode = .none
             view.displayPriority = isHighlighted ? .required : .defaultLow
+            view.mapZoomLongitudeDelta = mapView.region.span.longitudeDelta
             view.isStoryPoint = cluster.hasStory
             view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id)
             view.layer.zPosition = isHighlighted ? 20 : 1
@@ -835,15 +836,32 @@ struct ExplorationMapView: UIViewRepresentable {
 
         let clusterById = Dictionary(uniqueKeysWithValues: viewModel.clusters.map { ($0.id, $0) })
 
+        let currentZoom = mapView.region.span.longitudeDelta
+
         for annotation in context.coordinator.currentAnnotations {
             guard let cluster = clusterById[annotation.cluster.id] else { continue }
             guard let view = mapView.view(for: annotation) as? LightPointAnnotationView else { continue }
 
             let shouldHalfReveal = revealedClusterIds.contains(cluster.id)
+            let isHighlighted = cluster.hasStory || shouldHalfReveal
+
+            if abs(view.mapZoomLongitudeDelta - currentZoom) > 0.001 {
+                view.mapZoomLongitudeDelta = currentZoom
+            }
 
             if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
                 view.isStoryPoint = cluster.hasStory
                 view.isHalfRevealed = shouldHalfReveal
+            }
+
+            let targetPriority: MKFeatureDisplayPriority = isHighlighted ? .required : .defaultLow
+            if view.displayPriority != targetPriority {
+                view.displayPriority = targetPriority
+            }
+
+            let targetZ: CGFloat = isHighlighted ? 20 : 1
+            if view.layer.zPosition != targetZ {
+                view.layer.zPosition = targetZ
             }
         }
     }
