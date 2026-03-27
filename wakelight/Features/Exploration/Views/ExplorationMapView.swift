@@ -692,6 +692,8 @@ struct ExplorationMapView: UIViewRepresentable {
             view.canShowCallout = false
             view.collisionMode = .none
             view.displayPriority = isHighlighted ? .required : .defaultLow
+            view.zPriority = isHighlighted ? .max : .defaultUnselected
+            view.selectedZPriority = .max
             view.mapZoomLongitudeDelta = mapView.region.span.longitudeDelta
             view.isStoryPoint = cluster.hasStory
             view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id)
@@ -707,6 +709,19 @@ struct ExplorationMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             fogScreenView?.markNeedsFullUpdate()
             fogScreenView?.updateIfNeeded(interactionPhase: false)
+        }
+
+        func mapView(_ mapView: MKMapView, didAdd views: [MKAnnotationView]) {
+            for view in views {
+                guard let ann = view.annotation as? ClusterAnnotation else { continue }
+                let isHighlighted = ann.cluster.hasStory || parent.revealedClusterIds.contains(ann.cluster.id)
+                if isHighlighted {
+                    view.superview?.bringSubviewToFront(view)
+                    view.layer.zPosition = 50
+                } else {
+                    view.layer.zPosition = 1
+                }
+            }
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
@@ -859,9 +874,21 @@ struct ExplorationMapView: UIViewRepresentable {
                 view.displayPriority = targetPriority
             }
 
-            let targetZ: CGFloat = isHighlighted ? 20 : 1
+            let targetZPriority: MKAnnotationViewZPriority = isHighlighted ? .max : .defaultUnselected
+            if view.zPriority != targetZPriority {
+                view.zPriority = targetZPriority
+            }
+            if view.selectedZPriority != .max {
+                view.selectedZPriority = .max
+            }
+
+            let targetZ: CGFloat = isHighlighted ? 50 : 1
             if view.layer.zPosition != targetZ {
                 view.layer.zPosition = targetZ
+            }
+
+            if isHighlighted {
+                view.superview?.bringSubviewToFront(view)
             }
         }
     }

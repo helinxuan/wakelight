@@ -18,9 +18,16 @@ actor ImportCurationService {
 
     private let scoringService: ImportBestShotScoringService
     private let textFilterService: ImportTextFilterService
+    private let perceptualHashService: ImportPerceptualHashService
 
     private let featurePrintDistanceThreshold: Float = 0.7
     private let featurePrintTimeoutSeconds: Double = 6
+    private let coarseTimeWindowSeconds: Double = 4
+    private let coarseDistanceMeters: Double = 50
+    private let fusedPHashWeight: Double = 0.45
+    private let fusedFeaturePrintWeight: Double = 0.55
+    private let dbscanEpsilon: Double = 0.82
+    private let dbscanMinPoints: Int = 2
 
     // 调试统计：用于观察整理阶段缩略图命中率。
     private var debugThumbHitCount: Int = 0
@@ -32,10 +39,12 @@ actor ImportCurationService {
 
     init(
         scoringService: ImportBestShotScoringService = .shared,
-        textFilterService: ImportTextFilterService = .shared
+        textFilterService: ImportTextFilterService = .shared,
+        perceptualHashService: ImportPerceptualHashService = .shared
     ) {
         self.scoringService = scoringService
         self.textFilterService = textFilterService
+        self.perceptualHashService = perceptualHashService
     }
 
     func curate(
@@ -192,7 +201,7 @@ actor ImportCurationService {
                 )
             }
 
-        return await clusterBySceneAndFeaturePrint(items: items, onProgress: onGroupingProgress)
+        return await clusterByThreeStagePipeline(items: items, onProgress: onGroupingProgress)
     }
 
     private func groupImportedByScene(
@@ -215,161 +224,248 @@ actor ImportCurationService {
                 )
             }
 
-        return await clusterBySceneAndFeaturePrint(items: items, onProgress: onGroupingProgress)
+        return await clusterByThreeStagePipeline(items: items, onProgress: onGroupingProgress)
     }
 
-    private func clusterBySceneAndFeaturePrint(
+    private func clusterByThreeStagePipeline(
         items: [AssetLikeItem],
         onProgress: (@Sendable (Int, Int) async -> Void)? = nil
     ) async -> [AssetLikeGroup] {
-        var groups: [AssetLikeGroup] = []
-        var current: [AssetLikeItem] = []
-        var currentFeaturePrints: [String: VNFeaturePrintObservation] = [:]
-        // A: 全局缓存，避免跨组重复计算同一素材的 feature print。
-        var featurePrintCache: [String: VNFeaturePrintObservation] = [:]
+        guard !items.isEmpty else {
+            await onProgress?(0, 0)
+            return []
+        }
 
+        // 第一层：时间/GPS 粗分组（必须快）
+        let coarseGroups = buildCoarseGroups(items: items)
+
+        // 第二层：仅在粗组内计算 pHash + FeaturePrint。
+        var featurePrintCache: [String: VNFeaturePrintObservation] = [:]
+        var pHashCache: [String: PerceptualHash] = [:]
+
+        var groups: [AssetLikeGroup] = []
         let total = items.count
         var processed = 0
         await onProgress?(0, total)
 
-        for item in items {
-            defer {
-                processed += 1
+        for coarse in coarseGroups {
+            let clusters = await clusterWithinCoarseGroup(
+                coarse,
+                featurePrintCache: &featurePrintCache,
+                pHashCache: &pHashCache
+            )
+
+            for cluster in clusters where !cluster.isEmpty {
+                groups.append(AssetLikeGroup(items: cluster))
             }
 
-            guard let last = current.last else {
-                current = [item]
-                if let fp = await featurePrintForItem(item: item, cache: &featurePrintCache) {
-                    currentFeaturePrints[item.hashKey] = fp
-                }
-
-                if processed == 0 || processed % 20 == 0 || processed + 1 == total {
-                    await onProgress?(min(processed + 1, total), total)
-                }
-                continue
-            }
-
-            let shouldConsiderMerge = shouldMergeByMetadata(lhs: last, rhs: item)
-            let merge: Bool
-
-            if shouldConsiderMerge {
-                // C: 先做轻量门控，降低 feature print 触发频率。
-                // 若时间非常接近且坐标非常接近，直接认为同组，跳过昂贵视觉特征。
-                let dt = abs((last.creationDate ?? .distantPast).timeIntervalSince(item.creationDate ?? .distantPast))
-                let nearTime = dt <= 1.2
-                let nearLocation: Bool = {
-                    if let lLat = last.latitude, let lLon = last.longitude,
-                       let rLat = item.latitude, let rLon = item.longitude {
-                        let dx = lLat - rLat
-                        let dy = lLon - rLon
-                        let d2 = dx * dx + dy * dy
-                        return d2 <= 0.0000002
-                    }
-                    return false
-                }()
-
-                if nearTime && (nearLocation || last.mediaType == .video || item.mediaType == .video) {
-                    merge = true
-                } else {
-                    merge = await shouldMergeByFeaturePrint(
-                        candidate: item,
-                        currentGroupItems: current,
-                        currentFeaturePrints: &currentFeaturePrints,
-                        featurePrintCache: &featurePrintCache
-                    )
-                }
-            } else {
-                merge = false
-            }
-
-            if merge {
-                current.append(item)
-            } else {
-                groups.append(AssetLikeGroup(items: current))
-                current = [item]
-                currentFeaturePrints.removeAll(keepingCapacity: true)
-                if let fp = await featurePrintForItem(item: item, cache: &featurePrintCache) {
-                    currentFeaturePrints[item.hashKey] = fp
-                }
-            }
-
-            if processed == 0 || processed % 20 == 0 || processed + 1 == total {
-                await onProgress?(min(processed + 1, total), total)
-            }
-        }
-
-        if !current.isEmpty {
-            groups.append(AssetLikeGroup(items: current))
+            processed += coarse.count
+            await onProgress?(min(processed, total), total)
         }
 
         return groups
     }
 
-    private func shouldMergeByFeaturePrint(
-        candidate: AssetLikeItem,
-        currentGroupItems: [AssetLikeItem],
-        currentFeaturePrints: inout [String: VNFeaturePrintObservation],
-        featurePrintCache: inout [String: VNFeaturePrintObservation]
-    ) async -> Bool {
-        // B: 视频降级——分组阶段不做视频 feature print，交给元数据规则处理。
-        if candidate.mediaType == .video {
-            return true
-        }
+    private func buildCoarseGroups(items: [AssetLikeItem]) -> [[AssetLikeItem]] {
+        var buckets: [String: [AssetLikeItem]] = [:]
+        buckets.reserveCapacity(max(1, items.count / 2))
 
-        guard let candidatePrint = await featurePrintForItem(item: candidate, cache: &featurePrintCache) else {
-            return true
-        }
+        for item in items {
+            let date = item.creationDate ?? .distantPast
+            let timeBucket = Int((date.timeIntervalSince1970 / coarseTimeWindowSeconds).rounded(.down))
 
-        currentFeaturePrints[candidate.hashKey] = candidatePrint
+            if let lat = item.latitude, let lon = item.longitude {
+                let cellSizeDegrees = metersToLatitudeDegrees(coarseDistanceMeters)
+                let (latIdx, lonIdx) = GeoGrid.bucketIndices(
+                    latitude: lat,
+                    longitude: lon,
+                    precisionDegrees: cellSizeDegrees
+                )
 
-        var minDistance = Float.greatestFiniteMagnitude
-
-        for existing in currentGroupItems {
-            let existingPrint: VNFeaturePrintObservation?
-            if let cached = currentFeaturePrints[existing.hashKey] {
-                existingPrint = cached
-            } else {
-                // B: 对比项若是视频，也跳过 feature print。
-                if existing.mediaType == .video {
-                    continue
+                for dt in -1...1 {
+                    for dLat in -1...1 {
+                        for dLon in -1...1 {
+                            let key = "t\(timeBucket + dt)|\(latIdx + dLat)_\(lonIdx + dLon)"
+                            buckets[key, default: []].append(item)
+                        }
+                    }
                 }
-
-                existingPrint = await featurePrintForItem(item: existing, cache: &featurePrintCache)
-                if let existingPrint {
-                    currentFeaturePrints[existing.hashKey] = existingPrint
+            } else {
+                for dt in -1...1 {
+                    let key = "t\(timeBucket + dt)|nogps"
+                    buckets[key, default: []].append(item)
                 }
             }
+        }
 
-            guard let existingPrint,
-                  let distance = featurePrintDistance(from: candidatePrint, to: existingPrint) else {
+        var seen = Set<String>()
+        var groups: [[AssetLikeItem]] = []
+        groups.reserveCapacity(buckets.count)
+
+        let sortedKeys = buckets.keys.sorted()
+        for key in sortedKeys {
+            guard let candidates = buckets[key], !candidates.isEmpty else { continue }
+            let unique = candidates.filter { seen.insert($0.hashKey).inserted }
+            if !unique.isEmpty {
+                groups.append(unique.sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) })
+            }
+        }
+
+        return groups
+    }
+
+    private func clusterWithinCoarseGroup(
+        _ items: [AssetLikeItem],
+        featurePrintCache: inout [String: VNFeaturePrintObservation],
+        pHashCache: inout [String: PerceptualHash]
+    ) async -> [[AssetLikeItem]] {
+        if items.count <= 1 {
+            return [items]
+        }
+
+        var vectors = Array<SimilarityVector?>(repeating: nil, count: items.count)
+        var photoIndices: [Int] = []
+        var videoIndices: [Int] = []
+
+        for (idx, item) in items.enumerated() {
+            if item.mediaType == .video {
+                videoIndices.append(idx)
                 continue
             }
 
-            minDistance = min(minDistance, distance)
-            if distance <= featurePrintDistanceThreshold {
-                return true
+            guard let image = await loadImage(item: item) else {
+                videoIndices.append(idx)
+                continue
+            }
+
+            let pHash: PerceptualHash?
+            if let cached = pHashCache[item.hashKey] {
+                pHash = cached
+            } else if let localIdentifier = item.localIdentifier {
+                let computed = await perceptualHashService.hash(cacheKey: localIdentifier, image: image)
+                if let computed {
+                    pHashCache[item.hashKey] = computed
+                }
+                pHash = computed
+            } else {
+                pHash = nil
+            }
+
+            let featurePrint = await featurePrintForItem(item: item, cache: &featurePrintCache)
+            vectors[idx] = SimilarityVector(featurePrint: featurePrint, pHash: pHash)
+            photoIndices.append(idx)
+        }
+
+        var neighborTable: [[Int]] = Array(repeating: [], count: items.count)
+        for i in photoIndices {
+            for j in photoIndices where j > i {
+                let distance = fusedDistance(vectors[i], vectors[j])
+                if distance <= dbscanEpsilon {
+                    neighborTable[i].append(j)
+                    neighborTable[j].append(i)
+                }
             }
         }
 
-        return minDistance.isFinite ? minDistance <= featurePrintDistanceThreshold : true
-    }
+        let (clustersByIndex, noiseByIndex) = dbscan(
+            indices: photoIndices,
+            neighbors: neighborTable,
+            minPoints: dbscanMinPoints
+        )
 
-    private func shouldMergeByMetadata(lhs: AssetLikeItem, rhs: AssetLikeItem) -> Bool {
-        if lhs.mediaType != rhs.mediaType { return false }
-
-        let lhsDate = lhs.creationDate ?? .distantPast
-        let rhsDate = rhs.creationDate ?? .distantPast
-        let dt = abs(lhsDate.timeIntervalSince(rhsDate))
-        if dt > 8 { return false }
-
-        if let lLat = lhs.latitude, let lLon = lhs.longitude, let rLat = rhs.latitude, let rLon = rhs.longitude {
-            let dx = lLat - rLat
-            let dy = lLon - rLon
-            let d2 = dx * dx + dy * dy
-            return d2 <= 0.000001
+        var output: [[AssetLikeItem]] = clustersByIndex.map { cluster in
+            cluster.map { items[$0] }
         }
 
-        return true
+        if !noiseByIndex.isEmpty {
+            output.append(noiseByIndex.map { items[$0] })
+        }
+
+        for vid in videoIndices {
+            output.append([items[vid]])
+        }
+
+        return output
+    }
+
+    private func dbscan(
+        indices: [Int],
+        neighbors: [[Int]],
+        minPoints: Int
+    ) -> (clusters: [[Int]], noise: [Int]) {
+        guard !indices.isEmpty else { return ([], []) }
+
+        var visited = Set<Int>()
+        var assigned = Set<Int>()
+        var clusters: [[Int]] = []
+        var noise: [Int] = []
+
+        for point in indices {
+            if visited.contains(point) { continue }
+            visited.insert(point)
+
+            let pointNeighbors = neighbors[point]
+            if pointNeighbors.count + 1 < minPoints {
+                noise.append(point)
+                continue
+            }
+
+            var cluster: [Int] = [point]
+            assigned.insert(point)
+            var seeds = pointNeighbors
+            var seedCursor = 0
+
+            while seedCursor < seeds.count {
+                let candidate = seeds[seedCursor]
+
+                if !visited.contains(candidate) {
+                    visited.insert(candidate)
+                    let candidateNeighbors = neighbors[candidate]
+                    if candidateNeighbors.count + 1 >= minPoints {
+                        for neighbor in candidateNeighbors where !seeds.contains(neighbor) {
+                            seeds.append(neighbor)
+                        }
+                    }
+                }
+
+                if !assigned.contains(candidate) {
+                    assigned.insert(candidate)
+                    cluster.append(candidate)
+                }
+
+                seedCursor += 1
+            }
+
+            clusters.append(cluster)
+        }
+
+        let noiseSet = Set(noise).subtracting(assigned)
+        return (clusters, Array(noiseSet).sorted())
+    }
+
+    private func fusedDistance(_ lhs: SimilarityVector?, _ rhs: SimilarityVector?) -> Double {
+        guard let lhs, let rhs else { return 1.0 }
+
+        let pHashDistance: Double = {
+            guard let leftHash = lhs.pHash, let rightHash = rhs.pHash else { return 1.0 }
+            let raw = leftHash.hammingDistance(to: rightHash)
+            return min(1.0, max(0.0, Double(raw) / 64.0))
+        }()
+
+        let fpDistance: Double = {
+            guard let leftFP = lhs.featurePrint, let rightFP = rhs.featurePrint,
+                  let raw = featurePrintDistance(from: leftFP, to: rightFP) else {
+                return 1.0
+            }
+            return min(1.0, max(0.0, Double(raw / featurePrintDistanceThreshold)))
+        }()
+
+        return fusedPHashWeight * pHashDistance + fusedFeaturePrintWeight * fpDistance
+    }
+
+    private func metersToLatitudeDegrees(_ meters: Double) -> Double {
+        // 1° 纬度约 111_320 米
+        max(0.00001, meters / 111_320.0)
     }
 
     private func debugLogDecision(groupId: String, label: String, scored: [ScoredAsset], delta: Double, textSummary: GroupTextSummary) {
@@ -730,6 +826,11 @@ actor ImportCurationService {
 
 private struct AssetLikeGroup {
     let items: [AssetLikeItem]
+}
+
+private struct SimilarityVector {
+    let featurePrint: VNFeaturePrintObservation?
+    let pHash: PerceptualHash?
 }
 
 private struct AssetLikeItem {

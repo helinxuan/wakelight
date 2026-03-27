@@ -16,8 +16,8 @@ actor ImportPerceptualHashService {
 
     private init() {}
 
-    func hash(localIdentifier: String, image: UIImage) -> PerceptualHash? {
-        if let cached = cache[localIdentifier] { return cached }
+    func hash(cacheKey: String, image: UIImage) -> PerceptualHash? {
+        if let cached = cache[cacheKey] { return cached }
         guard let small = downsampleTo8x8(image: image) else { return nil }
 
         let pixels = small.pixels
@@ -31,7 +31,7 @@ actor ImportPerceptualHashService {
         }
 
         let ph = PerceptualHash(bits: bits)
-        cache[localIdentifier] = ph
+        cache[cacheKey] = ph
         return ph
     }
 

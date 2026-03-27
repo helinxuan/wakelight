@@ -54,9 +54,9 @@ final class LightPointAnnotationView: MKAnnotationView {
         storyGlowLayer.contentsGravity = .resizeAspect
         storyGlowLayer.opacity = 0
         storyGlowLayer.compositingFilter = "screenBlendMode"
-        storyGlowLayer.shadowColor = UIColor(red: 1.0, green: 0.72, blue: 0.2, alpha: 1.0).cgColor
-        storyGlowLayer.shadowOpacity = 0.75
-        storyGlowLayer.shadowRadius = 16
+        storyGlowLayer.shadowColor = UIColor.clear.cgColor
+        storyGlowLayer.shadowOpacity = 0.0
+        storyGlowLayer.shadowRadius = 0
         storyGlowLayer.shadowOffset = .zero
 
         halfGlowLayer.masksToBounds = false
@@ -129,27 +129,67 @@ final class LightPointAnnotationView: MKAnnotationView {
         glowLayer.shadowRadius = glowRadius
         glowLayer.shadowOpacity = glowOpacity
 
-        if isStoryPoint || isHalfRevealed {
-            coreLayer.opacity = 0
-            glowLayer.opacity = 0
+        if isStoryPoint {
+            coreLayer.opacity = 1
+            glowLayer.opacity = 1
+        } else if isHalfRevealed {
+            coreLayer.opacity = 1
+            glowLayer.opacity = 1
         } else {
             coreLayer.opacity = 1
             glowLayer.opacity = 1
         }
 
-        // Story 点中心不再叠加白核，避免偏离黄光材质观感
-        centerHighlightLayer.opacity = 0.0
+        // 亮点增加实心核：确保在密集灰点区域仍有明确“主体”
+        if isStoryPoint {
+            let coreHighlightSize = max(8, size * 0.52)
+            centerHighlightLayer.frame = CGRect(
+                x: (tapSize - coreHighlightSize) / 2,
+                y: (tapSize - coreHighlightSize) / 2,
+                width: coreHighlightSize,
+                height: coreHighlightSize
+            )
+            centerHighlightLayer.cornerRadius = coreHighlightSize / 2
+            centerHighlightLayer.backgroundColor = UIColor(red: 1.0, green: 0.86, blue: 0.36, alpha: 1.0).cgColor
+            centerHighlightLayer.shadowColor = UIColor.clear.cgColor
+            centerHighlightLayer.shadowOpacity = 0.0
+            centerHighlightLayer.shadowRadius = 0
+            centerHighlightLayer.shadowOffset = .zero
+            centerHighlightLayer.opacity = 0.96
+        } else if isHalfRevealed {
+            let coreHighlightSize = max(7, size * 0.48)
+            centerHighlightLayer.frame = CGRect(
+                x: (tapSize - coreHighlightSize) / 2,
+                y: (tapSize - coreHighlightSize) / 2,
+                width: coreHighlightSize,
+                height: coreHighlightSize
+            )
+            centerHighlightLayer.cornerRadius = coreHighlightSize / 2
+            centerHighlightLayer.backgroundColor = UIColor.white.withAlphaComponent(0.98).cgColor
+            centerHighlightLayer.shadowColor = UIColor.white.cgColor
+            centerHighlightLayer.shadowOpacity = 0.82
+            centerHighlightLayer.shadowRadius = 4.0
+            centerHighlightLayer.shadowOffset = .zero
+            centerHighlightLayer.opacity = 0.96
+        } else {
+            centerHighlightLayer.opacity = 0.0
+        }
 
-        // 白色半解锁点不再使用 AnnotationView 叠加柔光，交给 FogScreenView
-        let halfGlowSize = max(size * 2.2, 72)
-        halfGlowLayer.frame = CGRect(
-            x: (tapSize - halfGlowSize) / 2,
-            y: (tapSize - halfGlowSize) / 2,
-            width: halfGlowSize,
-            height: halfGlowSize
-        )
-        halfGlowLayer.cornerRadius = halfGlowSize / 2
-        halfGlowLayer.opacity = 0.0
+        // half 点保留轻白光晕，增强覆盖感但不过度膨胀
+        if isHalfRevealed {
+            let minHalfGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 40 : (mapZoomLongitudeDelta >= 30 ? 48 : 58)
+            let halfGlowSize = max(size * 1.75, minHalfGlow)
+            halfGlowLayer.frame = CGRect(
+                x: (tapSize - halfGlowSize) / 2,
+                y: (tapSize - halfGlowSize) / 2,
+                width: halfGlowSize,
+                height: halfGlowSize
+            )
+            halfGlowLayer.cornerRadius = halfGlowSize / 2
+            halfGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.58 : 0.72
+        } else {
+            halfGlowLayer.opacity = 0.0
+        }
 
         if isStoryPoint {
             let minGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 46 : (mapZoomLongitudeDelta >= 30 ? 56 : 70)
