@@ -36,6 +36,14 @@ final class LightPointAnnotationView: MKAnnotationView {
             updateStyle()
         }
     }
+
+    // 退出刮擦后由 AnnotationView 承担常驻发光；刮擦态关闭，交给 FogScreenView。
+    var usesPersistentGlow: Bool = true {
+        didSet {
+            guard usesPersistentGlow != oldValue else { return }
+            updateStyle()
+        }
+    }
     
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -175,34 +183,39 @@ final class LightPointAnnotationView: MKAnnotationView {
             centerHighlightLayer.opacity = 0.0
         }
 
-        // half 点保留轻白光晕，增强覆盖感但不过度膨胀
-        if isHalfRevealed {
-            let minHalfGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 40 : (mapZoomLongitudeDelta >= 30 ? 48 : 58)
-            let halfGlowSize = max(size * 1.75, minHalfGlow)
-            halfGlowLayer.frame = CGRect(
-                x: (tapSize - halfGlowSize) / 2,
-                y: (tapSize - halfGlowSize) / 2,
-                width: halfGlowSize,
-                height: halfGlowSize
-            )
-            halfGlowLayer.cornerRadius = halfGlowSize / 2
-            halfGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.58 : 0.72
+        if usesPersistentGlow {
+            // half 点保留轻白光晕，增强覆盖感但不过度膨胀
+            if isHalfRevealed {
+                let minHalfGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 40 : (mapZoomLongitudeDelta >= 30 ? 48 : 58)
+                let halfGlowSize = max(size * 1.75, minHalfGlow)
+                halfGlowLayer.frame = CGRect(
+                    x: (tapSize - halfGlowSize) / 2,
+                    y: (tapSize - halfGlowSize) / 2,
+                    width: halfGlowSize,
+                    height: halfGlowSize
+                )
+                halfGlowLayer.cornerRadius = halfGlowSize / 2
+                halfGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.58 : 0.72
+            } else {
+                halfGlowLayer.opacity = 0.0
+            }
+
+            if isStoryPoint {
+                let minGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 46 : (mapZoomLongitudeDelta >= 30 ? 56 : 70)
+                let storyGlowSize = max(size * 2.05, minGlow)
+                storyGlowLayer.frame = CGRect(
+                    x: (tapSize - storyGlowSize) / 2,
+                    y: (tapSize - storyGlowSize) / 2,
+                    width: storyGlowSize,
+                    height: storyGlowSize
+                )
+                storyGlowLayer.cornerRadius = storyGlowSize / 2
+                storyGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.78 : 0.9
+            } else {
+                storyGlowLayer.opacity = 0.0
+            }
         } else {
             halfGlowLayer.opacity = 0.0
-        }
-
-        if isStoryPoint {
-            let minGlow: CGFloat = mapZoomLongitudeDelta >= 60 ? 46 : (mapZoomLongitudeDelta >= 30 ? 56 : 70)
-            let storyGlowSize = max(size * 2.05, minGlow)
-            storyGlowLayer.frame = CGRect(
-                x: (tapSize - storyGlowSize) / 2,
-                y: (tapSize - storyGlowSize) / 2,
-                width: storyGlowSize,
-                height: storyGlowSize
-            )
-            storyGlowLayer.cornerRadius = storyGlowSize / 2
-            storyGlowLayer.opacity = mapZoomLongitudeDelta >= 60 ? 0.78 : 0.9
-        } else {
             storyGlowLayer.opacity = 0.0
         }
     }

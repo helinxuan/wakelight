@@ -695,6 +695,7 @@ struct ExplorationMapView: UIViewRepresentable {
             view.zPriority = isHighlighted ? .max : .defaultUnselected
             view.selectedZPriority = .max
             view.mapZoomLongitudeDelta = mapView.region.span.longitudeDelta
+            view.usesPersistentGlow = !parent.isAwakenMode
             view.isStoryPoint = cluster.hasStory
             view.isHalfRevealed = parent.revealedClusterIds.contains(cluster.id)
             view.layer.zPosition = isHighlighted ? 20 : 1
@@ -840,6 +841,7 @@ struct ExplorationMapView: UIViewRepresentable {
 
         fogView.clusters = viewModel.clusters
         fogView.revealedClusterIds = revealedClusterIds
+        fogView.isAwakenMode = isAwakenMode
         fogView.markNeedsFullUpdate()
         fogView.updateIfNeeded(interactionPhase: false)
 
@@ -862,6 +864,10 @@ struct ExplorationMapView: UIViewRepresentable {
 
             if abs(view.mapZoomLongitudeDelta - currentZoom) > 0.001 {
                 view.mapZoomLongitudeDelta = currentZoom
+            }
+
+            if view.usesPersistentGlow == isAwakenMode {
+                view.usesPersistentGlow = !isAwakenMode
             }
 
             if view.isStoryPoint != cluster.hasStory || view.isHalfRevealed != shouldHalfReveal {
@@ -905,6 +911,10 @@ final class FogScreenView: UIView {
     }
 
     var revealedClusterIds: Set<UUID> = [] {
+        didSet { needsFullUpdate = true }
+    }
+
+    var isAwakenMode: Bool = false {
         didSet { needsFullUpdate = true }
     }
 
@@ -1010,8 +1020,8 @@ final class FogScreenView: UIView {
         let rect = bounds
         guard rect.width > 0, rect.height > 0 else { return }
 
-        // 只保留“扩散动画”光晕，常驻光点改由 AnnotationView 渲染，避免拖拽时大批量坐标更新。
-        guard let animatingId = animatingClusterId, let animatingCluster = clusterIndexById[animatingId] else {
+        // 退出刮擦后，FogScreenView 不承担常驻光点职责，清空即可。
+        guard isAwakenMode else {
             for (id, layer) in activeGlowLayers {
                 layer.removeFromSuperlayer()
                 activeGlowLayers.removeValue(forKey: id)
@@ -1019,33 +1029,35 @@ final class FogScreenView: UIView {
             }
             return
         }
-
-        let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(
-            latitude: animatingCluster.centerLatitude,
-            longitude: animatingCluster.centerLongitude
-        )
-        let p = mapView.convert(coord, toPointTo: self)
 
         let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
-        guard visibleRect.contains(p) else {
-            for (id, layer) in activeGlowLayers {
-                layer.removeFromSuperlayer()
-                activeGlowLayers.removeValue(forKey: id)
-                idleGlowLayers.append(layer)
-            }
-            return
+
+        var keepIds = Set<UUID>()
+        keepIds.reserveCapacity(revealedClusterIds.count + 32)
+
+        for c in clusters {
+            let shouldGlow = c.hasStory || revealedClusterIds.contains(c.id)
+            guard shouldGlow else { continue }
+
+            let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(
+                latitude: c.centerLatitude,
+                longitude: c.centerLongitude
+            )
+            let p = mapView.convert(coord, toPointTo: self)
+            guard visibleRect.contains(p) else { continue }
+
+            let layer = getOrCreateGlowLayer(for: c.id)
+            layer.position = p
+            layer.zPosition = c.hasStory ? 2 : 1
+            layer.contents = c.hasStory ? storyGlowImage : glowImage
+            layer.compositingFilter = "screenBlendMode"
+            keepIds.insert(c.id)
         }
 
-        let layer = getOrCreateGlowLayer(for: animatingId)
-        layer.position = p
-        layer.zPosition = animatingCluster.hasStory ? 2 : 1
-        layer.contents = animatingCluster.hasStory ? storyGlowImage : glowImage
-        layer.compositingFilter = "screenBlendMode"
-
-        for (id, otherLayer) in activeGlowLayers where id != animatingId {
-            otherLayer.removeFromSuperlayer()
+        for (id, layer) in activeGlowLayers where !keepIds.contains(id) {
+            layer.removeFromSuperlayer()
             activeGlowLayers.removeValue(forKey: id)
-            idleGlowLayers.append(otherLayer)
+            idleGlowLayers.append(layer)
         }
 
         updateActiveGlowLayerGeometryOnly()
@@ -1070,7 +1082,7 @@ final class FogScreenView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        // 仅维护扩散动画层的几何更新。
+        // 维护刮擦模式下的常驻光点 + 扩散动画层。
         for (id, layer) in activeGlowLayers {
             guard let c = clusterIndexById[id] else { continue }
 
