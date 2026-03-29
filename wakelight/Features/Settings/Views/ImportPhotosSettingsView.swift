@@ -66,6 +66,22 @@ struct ImportPhotosSettingsView: View {
                     }
                 }
 
+                if importManager.thumbnailBackfillProgress.isRunning || importManager.thumbnailBackfillProgress.total > 0 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("缩略图补齐")
+                            .font(.subheadline.weight(.medium))
+
+                        ProgressView(value: importManager.thumbnailBackfillProgress.progress) {
+                            Text("\(importManager.thumbnailBackfillProgress.completed + importManager.thumbnailBackfillProgress.failed) / \(importManager.thumbnailBackfillProgress.total)")
+                        }
+
+                        Text("成功 \(importManager.thumbnailBackfillProgress.completed) · 失败 \(importManager.thumbnailBackfillProgress.failed) · 剩余 \(importManager.thumbnailBackfillProgress.pending)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
+                }
+
                 if let notice = importManager.syncProgress.lastNotice, !notice.isEmpty {
                     Text("同步结果: \(notice)")
                         .foregroundStyle(.green)

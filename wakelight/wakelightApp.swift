@@ -56,7 +56,11 @@ struct wakelightApp: App {
                             UserDefaults.standard.set(true, forKey: firstLaunchLocalSyncDoneKey)
                         }
 
-                        // 4) 有 WebDAV 配置则前台按顺序执行：WebDAV -> 缩略图 -> 整理
+                        // 4) 启动时先补齐缺失缩略图（缺失或文件失效都补），再进入后续流程。
+                        let startupBackfillCount = await PhotoImportManager.shared.backfillThumbnailsIfNeeded(limit: 2000)
+                        print("[AppLaunch] thumbnail backfill scheduled=\(startupBackfillCount)")
+
+                        // 5) 有 WebDAV 配置则前台按顺序执行：WebDAV -> 缩略图 -> 整理
                         let hasWebDAVProfile = await WebDAVBootstrap.shared.hasSavedProfile()
                         if hasWebDAVProfile {
                             _ = await PhotoImportManager.shared.runWebDAVImportInBackgroundIfPossible(reason: "app-launch-foreground")
@@ -67,11 +71,11 @@ struct wakelightApp: App {
                             }
                         }
 
-                        // 5) 启动后仍调度后台 WebDAV 机会任务
+                        // 6) 启动后仍调度后台 WebDAV 机会任务
                         BackgroundImportScheduler.shared.scheduleWebDAVImportAfterLaunch()
 
-                        // 6) 补偿上次中断的缩略图任务
-                        PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
+                        // 7) 再补偿一轮（不阻塞），覆盖启动后新增/变更的素材。
+                        PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded(limit: 1200)
                     }
                 }
         }

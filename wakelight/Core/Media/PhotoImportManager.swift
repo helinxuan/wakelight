@@ -65,6 +65,20 @@ struct CurationProgress: Codable {
     }
 }
 
+struct ThumbnailBackfillProgress: Codable {
+    var total: Int = 0
+    var completed: Int = 0
+    var failed: Int = 0
+    var isRunning: Bool = false
+
+    var finishedCount: Int { min(total, max(0, completed + failed)) }
+    var pending: Int { max(0, total - finishedCount) }
+    var progress: Double {
+        guard total > 0 else { return 0 }
+        return min(1.0, max(0.0, Double(finishedCount) / Double(total)))
+    }
+}
+
 final class PhotoImportManager: ObservableObject {
     static let shared = PhotoImportManager()
 
@@ -75,6 +89,7 @@ final class PhotoImportManager: ObservableObject {
 
     @Published private(set) var isSyncRunning = false
     @Published private(set) var isCurationRunning = false
+    @Published private(set) var thumbnailBackfillProgress = ThumbnailBackfillProgress()
 
     var isRunning: Bool { isSyncRunning || isCurationRunning }
 
@@ -89,6 +104,9 @@ final class PhotoImportManager: ObservableObject {
     private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
     private var photosChangeDebounceTask: Task<Void, Never>?
     private var pendingReclusterTask: Task<Void, Never>?
+    private var thumbnailBackfillGeneration: Int = 0
+
+    private var activeBackfillSessionId: UUID?
 
     private init() {
         loadProgress()
@@ -109,6 +127,13 @@ final class PhotoImportManager: ObservableObject {
 
     @discardableResult
     func backfillThumbnailsIfNeeded(limit: Int = 300) async -> Int {
+        let sessionId = await MainActor.run { () -> UUID in
+            let id = UUID()
+            self.activeBackfillSessionId = id
+            self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: true)
+            return id
+        }
+
         do {
             let pending = try await DatabaseContainer.shared.db.reader.read { db in
                 // 不仅补“空路径”，也补“路径存在但文件已被系统清理”的情况。
@@ -138,15 +163,34 @@ final class PhotoImportManager: ObservableObject {
             }
 
             guard !pending.isEmpty else {
+                await MainActor.run {
+                    self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: false)
+                }
                 print("[ThumbBackfill] no pending assets")
                 return 0
+            }
+
+            await MainActor.run {
+                self.thumbnailBackfillProgress = ThumbnailBackfillProgress(
+                    total: pending.count,
+                    completed: 0,
+                    failed: 0,
+                    isRunning: true
+                )
             }
 
             print("[ThumbBackfill] resume pending=\(pending.count)")
 
             for (photoId, locatorKey, mediaType) in pending {
-                guard let locator = MediaLocator.parse(locatorKey) else { continue }
-                await PhotoThumbnailScheduler.shared.schedule {
+                guard let locator = MediaLocator.parse(locatorKey) else {
+                    await MainActor.run {
+                        self.thumbnailBackfillProgress.failed += 1
+                    }
+                    continue
+                }
+
+                await PhotoThumbnailScheduler.shared.schedule { [weak self] in
+                    guard let self else { return }
                     do {
                         let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
                         try await DatabaseContainer.shared.writer.write { db in
@@ -159,14 +203,29 @@ final class PhotoImportManager: ObservableObject {
                                 }
                             }
                         }
+                        await MainActor.run {
+                            self.thumbnailBackfillProgress.completed += 1
+                            if self.thumbnailBackfillProgress.completed + self.thumbnailBackfillProgress.failed >= self.thumbnailBackfillProgress.total {
+                                self.thumbnailBackfillProgress.isRunning = false
+                            }
+                        }
                     } catch {
                         print("[ThumbBackfill] failed locator=\(locatorKey) error=\(error)")
+                        await MainActor.run {
+                            self.thumbnailBackfillProgress.failed += 1
+                            if self.thumbnailBackfillProgress.completed + self.thumbnailBackfillProgress.failed >= self.thumbnailBackfillProgress.total {
+                                self.thumbnailBackfillProgress.isRunning = false
+                            }
+                        }
                     }
                 }
             }
 
             return pending.count
         } catch {
+            await MainActor.run {
+                self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: false)
+            }
             print("[ThumbBackfill] resume failed: \(error)")
             return 0
         }
