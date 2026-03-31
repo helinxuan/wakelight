@@ -40,9 +40,11 @@ actor PhotoThumbnailScheduler {
 
     private let maxConcurrent: Int
     private let perTaskTimeoutSeconds: Double = 45
+    private let maxRetryCountPerPhoto: Int = 2
     private var runningCount: Int = 0
     private var pendingOrder: [UUID] = []
     private var entriesByPhotoId: [UUID: Entry] = [:]
+    private var failureCountByPhotoId: [UUID: Int] = [:]
     private var progressObserver: (@Sendable (ThumbnailBackfillProgress) async -> Void)?
 
     init(maxConcurrent: Int) {
@@ -81,6 +83,12 @@ actor PhotoThumbnailScheduler {
     }
 
     private func shouldEnqueue(_ request: Request) -> Bool {
+        let failureCount = failureCountByPhotoId[request.photoId] ?? 0
+        if failureCount >= maxRetryCountPerPhoto {
+            print("[ThumbQueue] skip photoId=\(request.photoId) reason=retry-limit reached=\(failureCount)")
+            return false
+        }
+
         guard let existing = entriesByPhotoId[request.photoId] else { return true }
 
         switch existing.state {
@@ -181,6 +189,11 @@ actor PhotoThumbnailScheduler {
         if var entry = entriesByPhotoId[photoId] {
             entry.state = success ? .completed : .failed
             entriesByPhotoId[photoId] = entry
+        }
+        if success {
+            failureCountByPhotoId[photoId] = 0
+        } else {
+            failureCountByPhotoId[photoId] = (failureCountByPhotoId[photoId] ?? 0) + 1
         }
         publishProgress(makeSnapshot())
         runNextIfPossible()

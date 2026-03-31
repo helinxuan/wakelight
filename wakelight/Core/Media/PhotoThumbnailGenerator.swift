@@ -99,12 +99,29 @@ final class PhotoThumbnailGenerator {
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = targetSize
         
-        // Middle frame logic
         let duration = try await asset.load(.duration)
-        let middleTime = CMTime(seconds: duration.seconds / 2.0, preferredTimescale: 600)
-        
-        let (cgImage, _) = try await generator.image(at: middleTime)
-        return UIImage(cgImage: cgImage)
+        let durationSeconds = CMTimeGetSeconds(duration)
+        let sampleSeconds: [Double] = {
+            if durationSeconds.isFinite && durationSeconds > 0 {
+                let middle = durationSeconds / 2.0
+                let oneThird = durationSeconds / 3.0
+                return [max(0.05, middle), max(0.05, oneThird), 0.05]
+            }
+            return [0.05]
+        }()
+
+        var lastError: Error?
+        for second in sampleSeconds {
+            do {
+                let time = CMTime(seconds: second, preferredTimescale: 600)
+                let (cgImage, _) = try await generator.image(at: time)
+                return UIImage(cgImage: cgImage)
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? NSError(domain: "PhotoThumbnailGenerator", code: -9, userInfo: [NSLocalizedDescriptionKey: "Cannot Decode"])
     }
     
     private func createImageThumbnail(from data: Data) throws -> UIImage {

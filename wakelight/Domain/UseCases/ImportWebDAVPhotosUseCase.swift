@@ -388,13 +388,15 @@ final class ImportWebDAVPhotosUseCase {
 
             if let jpg = c.jpgs.first {
                 let rawPath = c.raws.first.map { normalize(path: $0.href) }
+                let jpgPath = normalize(path: jpg.href)
+                let videoPath = c.liveVideos.first.map { normalize(path: $0.href) }
                 groups.append(
                     MediaGroup(
                         primary: jpg,
                         rawPath: rawPath,
                         hasJPG: true,
-                        livePhotoVideoPath: nil,
-                        livePhotoPhotoPath: nil
+                        livePhotoVideoPath: videoPath,
+                        livePhotoPhotoPath: videoPath == nil ? nil : jpgPath
                     )
                 )
                 continue
@@ -417,10 +419,11 @@ final class ImportWebDAVPhotosUseCase {
             }
 
             if let raw = c.raws.first {
+                let rawPath = normalize(path: raw.href)
                 groups.append(
                     MediaGroup(
                         primary: raw,
-                        rawPath: nil,
+                        rawPath: rawPath,
                         hasJPG: false,
                         livePhotoVideoPath: nil,
                         livePhotoPhotoPath: nil
