@@ -165,17 +165,15 @@ final class PhotoThumbnailLoader {
                     return
                 }
 
-                let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: lookup.mediaType)
+                _ = await PhotoThumbnailScheduler.shared.enqueue(
+                    PhotoThumbnailScheduler.Request(
+                        photoId: lookup.photoId,
+                        locator: locator,
+                        mediaType: lookup.mediaType
+                    )
+                )
 
-                try await DatabaseContainer.shared.writer.write { db in
-                    if var asset = try PhotoAsset.fetchOne(db, key: lookup.photoId) {
-                        asset.thumbnailPath = path
-                        asset.thumbnailUpdatedAt = Date()
-                        try asset.update(db)
-                    }
-                }
-
-                print("[ThumbLoader] Backfill success: \(locatorKey)")
+                print("[ThumbLoader] Backfill enqueued: \(locatorKey)")
             } catch {
                 print("[ThumbLoader] Backfill failed: \(error)")
             }

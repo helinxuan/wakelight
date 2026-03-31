@@ -98,6 +98,17 @@ struct SmartPhotoCurationSettingsView: View {
                     }
                 }
 
+                if importManager.curationProgress.phase == .preprocess,
+                   importManager.thumbnailBackfillProgress.overallPendingTotal > 0 {
+                    Text(
+                        importManager.thumbnailBackfillProgress.total > 0
+                        ? "缩略图补齐与预处理并行进行：\(importManager.thumbnailBackfillProgress.finishedCount)/\(importManager.thumbnailBackfillProgress.total)"
+                        : "缩略图补齐与预处理并行进行：当前没有待处理任务"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Text("保留")
                     Spacer()

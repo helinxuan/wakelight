@@ -73,20 +73,13 @@ final class ImportPhotosUseCase {
                         let locator = MediaLocator.library(localIdentifier: localId)
                         let mediaType = existing.mediaType ?? .photo
                         Task {
-                            await PhotoThumbnailScheduler.shared.schedule {
-                                do {
-                                    let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                                    try await DatabaseContainer.shared.writer.write { db in
-                                        if var asset = try PhotoAsset.fetchOne(db, key: recordId) {
-                                            asset.thumbnailPath = path
-                                            asset.thumbnailUpdatedAt = Date()
-                                            try asset.update(db)
-                                        }
-                                    }
-                                } catch {
-                                    print("[PhotoImport] Thumbnail generation failed for \(localId): \(error)")
-                                }
-                            }
+                            _ = await PhotoThumbnailScheduler.shared.enqueue(
+                                PhotoThumbnailScheduler.Request(
+                                    photoId: recordId,
+                                    locator: locator,
+                                    mediaType: mediaType
+                                )
+                            )
                         }
                     }
                 } else {
@@ -122,20 +115,13 @@ final class ImportPhotosUseCase {
                         let locator = MediaLocator.library(localIdentifier: localId)
                         let mediaType = record.mediaType ?? .photo
                         Task {
-                            await PhotoThumbnailScheduler.shared.schedule {
-                                do {
-                                    let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                                    try await DatabaseContainer.shared.writer.write { db in
-                                        if var asset = try PhotoAsset.fetchOne(db, key: recordId) {
-                                            asset.thumbnailPath = path
-                                            asset.thumbnailUpdatedAt = Date()
-                                            try asset.update(db)
-                                        }
-                                    }
-                                } catch {
-                                    print("[PhotoImport] Thumbnail generation failed for \(localId): \(error)")
-                                }
-                            }
+                            _ = await PhotoThumbnailScheduler.shared.enqueue(
+                                PhotoThumbnailScheduler.Request(
+                                    photoId: recordId,
+                                    locator: locator,
+                                    mediaType: mediaType
+                                )
+                            )
                         }
                     } catch {
                         if let dbError = error as? DatabaseError,

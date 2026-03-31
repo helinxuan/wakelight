@@ -40,7 +40,8 @@ struct SyncProgress: Codable {
 
     var progress: Double {
         guard totalItems > 0 else { return 0 }
-        return Double(processedItems) / Double(totalItems)
+        let ratio = Double(processedItems) / Double(totalItems)
+        return min(1.0, max(0.0, ratio))
     }
 }
 
@@ -61,12 +62,14 @@ struct CurationProgress: Codable {
 
     var progress: Double {
         guard totalItems > 0 else { return 0 }
-        return Double(processedItems) / Double(totalItems)
+        let ratio = Double(processedItems) / Double(totalItems)
+        return min(1.0, max(0.0, ratio))
     }
 }
 
 struct ThumbnailBackfillProgress: Codable {
     var total: Int = 0
+    var overallPendingTotal: Int = 0
     var completed: Int = 0
     var failed: Int = 0
     var isRunning: Bool = false
@@ -104,13 +107,22 @@ final class PhotoImportManager: ObservableObject {
     private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
     private var photosChangeDebounceTask: Task<Void, Never>?
     private var pendingReclusterTask: Task<Void, Never>?
-    private var thumbnailBackfillGeneration: Int = 0
-
-    private var activeBackfillSessionId: UUID?
 
     private init() {
         loadProgress()
         reconcileRestoredProgressIfNeeded()
+        Task { [weak self] in
+            guard let self else { return }
+            await PhotoThumbnailScheduler.shared.setProgressObserver { snapshot in
+                await MainActor.run {
+                    self.thumbnailBackfillProgress = snapshot
+                }
+            }
+            let snapshot = await PhotoThumbnailScheduler.shared.snapshot()
+            await MainActor.run {
+                self.thumbnailBackfillProgress = snapshot
+            }
+        }
         log("init done, restored sync=\(syncProgress.status.rawValue)/\(syncProgress.phase.rawValue), curation=\(curationProgress.status.rawValue)/\(curationProgress.phase.rawValue)")
     }
 
@@ -119,113 +131,25 @@ final class PhotoImportManager: ObservableObject {
         print("[ImportManager] \(message)")
     }
 
-    func resumeThumbnailBackfillIfNeeded(limit: Int = 300) {
+    func resumeThumbnailBackfillIfNeeded(limit: Int? = nil) {
         Task.detached(priority: .background) {
             _ = await self.backfillThumbnailsIfNeeded(limit: limit)
         }
     }
 
     @discardableResult
-    func backfillThumbnailsIfNeeded(limit: Int = 300) async -> Int {
-        let sessionId = await MainActor.run { () -> UUID in
-            let id = UUID()
-            self.activeBackfillSessionId = id
-            self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: true)
-            return id
-        }
-
+    func backfillThumbnailsIfNeeded(limit: Int? = nil) async -> Int {
         do {
-            let pending = try await DatabaseContainer.shared.db.reader.read { db in
-                // 不仅补“空路径”，也补“路径存在但文件已被系统清理”的情况。
-                let assets = try PhotoAsset
-                    .order(Column("importedAt").desc)
-                    .limit(limit)
-                    .fetchAll(db)
-
-                let ids = assets.map(\.id)
-                let locators = try PhotoAsset.fetchLocators(db: db, ids: ids)
-                let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
-
-                return assets.compactMap { asset -> (UUID, String, PhotoAsset.MediaType)? in
-                    let hasPath = !(asset.thumbnailPath?.isEmpty ?? true)
-                    let fileExists: Bool = {
-                        guard let path = asset.thumbnailPath, !path.isEmpty else { return false }
-                        return FileManager.default.fileExists(atPath: path)
-                    }()
-
-                    let needsBackfill = !hasPath || !fileExists
-                    guard needsBackfill else { return nil }
-                    guard let locator = locatorById[asset.id] else { return nil }
-
-                    let mediaType = asset.mediaType ?? .photo
-                    return (asset.id, locator.locatorKey, mediaType)
-                }
-            }
-
-            guard !pending.isEmpty else {
-                await MainActor.run {
-                    self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: false)
-                }
+            let requests = try await loadThumbnailBackfillRequests(limit: limit)
+            guard !requests.isEmpty else {
                 print("[ThumbBackfill] no pending assets")
                 return 0
             }
 
-            await MainActor.run {
-                self.thumbnailBackfillProgress = ThumbnailBackfillProgress(
-                    total: pending.count,
-                    completed: 0,
-                    failed: 0,
-                    isRunning: true
-                )
-            }
-
-            print("[ThumbBackfill] resume pending=\(pending.count)")
-
-            for (photoId, locatorKey, mediaType) in pending {
-                guard let locator = MediaLocator.parse(locatorKey) else {
-                    await MainActor.run {
-                        self.thumbnailBackfillProgress.failed += 1
-                    }
-                    continue
-                }
-
-                await PhotoThumbnailScheduler.shared.schedule { [weak self] in
-                    guard let self else { return }
-                    do {
-                        let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                        try await DatabaseContainer.shared.writer.write { db in
-                            if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
-                                let alreadyHas = !(asset.thumbnailPath?.isEmpty ?? true)
-                                if !alreadyHas {
-                                    asset.thumbnailPath = path
-                                    asset.thumbnailUpdatedAt = Date()
-                                    try asset.update(db)
-                                }
-                            }
-                        }
-                        await MainActor.run {
-                            self.thumbnailBackfillProgress.completed += 1
-                            if self.thumbnailBackfillProgress.completed + self.thumbnailBackfillProgress.failed >= self.thumbnailBackfillProgress.total {
-                                self.thumbnailBackfillProgress.isRunning = false
-                            }
-                        }
-                    } catch {
-                        print("[ThumbBackfill] failed locator=\(locatorKey) error=\(error)")
-                        await MainActor.run {
-                            self.thumbnailBackfillProgress.failed += 1
-                            if self.thumbnailBackfillProgress.completed + self.thumbnailBackfillProgress.failed >= self.thumbnailBackfillProgress.total {
-                                self.thumbnailBackfillProgress.isRunning = false
-                            }
-                        }
-                    }
-                }
-            }
-
-            return pending.count
+            let result = await PhotoThumbnailScheduler.shared.enqueue(requests)
+            print("[ThumbBackfill] enqueue accepted=\(result.acceptedCount) queueTotal=\(result.snapshot.total)")
+            return result.acceptedCount
         } catch {
-            await MainActor.run {
-                self.thumbnailBackfillProgress = ThumbnailBackfillProgress(total: 0, completed: 0, failed: 0, isRunning: false)
-            }
             print("[ThumbBackfill] resume failed: \(error)")
             return 0
         }
@@ -332,9 +256,10 @@ final class PhotoImportManager: ObservableObject {
                 await self.updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
 
                 // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
-                let prefetched = await self.backfillThumbnailsIfNeeded(limit: 1200)
+                let prefetched = await self.backfillThumbnailsIfNeeded()
+                let thumbSnapshot = await PhotoThumbnailScheduler.shared.snapshot()
                 await MainActor.run {
-                    self.log("curation preflight thumbnail backfill scheduled=\(prefetched)")
+                    self.log("curation preflight thumbnail backfill enqueued=\(prefetched) queueTotal=\(thumbSnapshot.total)")
                 }
 
                 let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
@@ -424,7 +349,7 @@ final class PhotoImportManager: ObservableObject {
             let result = try await performWebDAVImportPipeline()
 
             // 顺序要求：导入 -> 缩略图补全 -> 预处理
-            let _ = await backfillThumbnailsIfNeeded(limit: 600)
+            let _ = await backfillThumbnailsIfNeeded()
 
             await completeSync(notice: "WebDAV 后台同步完成：已导入 \(result.importedCount) 项")
 
@@ -477,8 +402,9 @@ final class PhotoImportManager: ObservableObject {
             let preprocessStart = Date()
 
             // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
-            let prefetched = await backfillThumbnailsIfNeeded(limit: 1200)
-            log("curation preflight thumbnail backfill scheduled=\(prefetched)")
+            let prefetched = await backfillThumbnailsIfNeeded()
+            let thumbSnapshot = await PhotoThumbnailScheduler.shared.snapshot()
+            log("curation preflight thumbnail backfill enqueued=\(prefetched) queueTotal=\(thumbSnapshot.total)")
 
             let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
                 Task { @MainActor in
@@ -814,6 +740,43 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 
+    private func loadThumbnailBackfillRequests(limit: Int?) async throws -> [PhotoThumbnailScheduler.Request] {
+        try await DatabaseContainer.shared.db.reader.read { db in
+            let assets = try PhotoAsset
+                .order(Column("importedAt").desc)
+                .fetchAll(db)
+
+            var scheduledIds: [UUID] = []
+            var mediaTypeById: [UUID: PhotoAsset.MediaType] = [:]
+
+            for asset in assets {
+                let hasPath = !(asset.thumbnailPath?.isEmpty ?? true)
+                let fileExists: Bool = {
+                    guard let path = asset.thumbnailPath, !path.isEmpty else { return false }
+                    return FileManager.default.fileExists(atPath: path)
+                }()
+
+                guard !hasPath || !fileExists else { continue }
+
+                scheduledIds.append(asset.id)
+                mediaTypeById[asset.id] = asset.mediaType ?? .photo
+                if let limit, scheduledIds.count >= limit {
+                    break
+                }
+            }
+
+            let locators = try PhotoAsset.fetchLocators(db: db, ids: scheduledIds)
+            let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+
+            return scheduledIds.compactMap { id -> PhotoThumbnailScheduler.Request? in
+                guard let locatorKey = locatorById[id] else { return nil }
+                guard let locator = MediaLocator.parse(locatorKey) else { return nil }
+                let mediaType = mediaTypeById[id] ?? .photo
+                return PhotoThumbnailScheduler.Request(photoId: id, locator: locator, mediaType: mediaType)
+            }
+        }
+    }
+
     private let syncProgressKey = "com.wakelight.import.sync.progress"
     private let curationProgressKey = "com.wakelight.import.curation.progress"
 
@@ -1037,4 +1000,3 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 }
-

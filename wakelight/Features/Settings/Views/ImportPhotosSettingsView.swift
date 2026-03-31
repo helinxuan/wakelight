@@ -66,16 +66,35 @@ struct ImportPhotosSettingsView: View {
                     }
                 }
 
-                if importManager.thumbnailBackfillProgress.isRunning || importManager.thumbnailBackfillProgress.total > 0 {
+                if importManager.thumbnailBackfillProgress.isRunning
+                    || importManager.thumbnailBackfillProgress.total > 0
+                    || importManager.thumbnailBackfillProgress.overallPendingTotal > 0 {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("缩略图补齐")
                             .font(.subheadline.weight(.medium))
 
-                        ProgressView(value: importManager.thumbnailBackfillProgress.progress) {
-                            Text("\(importManager.thumbnailBackfillProgress.completed + importManager.thumbnailBackfillProgress.failed) / \(importManager.thumbnailBackfillProgress.total)")
+                        if importManager.thumbnailBackfillProgress.total > 0 {
+                            ProgressView(
+                                value: Double(importManager.thumbnailBackfillProgress.finishedCount),
+                                total: Double(importManager.thumbnailBackfillProgress.total)
+                            ) {
+                                Text("\(importManager.thumbnailBackfillProgress.finishedCount) / \(importManager.thumbnailBackfillProgress.total)")
+                            }
+                        } else if importManager.thumbnailBackfillProgress.isRunning {
+                            ProgressView()
+                        } else if importManager.thumbnailBackfillProgress.overallPendingTotal > 0 {
+                            Text("当前没有待处理任务")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
 
-                        Text("成功 \(importManager.thumbnailBackfillProgress.completed) · 失败 \(importManager.thumbnailBackfillProgress.failed) · 剩余 \(importManager.thumbnailBackfillProgress.pending)")
+                        if importManager.thumbnailBackfillProgress.overallPendingTotal > 0 {
+                            Text("统一缩略图队列总数 \(importManager.thumbnailBackfillProgress.overallPendingTotal) 张")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text("已完成 \(importManager.thumbnailBackfillProgress.completed) · 失败 \(importManager.thumbnailBackfillProgress.failed) · 剩余 \(importManager.thumbnailBackfillProgress.pending)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

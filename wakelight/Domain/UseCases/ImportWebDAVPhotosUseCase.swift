@@ -702,20 +702,13 @@ final class ImportWebDAVPhotosUseCase {
     ) {
         let locator = MediaLocator.webdav(profileId: profileId.uuidString, remotePath: remotePath)
         Task {
-            await PhotoThumbnailScheduler.shared.schedule {
-                do {
-                    let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(for: locator, mediaType: mediaType)
-                    try await DatabaseContainer.shared.writer.write { db in
-                        if var asset = try PhotoAsset.fetchOne(db, key: photoId) {
-                            asset.thumbnailPath = path
-                            asset.thumbnailUpdatedAt = Date()
-                            try asset.update(db)
-                        }
-                    }
-                }catch {
-                    print("[WebDAVImport] Thumbnail generation failed for \(remotePath): \(error)")
-                }
-            }
+            _ = await PhotoThumbnailScheduler.shared.enqueue(
+                PhotoThumbnailScheduler.Request(
+                    photoId: photoId,
+                    locator: locator,
+                    mediaType: mediaType
+                )
+            )
         }
     }
 
