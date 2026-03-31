@@ -72,8 +72,11 @@ actor ImportCurationService {
             return []
         }
 
-        // 先上报总量，避免分组阶段较慢时 UI 一直显示 0/0。
-        await onProgress?(0, records.count)
+        // 统一成单条连续进度：分组占前段，识别/评分占后段，避免“跑两遍”或长时间停在 0。
+        let totalCount = records.count
+        let groupingWeight = 0.15
+        let evaluationWeight = 1.0 - groupingWeight
+        await onProgress?(0, totalCount)
 
         // 重置本次调试统计
         debugThumbHitCount = 0
@@ -91,10 +94,11 @@ actor ImportCurationService {
 
         let t0 = Date()
         let groups = await groupImportedByScene(records: records) { processed, total in
-            await onProgress?(processed, total)
-            if self.curationDebugLogEnabled && (processed == 0 || processed % 50 == 0 || processed == total) {
-                print("[Curation][GroupingProgress] \(processed)/\(total)")
-            }
+            let safeTotal = max(total, 1)
+            let ratio = min(1.0, max(0.0, Double(processed) / Double(safeTotal)))
+            let combinedRatio = ratio * groupingWeight
+            let combinedProcessed = Int((combinedRatio * Double(totalCount)).rounded())
+            await onProgress?(min(combinedProcessed, totalCount), totalCount)
         }
         if curationDebugLogEnabled {
             let elapsed = Date().timeIntervalSince(t0)
@@ -103,7 +107,15 @@ actor ImportCurationService {
             print("[Curation][ThumbStats] done attempts=\(debugLoadAttemptCount) hit=\(debugThumbHitCount) fallback=\(debugFallbackOriginCount) fail=\(debugFallbackFailCount) hitRate=\(String(format: "%.1f", hitRate))%")
         }
 
-        let decisions = await evaluate(groups: groups, totalCount: records.count, onProgress: onProgress)
+        let decisions = await evaluate(groups: groups, totalCount: totalCount) { processed, total in
+            let safeTotal = max(total, 1)
+            let ratio = min(1.0, max(0.0, Double(processed) / Double(safeTotal)))
+            let combinedRatio = groupingWeight + ratio * evaluationWeight
+            let combinedProcessed = Int((combinedRatio * Double(totalCount)).rounded())
+            await onProgress?(min(combinedProcessed, totalCount), totalCount)
+        }
+        await onProgress?(totalCount, totalCount)
+
         return decisions.map {
             ImportAssetDecision(
                 photoAssetId: $0.photoAssetId,
@@ -826,4 +838,3 @@ private struct DecisionDraft {
     let recognizedTextConfidence: Double?
     let groupId: String?
 }
-

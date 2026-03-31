@@ -27,7 +27,19 @@ actor PhotoThumbnailScheduler {
         var state: State
     }
 
+    private enum SchedulerError: LocalizedError {
+        case timeout(seconds: Double)
+
+        var errorDescription: String? {
+            switch self {
+            case .timeout(let seconds):
+                return "thumbnail generation timeout after \(Int(seconds))s"
+            }
+        }
+    }
+
     private let maxConcurrent: Int
+    private let perTaskTimeoutSeconds: Double = 45
     private var runningCount: Int = 0
     private var pendingOrder: [UUID] = []
     private var entriesByPhotoId: [UUID: Entry] = [:]
@@ -104,10 +116,7 @@ actor PhotoThumbnailScheduler {
                 return true
             }
 
-            let path = try await PhotoThumbnailGenerator.shared.generateThumbnail(
-                for: request.locator,
-                mediaType: request.mediaType
-            )
+            let path = try await generateThumbnailWithTimeout(request: request)
 
             try await DatabaseContainer.shared.writer.write { db in
                 if var asset = try PhotoAsset.fetchOne(db, key: request.photoId) {
@@ -119,8 +128,43 @@ actor PhotoThumbnailScheduler {
 
             return true
         } catch {
-            print("[ThumbQueue] failed photoId=\(request.photoId) error=\(error)")
+            print("[ThumbQueue] failed photoId=\(request.photoId) locator=\(request.locator) error=\(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func generateThumbnailWithTimeout(request: Request) async throws -> String {
+        let timeoutSeconds = perTaskTimeoutSeconds
+        let timeoutNs = UInt64(max(1, Int(timeoutSeconds * 1_000_000_000)))
+        let worker = Task.detached(priority: .background) {
+            try await PhotoThumbnailGenerator.shared.generateThumbnail(
+                for: request.locator,
+                mediaType: request.mediaType
+            )
+        }
+
+        do {
+            let path = try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask {
+                    try await worker.value
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: timeoutNs)
+                    throw SchedulerError.timeout(seconds: timeoutSeconds)
+                }
+
+                guard let value = try await group.next() else {
+                    throw SchedulerError.timeout(seconds: timeoutSeconds)
+                }
+                group.cancelAll()
+                return value
+            }
+
+            worker.cancel()
+            return path
+        } catch {
+            worker.cancel()
+            throw error
         }
     }
 
