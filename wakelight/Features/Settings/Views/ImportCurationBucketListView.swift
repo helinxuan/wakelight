@@ -76,7 +76,7 @@ struct ImportCurationBucketListView: View {
     @State private var previewPayload: PreviewPayload?
 
     @State private var displayNameMap: [String: String] = [:]
-    @State private var locatorKeyMap: [UUID: String] = [:]
+    @State private var locatorMap: [UUID: PhotoAssetLocator] = [:]
     @State private var keepSelections: [String: Set<UUID>] = [:]
     @State private var groupSortKeyMap: [String: Date] = [:]
 
@@ -129,7 +129,12 @@ struct ImportCurationBucketListView: View {
                                 openPreview(for: group.representative, in: group.items)
                             } label: {
                                 ZStack(alignment: .bottomLeading) {
-                                    ThumbnailView(locatorKey: locatorKey(for: group.representative), size: CGSize(width: 220, height: 140))
+                                    ThumbnailView(
+                                        locatorKey: locatorKey(for: group.representative),
+                                        size: CGSize(width: 220, height: 140),
+                                        showRawBadge: hasRaw(for: group.representative),
+                                        showLiveBadge: hasLive(for: group.representative)
+                                    )
                                         .clipShape(RoundedRectangle(cornerRadius: 12))
 
                                     HStack(spacing: 6) {
@@ -171,7 +176,12 @@ struct ImportCurationBucketListView: View {
                                         Button {
                                             toggleKeep(groupId: group.id, item: item)
                                         } label: {
-                                            ThumbnailView(locatorKey: locatorKey(for: item), size: CGSize(width: 52, height: 52))
+                                            ThumbnailView(
+                                                locatorKey: locatorKey(for: item),
+                                                size: CGSize(width: 52, height: 52),
+                                                showRawBadge: hasRaw(for: item),
+                                                showLiveBadge: hasLive(for: item)
+                                            )
                                                 .overlay {
                                                     RoundedRectangle(cornerRadius: 8)
                                                         .stroke(keepIds.contains(item.id) ? Color.yellow : Color.clear, lineWidth: keepIds.contains(item.id) ? 2 : 0)
@@ -320,6 +330,8 @@ struct ImportCurationBucketListView: View {
                 ),
                 isTrashMode: isTrashMode,
                 locatorKeyForRow: { row in locatorKey(for: row) },
+                hasRawForRow: { row in hasRaw(for: row) },
+                hasLiveForRow: { row in hasLive(for: row) },
                 displayNameForRow: { row in displayName(for: row) },
                 onApplyGroupKeep: { selectedId, allIds in
                     await applyGroupKeep(selectedId: selectedId, allIds: allIds)
@@ -409,6 +421,7 @@ struct ImportCurationBucketListView: View {
             let allIds = Array(Set(allRows.map(\.id)))
             let locators = await loadLocatorMap(photoIds: allIds)
             let names = await resolveDisplayNames(rows: allRows, locatorMap: locators)
+            logLocatorBadgeStats(rows: allRows, locatorMap: locators)
 
             let groupSortKeys = await groupSortKeyMap(groupIds: Array(grouped.keys))
 
@@ -423,7 +436,7 @@ struct ImportCurationBucketListView: View {
             await MainActor.run {
                 rows = fetched
                 groupedRows = grouped
-                locatorKeyMap = locators
+                locatorMap = locators
                 displayNameMap = names
                 groupSortKeyMap = groupSortKeys
                 isLoading = false
@@ -432,28 +445,28 @@ struct ImportCurationBucketListView: View {
             await MainActor.run {
                 rows = []
                 groupedRows = [:]
-                locatorKeyMap = [:]
+                locatorMap = [:]
                 displayNameMap = [:]
                 isLoading = false
             }
         }
     }
 
-    private func loadLocatorMap(photoIds: [UUID]) async -> [UUID: String] {
+    private func loadLocatorMap(photoIds: [UUID]) async -> [UUID: PhotoAssetLocator] {
         guard !photoIds.isEmpty else { return [:] }
         do {
             let locators = try await DatabaseContainer.shared.db.reader.read { db in
                 try PhotoAsset.fetchLocators(db: db, ids: photoIds)
             }
-            return Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
+            return Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0) })
         } catch {
             return [:]
         }
     }
 
     private func locatorKey(for row: Row) -> String {
-        if let key = locatorKeyMap[row.id], !key.isEmpty {
-            return key
+        if let locator = locatorMap[row.id], !locator.locatorKey.isEmpty {
+            return locator.locatorKey
         }
         if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
             return ImportCurationBucketListViewHelper.locatorKey(for: localIdentifier)
@@ -461,11 +474,70 @@ struct ImportCurationBucketListView: View {
         return ""
     }
 
+    private func hasRaw(for row: Row) -> Bool {
+        locatorMap[row.id]?.hasRaw == true
+    }
+
+    private func hasLive(for row: Row) -> Bool {
+        locatorMap[row.id]?.hasLive == true
+    }
+
+    private func logLocatorBadgeStats(rows: [Row], locatorMap: [UUID: PhotoAssetLocator]) {
+        let effectiveRows = rows.filter { row in
+            row.curationBucket == filter.rawValue || (row.burstGroupId != nil && row.curationBucket == ImportDecisionBucket.keep.rawValue)
+        }
+
+        let withLocator = effectiveRows.compactMap { row -> (Row, PhotoAssetLocator)? in
+            guard let locator = locatorMap[row.id] else { return nil }
+            return (row, locator)
+        }
+
+        let rawRows = withLocator.filter { $0.1.hasRaw }
+        let liveRows = withLocator.filter { $0.1.hasLive }
+
+        let rawSamples = rawRows.prefix(5).map { row, locator in
+            let name = displayNameMap[locator.locatorKey] ?? fallbackName(for: locator.locatorKey)
+            let idShort = String(row.id.uuidString.prefix(6))
+            return "\(String(describing: name))#\(idShort)"
+        }.joined(separator: ", ")
+
+        let liveSamples = liveRows.prefix(5).map { row, locator in
+            let name = displayNameMap[locator.locatorKey] ?? fallbackName(for: locator.locatorKey)
+            let idShort = String(row.id.uuidString.prefix(6))
+            return "\(String(describing: name))#\(idShort)"
+        }.joined(separator: ", ")
+
+        print("[CurationList][BadgeStats] filter=\(filter.rawValue) rows=\(effectiveRows.count) locator=\(withLocator.count) raw=\(rawRows.count) live=\(liveRows.count)")
+        if !rawSamples.isEmpty {
+            print("[CurationList][BadgeStats] rawSamples=\(rawSamples)")
+        }
+        if !liveSamples.isEmpty {
+            print("[CurationList][BadgeStats] liveSamples=\(liveSamples)")
+        }
+
+        Task.detached(priority: .utility) {
+            do {
+                let (remoteTotal, remoteRaw, remoteLive) = try await DatabaseContainer.shared.db.reader.read { db in
+                    let total = try RemoteMediaAsset.fetchCount(db)
+                    let raw = try RemoteMediaAsset.filter(Column("rawPath") != nil && Column("rawPath") != "").fetchCount(db)
+                    let live = try RemoteMediaAsset.filter(
+                        (Column("livePhotoVideoPath") != nil && Column("livePhotoVideoPath") != "")
+                        || (Column("livePhotoPhotoPath") != nil && Column("livePhotoPhotoPath") != "")
+                    ).fetchCount(db)
+                    return (total, raw, live)
+                }
+                print("[CurationList][BadgeStats][RemoteDB] total=\(remoteTotal) raw=\(remoteRaw) live=\(remoteLive)")
+            } catch {
+                print("[CurationList][BadgeStats][RemoteDB] failed=\(error.localizedDescription)")
+            }
+        }
+    }
+
     private func localIdentifier(for row: Row) -> String? {
         if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
             return localIdentifier
         }
-        if let key = locatorKeyMap[row.id], let locator = MediaLocator.parse(key), case .library(let id) = locator {
+        if let key = locatorMap[row.id]?.locatorKey, let locator = MediaLocator.parse(key), case .library(let id) = locator {
             return id
         }
         return nil
@@ -1035,7 +1107,7 @@ struct ImportCurationBucketListView: View {
     }
 
     private func displayName(for row: Row) -> String {
-        if let key = locatorKeyMap[row.id], let name = displayNameMap[key], !name.isEmpty {
+        if let key = locatorMap[row.id]?.locatorKey, let name = displayNameMap[key], !name.isEmpty {
             return name
         }
 
@@ -1050,9 +1122,9 @@ struct ImportCurationBucketListView: View {
         return "未命名媒体"
     }
 
-    private func resolveDisplayNames(rows: [Row], locatorMap: [UUID: String]) async -> [String: String] {
+    private func resolveDisplayNames(rows: [Row], locatorMap: [UUID: PhotoAssetLocator]) async -> [String: String] {
         let keys = Array(Set(rows.compactMap { row in
-            if let key = locatorMap[row.id], !key.isEmpty {
+            if let key = locatorMap[row.id]?.locatorKey, !key.isEmpty {
                 return key
             }
             if let localId = row.localIdentifier, !localId.isEmpty {
@@ -1149,6 +1221,8 @@ private struct GroupPreviewSheet: View {
     @Binding var keepIds: Set<UUID>
     let isTrashMode: Bool
     let locatorKeyForRow: (Row) -> String
+    let hasRawForRow: (Row) -> Bool
+    let hasLiveForRow: (Row) -> Bool
     let displayNameForRow: (Row) -> String
     let onApplyGroupKeep: @Sendable (UUID, [UUID]) async -> Void
     let onApplyGroupKeepMultiple: @Sendable ([UUID], [UUID]) async -> Void
@@ -1365,7 +1439,12 @@ private struct GroupPreviewSheet: View {
                         }
                     } label: {
                         ZStack(alignment: .topLeading) {
-                            ThumbnailView(locatorKey: locatorKeyForRow(item), size: CGSize(width: 52, height: 52))
+                            ThumbnailView(
+                                locatorKey: locatorKeyForRow(item),
+                                size: CGSize(width: 52, height: 52),
+                                showRawBadge: hasRawForRow(item),
+                                showLiveBadge: hasLiveForRow(item)
+                            )
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 8)
                                         .stroke(keepIds.contains(item.id) ? Color.yellow : Color.clear, lineWidth: keepIds.contains(item.id) ? 2 : 0)

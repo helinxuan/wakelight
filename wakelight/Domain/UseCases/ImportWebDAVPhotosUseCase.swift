@@ -54,20 +54,42 @@ final class ImportWebDAVPhotosUseCase {
         let password = try KeychainStore.shared.getString(forKey: profile.passwordKey)
         let client = WebDAVClient(baseURL: baseURL, credentials: WebDAVCredentials(username: profile.username, password: password))
 
-        let rootPath = normalize(path: profile.rootPath ?? "/")
-        if rootPath == "/" {
+        let configuredRoots = profile.rootPaths
+        let roots: [String] = configuredRoots.isEmpty
+            ? [normalize(path: profile.rootPath ?? "/")]
+            : configuredRoots.map { normalize(path: $0) }
+
+        if roots.contains("/") {
             await PhotoImportManager.shared.reportNonFatalWarning(
-                "当前 WebDAV 导入路径是根目录 /（可能还没点击保存）。建议到 设置 → WebDAV 选择照片目录后点击保存，以避免扫描到系统/临时目录。"
+                "当前 WebDAV 导入路径包含根目录 /。建议到 设置 → WebDAV 选择照片目录后点击保存，以避免扫描到系统/临时目录。"
             )
         }
-        print("[WebDAVImport] Start PROPFIND recursively from \(rootPath)")
+
+        print("[WebDAVImport] Start PROPFIND recursively from roots=\(roots.joined(separator: ","))")
 
         let scanAt = Date().addingTimeInterval(-1)
         let importedAt = Date()
         let indexedAt = Date()
 
-        let allItems = try await listRecursively(client: client, path: rootPath)
+        var allItems: [WebDAVDirectoryItem] = []
+        allItems.reserveCapacity(8192)
+        var seenByHref: Set<String> = []
+        seenByHref.reserveCapacity(8192)
+
+        for root in roots {
+            let subItems = try await listRecursively(client: client, path: root)
+            print("[WebDAVImport] PROPFIND root=\(root) items=\(subItems.count)")
+
+            for item in subItems {
+                let key = normalize(path: item.href)
+                if seenByHref.insert(key).inserted {
+                    allItems.append(item)
+                }
+            }
+        }
+
         print("[WebDAVImport] PROPFIND finished, total items=\(allItems.count)")
+        logScannedExtensionStats(allItems)
 
         let mediaItems = allItems.filter { item in
             guard !item.isCollection else { return false }
@@ -350,6 +372,8 @@ final class ImportWebDAVPhotosUseCase {
 
         var byKey: [String: PhotoCandidates] = [:]
         var passthrough: [MediaGroup] = []
+        var rawFileCount = 0
+        var liveVideoCount = 0
 
         for item in items {
             let path = normalize(path: item.href)
@@ -358,10 +382,12 @@ final class ImportWebDAVPhotosUseCase {
             if isJPG(path) {
                 byKey[key, default: PhotoCandidates()].jpgs.append(item)
             } else if isRAW(path) {
+                rawFileCount += 1
                 byKey[key, default: PhotoCandidates()].raws.append(item)
             } else if isHEIC(path) {
                 byKey[key, default: PhotoCandidates()].heics.append(item)
             } else if isLiveVideo(path) {
+                liveVideoCount += 1
                 byKey[key, default: PhotoCandidates()].liveVideos.append(item)
             } else {
                 passthrough.append(
@@ -444,6 +470,13 @@ final class ImportWebDAVPhotosUseCase {
                 )
             }
         }
+
+        let groupedRawAttachments = groups.filter { $0.rawPath != nil && !($0.rawPath?.isEmpty ?? true) }.count
+        let groupedLiveAttachments = groups.filter {
+            ($0.livePhotoVideoPath != nil && !($0.livePhotoVideoPath?.isEmpty ?? true))
+            || ($0.livePhotoPhotoPath != nil && !($0.livePhotoPhotoPath?.isEmpty ?? true))
+        }.count
+        print("[WebDAVImport][GroupStats] input=\(items.count) keys=\(byKey.count) rawFiles=\(rawFileCount) liveVideos=\(liveVideoCount) grouped=\(groups.count) groupedRaw=\(groupedRawAttachments) groupedLive=\(groupedLiveAttachments)")
 
         return groups
     }
@@ -779,6 +812,49 @@ final class ImportWebDAVPhotosUseCase {
             ".mp4", ".mov", ".m4v"
         ]
         return extensions.contains { lower.hasSuffix($0) }
+    }
+
+    private func logScannedExtensionStats(_ items: [WebDAVDirectoryItem]) {
+        let files = items.filter { !$0.isCollection }
+        guard !files.isEmpty else {
+            print("[WebDAVImport][ScanStats] no files")
+            return
+        }
+
+        var extCounts: [String: Int] = [:]
+        extCounts.reserveCapacity(128)
+
+        var rawCandidates: [String] = []
+        rawCandidates.reserveCapacity(10)
+
+        let rawExts: Set<String> = ["raw", "rw2", "dng", "nef", "arw", "cr2", "cr3", "orf", "raf", "srw", "pef", "iiq", "erf", "kdc", "mos", "mrw", "rwl", "x3f", "3fr"]
+
+        for item in files {
+            let path = normalize(path: item.href)
+            let ext = (path as NSString).pathExtension.lowercased()
+            let key = ext.isEmpty ? "<noext>" : ext
+            extCounts[key, default: 0] += 1
+
+            if rawExts.contains(ext), rawCandidates.count < 10 {
+                rawCandidates.append(path)
+            }
+        }
+
+        let top = extCounts
+            .sorted {
+                if $0.value == $1.value { return $0.key < $1.key }
+                return $0.value > $1.value
+            }
+            .prefix(20)
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ",")
+
+        let rawHitCount = rawExts.reduce(0) { partial, ext in
+            partial + (extCounts[ext] ?? 0)
+        }
+
+        print("[WebDAVImport][ScanStats] files=\(files.count) extTop20=\(top)")
+        print("[WebDAVImport][ScanStats] rawExtHit=\(rawHitCount) rawSamples=\(rawCandidates.joined(separator: ","))")
     }
 
     private func inferMediaType(fromPath path: String) -> PhotoAsset.MediaType {
