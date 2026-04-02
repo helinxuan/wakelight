@@ -78,7 +78,7 @@ final class ImportWebDAVPhotosUseCase {
 
         for root in roots {
             let subItems = try await listRecursively(client: client, path: root)
-            print("[WebDAVImport] PROPFIND root=\(root) items=\(subItems.count)")
+            // print("[WebDAVImport] PROPFIND root=\(root) items=\(subItems.count)")
 
             for item in subItems {
                 let key = normalize(path: item.href)
@@ -492,12 +492,12 @@ final class ImportWebDAVPhotosUseCase {
         scanAt: Date
     ) async throws {
         let remotePath = normalize(path: item.href)
-        print("[WebDAVImport] [\(index+1)/\(total)] Processing: \(remotePath)")
+        // print("[WebDAVImport] [\(index+1)/\(total)] Processing: \(remotePath)")
 
         // 1. Skip files larger than 300MB to avoid excessive bandwidth/latency during import pass.
         let maxSizeBytes: Int = 300 * 1024 * 1024
         if let size = item.contentLength, size > maxSizeBytes {
-            print("[WebDAVImport] Skipping large file (>300MB): \(remotePath) size=\(size)")
+            // print("[WebDAVImport] Skipping large file (>300MB): \(remotePath) size=\(size)")
             return
         }
 

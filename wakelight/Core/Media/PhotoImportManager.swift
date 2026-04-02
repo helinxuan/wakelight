@@ -73,6 +73,7 @@ struct ThumbnailBackfillProgress: Codable {
     var completed: Int = 0
     var failed: Int = 0
     var isRunning: Bool = false
+    var isAcceptingRequests: Bool = true
 
     var finishedCount: Int { min(total, max(0, completed + failed)) }
     var pending: Int { max(0, total - finishedCount) }
@@ -103,6 +104,7 @@ final class PhotoImportManager: ObservableObject {
 
     private var runningTaskType: RunningTaskType?
     private var runningTask: Task<Void, Never>?
+    private var runningResultTask: Task<Bool, Never>?
 
     private var pendingPhotosChange: PhotosLibraryObserver.ChangeSet?
     private var photosChangeDebounceTask: Task<Void, Never>?
@@ -113,6 +115,7 @@ final class PhotoImportManager: ObservableObject {
         reconcileRestoredProgressIfNeeded()
         Task { [weak self] in
             guard let self else { return }
+            await PhotoThumbnailScheduler.shared.setAcceptingRequests(true)
             await PhotoThumbnailScheduler.shared.setProgressObserver { snapshot in
                 await MainActor.run {
                     self.thumbnailBackfillProgress = snapshot
@@ -140,6 +143,7 @@ final class PhotoImportManager: ObservableObject {
     @discardableResult
     func backfillThumbnailsIfNeeded(limit: Int? = nil) async -> Int {
         do {
+            await PhotoThumbnailScheduler.shared.setAcceptingRequests(true)
             let requests = try await loadThumbnailBackfillRequests(limit: limit)
             guard !requests.isEmpty else {
                 print("[ThumbBackfill] no pending assets")
@@ -163,6 +167,13 @@ final class PhotoImportManager: ObservableObject {
         log("cancelImport requested, taskType=\(String(describing: runningTaskType))")
         runningTask?.cancel()
         runningTask = nil
+        runningResultTask?.cancel()
+        runningResultTask = nil
+
+        Task.detached(priority: .background) {
+            await PhotoThumbnailScheduler.shared.cancelAll()
+            print("[ThumbBackfill] cancelled all pending/running jobs")
+        }
 
         switch runningTaskType {
         case .sync:
@@ -325,122 +336,160 @@ final class PhotoImportManager: ObservableObject {
     }
 
     func runWebDAVImportInBackgroundIfPossible(reason: String) async -> Bool {
-        let canRun = await MainActor.run { !self.isRunning }
+        let canRun = await MainActor.run {
+            if self.runningResultTask != nil { return false }
+            return !self.isRunning
+        }
         guard canRun else {
             log("runWebDAVImportInBackgroundIfPossible skipped: already running, reason=\(reason)")
             return false
         }
         log("runWebDAVImportInBackgroundIfPossible begin, reason=\(reason)")
 
-        await MainActor.run {
-            self.isSyncRunning = true
-            self.runningTaskType = .sync
-        }
+        let task = Task.detached(priority: .background) { [weak self] () -> Bool in
+            guard let self else { return false }
 
-        defer {
-            Task { @MainActor in
-                self.isSyncRunning = false
-                self.runningTaskType = nil
-                self.runningTask = nil
+            await MainActor.run {
+                self.isSyncRunning = true
+                self.runningTaskType = .sync
+            }
+
+            defer {
+                Task { @MainActor in
+                    self.isSyncRunning = false
+                    self.runningTaskType = nil
+                    self.runningTask = nil
+                    self.runningResultTask = nil
+                }
+            }
+
+            do {
+                let result = try await self.performWebDAVImportPipeline()
+
+                // 顺序要求：导入 -> 缩略图补全 -> 预处理
+                let _ = await self.backfillThumbnailsIfNeeded()
+
+                await self.completeSync(notice: "WebDAV 后台同步完成：已导入 \(result.importedCount) 项")
+
+                await MainActor.run {
+                    self.isSyncRunning = false
+                    self.runningTaskType = nil
+                    self.runningResultTask = nil
+                }
+
+                if Task.isCancelled { return false }
+                let _ = await self.runCurationInBackgroundIfPossible(reason: "after-webdav-bg-import")
+                return true
+            } catch is CancellationError {
+                await self.cancelSync(notice: "WebDAV 后台同步已取消")
+                return false
+            } catch {
+                await self.failSync(error: error.localizedDescription)
+                return false
             }
         }
 
-        do {
-            let result = try await performWebDAVImportPipeline()
-
-            // 顺序要求：导入 -> 缩略图补全 -> 预处理
-            let _ = await backfillThumbnailsIfNeeded()
-
-            await completeSync(notice: "WebDAV 后台同步完成：已导入 \(result.importedCount) 项")
-
-            let _ = await runCurationInBackgroundIfPossible(reason: "after-webdav-bg-import")
-            return true
-        } catch is CancellationError {
-            await cancelSync(notice: "WebDAV 后台同步已取消")
-            return false
-        } catch {
-            await failSync(error: error.localizedDescription)
-            return false
+        await MainActor.run {
+            self.runningResultTask = task
         }
+
+        return await task.value
     }
 
     func runCurationInBackgroundIfPossible(reason: String) async -> Bool {
-        let canRun = await MainActor.run { !self.isRunning }
+        let canRun = await MainActor.run {
+            if self.runningResultTask != nil { return false }
+            return !self.isRunning
+        }
         guard canRun else {
             log("runCurationInBackgroundIfPossible skipped: already running, reason=\(reason)")
             return false
         }
         log("runCurationInBackgroundIfPossible begin, reason=\(reason)")
 
-        await MainActor.run {
-            self.isCurationRunning = true
-            self.runningTaskType = .curation
-        }
+        let task = Task.detached(priority: .background) { [weak self] () -> Bool in
+            guard let self else { return false }
 
-        let pipelineStart = Date()
-        let heartbeatTask = Task.detached(priority: .background) { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                guard let self else { return }
-                let snapshot = await MainActor.run { self.curationProgress }
-                self.log("curation heartbeat phase=\(snapshot.phase.rawValue) progress=\(snapshot.processedItems)/\(snapshot.totalItems)")
+            await MainActor.run {
+                self.isCurationRunning = true
+                self.runningTaskType = .curation
             }
-        }
 
-        defer {
-            heartbeatTask.cancel()
-            Task { @MainActor in
-                self.isCurationRunning = false
-                self.runningTaskType = nil
-                self.runningTask = nil
-            }
-        }
-
-        do {
-            await updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
-            log("curation step begin: preprocess")
-            let preprocessStart = Date()
-
-            // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
-            let prefetched = await backfillThumbnailsIfNeeded()
-            let thumbSnapshot = await PhotoThumbnailScheduler.shared.snapshot()
-            log("curation preflight thumbnail backfill enqueued=\(prefetched) queueTotal=\(thumbSnapshot.total)")
-
-            let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
-                Task { @MainActor in
-                    PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
+            let pipelineStart = Date()
+            let heartbeatTask = Task.detached(priority: .background) { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard let self else { return }
+                    let snapshot = await MainActor.run { self.curationProgress }
+                    self.log("curation heartbeat phase=\(snapshot.phase.rawValue) progress=\(snapshot.processedItems)/\(snapshot.totalItems)")
                 }
             }
-            log("curation step done: preprocess elapsed=\(Int(Date().timeIntervalSince(preprocessStart)))s")
 
-            await refreshCurationCountsFromDatabaseNow(fallback: summary)
+            defer {
+                heartbeatTask.cancel()
+                Task { @MainActor in
+                    self.isCurationRunning = false
+                    self.runningTaskType = nil
+                    self.runningTask = nil
+                    self.runningResultTask = nil
+                }
+            }
 
-            await updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
-            log("curation step begin: generateClusters")
-            let clustersStart = Date()
-            _ = try await GeneratePlaceClustersUseCase().run()
-            log("curation step done: generateClusters elapsed=\(Int(Date().timeIntervalSince(clustersStart)))s")
+            do {
+                await self.updateCurationStatus(.importing, phase: .preprocess, resetCounts: true)
+                self.log("curation step begin: preprocess")
+                let preprocessStart = Date()
 
-            await updateCurationStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
-            log("curation step begin: generateVisitLayers")
-            let layersStart = Date()
-            _ = try await GenerateVisitLayersUseCase().run()
-            log("curation step done: generateVisitLayers elapsed=\(Int(Date().timeIntervalSince(layersStart)))s")
+                // 整理前先尽量补齐缺失/失效缩略图，提升预处理命中率。
+                let prefetched = await self.backfillThumbnailsIfNeeded()
+                let thumbSnapshot = await PhotoThumbnailScheduler.shared.snapshot()
+                self.log("curation preflight thumbnail backfill enqueued=\(prefetched) queueTotal=\(thumbSnapshot.total)")
 
-            await completeCuration(
-                notice: "后台预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
-            )
-            log("runCurationInBackgroundIfPossible done totalElapsed=\(Int(Date().timeIntervalSince(pipelineStart)))s")
-            return true
-        } catch is CancellationError {
-            log("runCurationInBackgroundIfPossible cancelled after=\(Int(Date().timeIntervalSince(pipelineStart)))s")
-            await cancelCuration(notice: "后台整理已取消")
-            return false
-        } catch {
-            log("runCurationInBackgroundIfPossible failed after=\(Int(Date().timeIntervalSince(pipelineStart)))s error=\(error.localizedDescription)")
-            await failCuration(error: error.localizedDescription)
-            return false
+                if Task.isCancelled { throw CancellationError() }
+                let summary = try await ImportPhotosUseCase().reprocessImportedPhotos { processed, total in
+                    Task { @MainActor in
+                        PhotoImportManager.shared.reportCurationProgress(processed: processed, total: total, phase: .preprocess)
+                    }
+                }
+                self.log("curation step done: preprocess elapsed=\(Int(Date().timeIntervalSince(preprocessStart)))s")
+
+                await self.refreshCurationCountsFromDatabaseNow(fallback: summary)
+
+                if Task.isCancelled { throw CancellationError() }
+                await self.updateCurationStatus(.importing, phase: .generateClusters, resetCounts: false)
+                self.log("curation step begin: generateClusters")
+                let clustersStart = Date()
+                _ = try await GeneratePlaceClustersUseCase().run()
+                self.log("curation step done: generateClusters elapsed=\(Int(Date().timeIntervalSince(clustersStart)))s")
+
+                if Task.isCancelled { throw CancellationError() }
+                await self.updateCurationStatus(.importing, phase: .generateVisitLayers, resetCounts: false)
+                self.log("curation step begin: generateVisitLayers")
+                let layersStart = Date()
+                _ = try await GenerateVisitLayersUseCase().run()
+                self.log("curation step done: generateVisitLayers elapsed=\(Int(Date().timeIntervalSince(layersStart)))s")
+
+                await self.completeCuration(
+                    notice: "后台预处理完成：保留 \(summary.meaningfulKept) 张，待确认 \(summary.reviewBucketCount) 张，已过滤 \(summary.filteredArchivedCount) 张"
+                )
+                self.log("runCurationInBackgroundIfPossible done totalElapsed=\(Int(Date().timeIntervalSince(pipelineStart)))s")
+                return true
+            } catch is CancellationError {
+                self.log("runCurationInBackgroundIfPossible cancelled after=\(Int(Date().timeIntervalSince(pipelineStart)))s")
+                await self.cancelCuration(notice: "后台整理已取消")
+                return false
+            } catch {
+                self.log("runCurationInBackgroundIfPossible failed after=\(Int(Date().timeIntervalSince(pipelineStart)))s error=\(error.localizedDescription)")
+                await self.failCuration(error: error.localizedDescription)
+                return false
+            }
         }
+
+        await MainActor.run {
+            self.runningResultTask = task
+        }
+
+        return await task.value
     }
 
     private func performWebDAVImportPipeline() async throws -> WebDAVImportResult {
@@ -742,30 +791,19 @@ final class PhotoImportManager: ObservableObject {
 
     private func loadThumbnailBackfillRequests(limit: Int?) async throws -> [PhotoThumbnailScheduler.Request] {
         try await DatabaseContainer.shared.db.reader.read { db in
+            // 性能优化：补齐队列仅负责“无缩略图引用”的资产，避免每次扫描全表并做高频 fileExists 检查。
+            // 缩略图文件缺失但 DB 仍有引用的情况，由缩略图读取链路 disk-miss 时触发按需补齐。
+            let maxCount = max(1, limit ?? 600)
             let assets = try PhotoAsset
+                .filter(Column("thumbnailPath") == nil || Column("thumbnailPath") == "")
                 .order(Column("importedAt").desc)
+                .limit(maxCount)
                 .fetchAll(db)
 
-            var scheduledIds: [UUID] = []
-            var mediaTypeById: [UUID: PhotoAsset.MediaType] = [:]
+            guard !assets.isEmpty else { return [] }
 
-            for asset in assets {
-                let hasThumbnailReference = !(asset.thumbnailPath?.isEmpty ?? true)
-
-                let fileExists: Bool = {
-                    guard let relativePath = asset.thumbnailPath, !relativePath.isEmpty else { return false }
-                    guard let url = try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath) else { return false }
-                    return FileManager.default.fileExists(atPath: url.path)
-                }()
-
-                guard !hasThumbnailReference || !fileExists else { continue }
-
-                scheduledIds.append(asset.id)
-                mediaTypeById[asset.id] = asset.mediaType ?? .photo
-                if let limit, scheduledIds.count >= limit {
-                    break
-                }
-            }
+            let scheduledIds = assets.map(\.id)
+            let mediaTypeById = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0.mediaType ?? .photo) })
 
             let locators = try PhotoAsset.fetchLocators(db: db, ids: scheduledIds)
             let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })

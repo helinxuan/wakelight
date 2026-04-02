@@ -146,6 +146,12 @@ final class PhotoThumbnailLoader {
     /// 触发后台补齐缩略图缓存（同一 locatorKey 去重）
     private func triggerBackfill(locator: MediaLocator, locatorKey: String) {
         Task.detached(priority: .background) {
+            let canAccept = await PhotoThumbnailScheduler.shared.canAcceptRequests()
+            guard canAccept else {
+                print("[ThumbLoader] Backfill skipped (queue not accepting): \(locatorKey)")
+                return
+            }
+
             let shouldStart = await self.backfillRegistry.begin(locatorKey)
             guard shouldStart else { return }
             defer {

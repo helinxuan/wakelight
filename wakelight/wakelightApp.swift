@@ -56,26 +56,25 @@ struct wakelightApp: App {
                             UserDefaults.standard.set(true, forKey: firstLaunchLocalSyncDoneKey)
                         }
 
-                        // 4) 启动时先补齐缺失缩略图（缺失或文件失效都补），再进入后续流程。
-                        let startupBackfillCount = await PhotoImportManager.shared.backfillThumbnailsIfNeeded()
-                        print("[AppLaunch] thumbnail backfill enqueued=\(startupBackfillCount)")
+                        // 4) 启动阶段避免前台重任务，防止地图首屏交互卡顿。
+                        //    重任务改为延迟+后台机会执行：让用户先获得流畅可交互首帧。
+                        Task.detached(priority: .utility) {
+                            try? await Task.sleep(nanoseconds: 8_000_000_000)
 
-                        // 5) 有 WebDAV 配置则前台按顺序执行：WebDAV -> 缩略图 -> 整理
-                        let hasWebDAVProfile = await WebDAVBootstrap.shared.hasSavedProfile()
-                        if hasWebDAVProfile {
-                            _ = await PhotoImportManager.shared.runWebDAVImportInBackgroundIfPossible(reason: "app-launch-foreground")
-                        } else {
-                            // 无 WebDAV 配置时，至少跑一轮整理
-                            await MainActor.run {
-                                PhotoImportManager.shared.startPreprocessImportedPhotos(reason: "app-launch-no-webdav")
+                            let startupBackfillCount = await PhotoImportManager.shared.backfillThumbnailsIfNeeded(limit: 120)
+                            print("[AppLaunch] deferred thumbnail backfill enqueued=\(startupBackfillCount)")
+
+                            let hasWebDAVProfile = await WebDAVBootstrap.shared.hasSavedProfile()
+                            if hasWebDAVProfile {
+                                _ = await PhotoImportManager.shared.runWebDAVImportInBackgroundIfPossible(reason: "app-launch-deferred")
                             }
+
+                            // 无 WebDAV 配置时不在启动自动整理，交给用户手动触发，避免冷启动算力洪峰。
+                            PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded(limit: 120)
                         }
 
-                        // 6) 启动后仍调度后台 WebDAV 机会任务
+                        // 5) 启动后调度后台 WebDAV 机会任务
                         BackgroundImportScheduler.shared.scheduleWebDAVImportAfterLaunch()
-
-                        // 7) 再补偿一轮（不阻塞），覆盖启动后新增/变更的素材。
-                        PhotoImportManager.shared.resumeThumbnailBackfillIfNeeded()
                     }
                 }
         }

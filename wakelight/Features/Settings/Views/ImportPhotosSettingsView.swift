@@ -97,6 +97,12 @@ struct ImportPhotosSettingsView: View {
                         Text("已完成 \(importManager.thumbnailBackfillProgress.completed) · 失败 \(importManager.thumbnailBackfillProgress.failed) · 剩余 \(importManager.thumbnailBackfillProgress.pending)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        if !importManager.thumbnailBackfillProgress.isAcceptingRequests {
+                            Text("缩略图队列已停止（不接收新任务）")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                     .padding(.top, 4)
                 }

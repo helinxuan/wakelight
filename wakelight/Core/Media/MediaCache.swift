@@ -27,9 +27,17 @@ final class MediaCache: MediaCacheProtocol {
     static let defaultThumbnailCacheLimitBytes: UInt64 = 1_073_741_824
 
     private let fileManager: FileManager
+    private let thumbnailsDirectoryCachedURL: URL
 
     private init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+
+        do {
+            let base = try fileManager.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            self.thumbnailsDirectoryCachedURL = base.appendingPathComponent("thumbnails", isDirectory: true)
+        } catch {
+            self.thumbnailsDirectoryCachedURL = fileManager.temporaryDirectory.appendingPathComponent("wakelight-thumbnails", isDirectory: true)
+        }
     }
 
     // MARK: - Settings
@@ -134,8 +142,7 @@ final class MediaCache: MediaCacheProtocol {
     // MARK: - Internals
 
     private func thumbnailsDirectoryURL() throws -> URL {
-        let base = try fileManager.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let dir = base.appendingPathComponent("thumbnails", isDirectory: true)
+        let dir = thumbnailsDirectoryCachedURL
         if !fileManager.fileExists(atPath: dir.path) {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }

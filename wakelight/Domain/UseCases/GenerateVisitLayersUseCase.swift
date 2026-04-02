@@ -26,6 +26,28 @@ final class GenerateVisitLayersUseCase {
             let clusters = try PlaceCluster.fetchAll(db)
             var totalCreatedOrUpdated = 0
 
+            // 仅使用“保留/未标注”照片生成 VisitLayer；已归档过滤的不参与分层
+            let allPhotos = try PhotoAsset
+                .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
+                .fetchAll(db)
+
+            let radiusMeters = AppConfig.default.placeClusterRadiusMeters
+
+            struct IndexedPhoto {
+                let photo: PhotoAsset
+                let lat: Double
+                let lon: Double
+                let createdAt: Date
+            }
+
+            // 先做一次基础过滤，避免每个 cluster 都扫描全量照片。
+            let indexedPhotos: [IndexedPhoto] = allPhotos.compactMap { photo in
+                guard let lat = photo.latitude,
+                      let lon = photo.longitude,
+                      let createdAt = photo.creationDate else { return nil }
+                return IndexedPhoto(photo: photo, lat: lat, lon: lon, createdAt: createdAt)
+            }
+
             for cluster in clusters {
                 // 关键保护：已有故事的 cluster 不做“删库重建 VisitLayer”，避免 StoryNode 引用失效
                 let hasStoryNode = try StoryNode
@@ -41,24 +63,20 @@ final class GenerateVisitLayersUseCase {
                     continue
                 }
 
-                // 仅使用“保留/未标注”照片生成 VisitLayer；已归档过滤的不参与分层
-                let allPhotos = try PhotoAsset
-                    .filter((Column("curationBucket") != ImportDecisionBucket.archived.rawValue) || Column("curationBucket") == nil)
-                    .fetchAll(db)
-
-                let radiusMeters = AppConfig.default.placeClusterRadiusMeters
                 let clusterPrecision = parseGeoGridPrecision(from: cluster.geohash) ?? 0.001
-                let bucketPhotos = allPhotos.filter { p in
-                    guard let lat = p.latitude, let lon = p.longitude else { return false }
-                    let distance = CLLocation(latitude: lat, longitude: lon)
-                        .distance(from: CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude))
-                    let key = GeoGrid.key(latitude: lat, longitude: lon, precisionDegrees: clusterPrecision)
-                    return distance < radiusMeters && key == cluster.geohash
-                }
-                .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+                let clusterCenter = CLLocation(latitude: cluster.centerLatitude, longitude: cluster.centerLongitude)
+
+                let bucketPhotos = indexedPhotos
+                    .filter { item in
+                        let key = GeoGrid.key(latitude: item.lat, longitude: item.lon, precisionDegrees: clusterPrecision)
+                        guard key == cluster.geohash else { return false }
+                        let distance = CLLocation(latitude: item.lat, longitude: item.lon).distance(from: clusterCenter)
+                        return distance < radiusMeters
+                    }
+                    .map(\.photo)
+                    .sorted { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
 
                 if bucketPhotos.isEmpty {
-                    print("⚠️ No photos found for cluster: \(cluster.geohash)")
                     continue
                 }
 
@@ -100,9 +118,7 @@ final class GenerateVisitLayersUseCase {
                     segments.append((s, e))
                 }
 
-                var order = 0
                 for seg in segments {
-                    order += 1
                     let layerId = UUID()
                     let layer = VisitLayer(
                         id: layerId,
@@ -116,18 +132,18 @@ final class GenerateVisitLayersUseCase {
                         settledAt: nil
                     )
                     try layer.insert(db)
-                    
+
                     // 绑定属于该访次的照片
                     let photosInLayer = bucketPhotos.filter { p in
                         guard let date = p.creationDate else { return false }
                         return date >= seg.start && date <= seg.end
                     }
-                    
+
                     for photo in photosInLayer {
                         let link = VisitLayerPhotoAsset(visitLayerId: layerId, photoAssetId: photo.id)
                         try link.insert(db)
                     }
-                    
+
                     totalCreatedOrUpdated += 1
                 }
 

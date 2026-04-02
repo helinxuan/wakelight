@@ -47,7 +47,7 @@ final class WebDAVClient {
 
     func propfind(path: String, depth: String = "1") async throws -> [WebDAVDirectoryItem] {
         let url = try makeURL(path: path)
-        print("[WebDAVClient] PROPFIND Request: \(url.absoluteString) (depth: \(depth))")
+        // print("[WebDAVClient] PROPFIND Request: \(url.absoluteString) (depth: \(depth))")
         var request = URLRequest(url: url)
         request.httpMethod = "PROPFIND"
         request.setValue(depth, forHTTPHeaderField: "Depth")
@@ -63,7 +63,7 @@ final class WebDAVClient {
                 print("[WebDAVClient] PROPFIND Error: Not an HTTP response")
                 throw WebDAVError.invalidResponse 
             }
-            print("[WebDAVClient] PROPFIND Response Status: \(http.statusCode)")
+            // print("[WebDAVClient] PROPFIND Response Status: \(http.statusCode)")
             
             guard (200...299).contains(http.statusCode) || http.statusCode == 207 else {
                 print("[WebDAVClient] PROPFIND Error: HTTP \(http.statusCode)")
@@ -71,7 +71,7 @@ final class WebDAVClient {
             }
 
             let items = try WebDAVPropfindParser.parse(data: data)
-            print("[WebDAVClient] PROPFIND Parsed \(items.count) items")
+            // print("[WebDAVClient] PROPFIND Parsed \(items.count) items")
             return items
         } catch {
             print("[WebDAVClient] PROPFIND Exception: \(error.localizedDescription)")

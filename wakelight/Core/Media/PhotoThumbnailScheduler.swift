@@ -45,6 +45,8 @@ actor PhotoThumbnailScheduler {
     private var pendingOrder: [UUID] = []
     private var entriesByPhotoId: [UUID: Entry] = [:]
     private var failureCountByPhotoId: [UUID: Int] = [:]
+    private var runningTasksByPhotoId: [UUID: Task<Void, Never>] = [:]
+    private var isAcceptingRequests: Bool = true
     private var progressObserver: (@Sendable (ThumbnailBackfillProgress) async -> Void)?
 
     init(maxConcurrent: Int) {
@@ -62,6 +64,12 @@ actor PhotoThumbnailScheduler {
     func enqueue(_ requests: [Request]) async -> EnqueueResult {
         if runningCount == 0 && pendingOrder.isEmpty && !entriesByPhotoId.isEmpty {
             entriesByPhotoId.removeAll()
+        }
+
+        guard isAcceptingRequests else {
+            let snapshot = makeSnapshot()
+            publishProgress(snapshot)
+            return EnqueueResult(acceptedCount: 0, snapshot: snapshot)
         }
 
         var acceptedCount = 0
@@ -82,6 +90,35 @@ actor PhotoThumbnailScheduler {
         makeSnapshot()
     }
 
+    func canAcceptRequests() -> Bool {
+        isAcceptingRequests
+    }
+
+    func setAcceptingRequests(_ accepting: Bool) {
+        isAcceptingRequests = accepting
+        publishProgress(makeSnapshot())
+    }
+
+    func cancelAll() {
+        isAcceptingRequests = false
+        pendingOrder.removeAll(keepingCapacity: false)
+
+        for task in runningTasksByPhotoId.values {
+            task.cancel()
+        }
+        runningTasksByPhotoId.removeAll()
+
+        for (photoId, var entry) in entriesByPhotoId {
+            if entry.state == .pending || entry.state == .running {
+                entry.state = .failed
+                entriesByPhotoId[photoId] = entry
+            }
+        }
+
+        runningCount = 0
+        publishProgress(makeSnapshot())
+    }
+
     private func shouldEnqueue(_ request: Request) -> Bool {
         let failureCount = failureCountByPhotoId[request.photoId] ?? 0
         if failureCount >= maxRetryCountPerPhoto {
@@ -100,6 +137,8 @@ actor PhotoThumbnailScheduler {
     }
 
     private func runNextIfPossible() {
+        guard isAcceptingRequests else { return }
+
         while runningCount < maxConcurrent, !pendingOrder.isEmpty {
             let photoId = pendingOrder.removeFirst()
             guard var entry = entriesByPhotoId[photoId] else { continue }
@@ -110,11 +149,12 @@ actor PhotoThumbnailScheduler {
             runningCount += 1
             publishProgress(makeSnapshot())
 
-            Task.detached(priority: .background) { [weak self] in
+            let task = Task.detached(priority: .background) { [weak self] in
                 guard let self else { return }
                 let success = await self.perform(entry.request)
                 await self.jobFinished(photoId: photoId, success: success)
             }
+            runningTasksByPhotoId[photoId] = task
         }
     }
 
@@ -186,6 +226,7 @@ actor PhotoThumbnailScheduler {
     }
 
     private func jobFinished(photoId: UUID, success: Bool) {
+        runningTasksByPhotoId.removeValue(forKey: photoId)
         runningCount = max(0, runningCount - 1)
         if var entry = entriesByPhotoId[photoId] {
             entry.state = success ? .completed : .failed
@@ -210,7 +251,8 @@ actor PhotoThumbnailScheduler {
             overallPendingTotal: total,
             completed: completed,
             failed: failed,
-            isRunning: runningCount > 0 || pendingOrder.isEmpty == false
+            isRunning: runningCount > 0 || pendingOrder.isEmpty == false,
+            isAcceptingRequests: isAcceptingRequests
         )
     }
 

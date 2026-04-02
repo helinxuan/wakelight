@@ -140,6 +140,10 @@ actor ImportCurationService {
         await onProgress?(0, totalCount)
 
         for group in groups {
+            if Task.isCancelled {
+                break
+            }
+
             let scored = await score(group: group)
             guard let best = scored.first else { continue }
 
@@ -251,6 +255,10 @@ actor ImportCurationService {
         await onProgress?(0, total)
 
         for coarse in coarseGroups {
+            if Task.isCancelled {
+                break
+            }
+
             let partial = await clusterBySceneAndFeaturePrint(items: coarse, featurePrintCache: &featurePrintCache)
             groups.append(contentsOf: partial)
 
@@ -494,6 +502,10 @@ actor ImportCurationService {
         let groupId = makeGroupId(for: group)
 
         for item in group.items {
+            if Task.isCancelled {
+                break
+            }
+
             guard let image = await loadImage(item: item) else {
                 scored.append(
                     ScoredAsset(item: item, groupId: groupId, score: 0, textAvgConfidence: nil, textMaxConfidence: nil, textCount: 0, textAreaRatio: 0, screenshotScore: 0, hasFace: false)
@@ -610,8 +622,9 @@ actor ImportCurationService {
         // 先走已缓存缩略图，减少整理阶段对原图/远端资源的解码与拉取。
         if let thumbnailPath = item.thumbnailPath,
            !thumbnailPath.isEmpty,
-           FileManager.default.fileExists(atPath: thumbnailPath),
-           let thumb = UIImage(contentsOfFile: thumbnailPath) {
+           let thumbURL = try? MediaCache.shared.thumbnailURL(forRelativePath: thumbnailPath),
+           FileManager.default.fileExists(atPath: thumbURL.path),
+           let thumb = UIImage(contentsOfFile: thumbURL.path) {
             debugThumbHitCount += 1
             debugLogThumbStatsIfNeeded()
             return thumb
