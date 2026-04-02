@@ -606,7 +606,6 @@ final class ImportWebDAVPhotosUseCase {
                         duration: metadata.duration,
                         thumbnailPath: thumbnailPath,
                         thumbnailUpdatedAt: thumbnailUpdatedAt,
-                        thumbnailCacheKey: nil,
                         modificationDate: nil,
                         lastSeenAt: scanAt,
                         importedAt: importedAt
@@ -645,7 +644,6 @@ final class ImportWebDAVPhotosUseCase {
                 duration: metadata.duration,
                 thumbnailPath: thumbnailPath,
                 thumbnailUpdatedAt: thumbnailUpdatedAt,
-                thumbnailCacheKey: nil,
                 modificationDate: nil,
                 lastSeenAt: scanAt,
                 importedAt: importedAt
@@ -700,7 +698,6 @@ final class ImportWebDAVPhotosUseCase {
                                 duration: metadata.duration,
                                 thumbnailPath: thumbnailPath,
                                 thumbnailUpdatedAt: thumbnailUpdatedAt,
-                                thumbnailCacheKey: nil,
                                 modificationDate: nil,
                                 lastSeenAt: scanAt,
                                 importedAt: importedAt

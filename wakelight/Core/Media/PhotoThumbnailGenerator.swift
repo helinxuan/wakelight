@@ -14,18 +14,18 @@ final class PhotoThumbnailGenerator {
     
     /// Generates and caches a thumbnail for the given locator.
     /// - parameter preferredLocalFileURL: Optional local file URL to reuse during import, avoiding an extra network fetch.
-    /// Returns the absolute path to the cached thumbnail.
+    /// Returns the thumbnail relative path (file name under cache thumbnails directory).
     func generateThumbnail(
         for locator: MediaLocator,
         mediaType: PhotoAsset.MediaType,
         preferredLocalFileURL: URL? = nil
     ) async throws -> String {
-        let destinationURL = try MediaCache.shared.thumbnailURL(for: locator, size: targetSize)
+        let relativePath = MediaCache.shared.thumbnailRelativePath(for: locator, size: targetSize)
+        let destinationURL = try MediaCache.shared.thumbnailURL(forRelativePath: relativePath)
         
         // If already exists, just return path
         if FileManager.default.fileExists(atPath: destinationURL.path) {
-            return destinationURL.path
-        }
+            return relativePath        }
         
         let resource: MediaResource
         if let preferredLocalFileURL {

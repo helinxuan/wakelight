@@ -99,19 +99,20 @@ final class PhotoThumbnailLoader {
         // 1. 通过 locatorKey 解析到对应 PhotoAsset（兼容 library:// 与 webdav://）
         let lookup = try? await lookupAsset(for: locatorKey)
 
-        // 2. 优先读取已落盘缩略图
-        if let cachedPath = lookup?.thumbnailPath,
-           let cachedImage = UIImage(contentsOfFile: cachedPath) {
-            print("[ThumbLoader] source=disk-hit locator=\(locatorKey) path=\(cachedPath)")
+        // 2. 优先读取已落盘缩略图（thumbnailPath 为相对路径）
+        if let relativePath = lookup?.thumbnailPath,
+           let cachedURL = try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath),
+           let cachedImage = UIImage(contentsOfFile: cachedURL.path) {
+            print("[ThumbLoader] source=disk-hit locator=\(locatorKey) rel=\(relativePath)")
             return cachedImage
         }
 
-        if let cachedPath = lookup?.thumbnailPath {
-            let exists = FileManager.default.fileExists(atPath: cachedPath)
-            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) path=\(cachedPath) exists=\(exists)")
+        if let relativePath = lookup?.thumbnailPath {
+            let exists = (try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath))
+                .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            print("[ThumbLoader] source=disk-miss locator=\(locatorKey) rel=\(relativePath) exists=\(exists)")
 
             if !exists, let locator = MediaLocator.parse(locatorKey) {
-                // 路径失效：提前触发补齐（不依赖 fallback 成功）
                 triggerBackfill(locator: locator, locatorKey: locatorKey)
             }
         } else {
@@ -159,9 +160,10 @@ final class PhotoThumbnailLoader {
                     return
                 }
 
-                if let existingPath = lookup.thumbnailPath,
-                   !existingPath.isEmpty,
-                   FileManager.default.fileExists(atPath: existingPath) {
+                if let relativePath = lookup.thumbnailPath,
+                   !relativePath.isEmpty,
+                   let url = try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath),
+                   FileManager.default.fileExists(atPath: url.path) {
                     return
                 }
 

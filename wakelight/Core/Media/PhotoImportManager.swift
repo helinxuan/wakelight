@@ -750,13 +750,15 @@ final class PhotoImportManager: ObservableObject {
             var mediaTypeById: [UUID: PhotoAsset.MediaType] = [:]
 
             for asset in assets {
-                let hasPath = !(asset.thumbnailPath?.isEmpty ?? true)
+                let hasThumbnailReference = !(asset.thumbnailPath?.isEmpty ?? true)
+
                 let fileExists: Bool = {
-                    guard let path = asset.thumbnailPath, !path.isEmpty else { return false }
-                    return FileManager.default.fileExists(atPath: path)
+                    guard let relativePath = asset.thumbnailPath, !relativePath.isEmpty else { return false }
+                    guard let url = try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath) else { return false }
+                    return FileManager.default.fileExists(atPath: url.path)
                 }()
 
-                guard !hasPath || !fileExists else { continue }
+                guard !hasThumbnailReference || !fileExists else { continue }
 
                 scheduledIds.append(asset.id)
                 mediaTypeById[asset.id] = asset.mediaType ?? .photo

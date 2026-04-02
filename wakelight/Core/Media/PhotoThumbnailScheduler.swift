@@ -124,11 +124,11 @@ actor PhotoThumbnailScheduler {
                 return true
             }
 
-            let path = try await generateThumbnailWithTimeout(request: request)
+            let relativePath = try await generateThumbnailWithTimeout(request: request)
 
             try await DatabaseContainer.shared.writer.write { db in
                 if var asset = try PhotoAsset.fetchOne(db, key: request.photoId) {
-                    asset.thumbnailPath = path
+                    asset.thumbnailPath = relativePath
                     asset.thumbnailUpdatedAt = Date()
                     try asset.update(db)
                 }
@@ -179,8 +179,9 @@ actor PhotoThumbnailScheduler {
     private func thumbnailExists(photoId: UUID) async throws -> Bool {
         try await DatabaseContainer.shared.db.reader.read { db in
             guard let asset = try PhotoAsset.fetchOne(db, key: photoId) else { return false }
-            guard let path = asset.thumbnailPath, !path.isEmpty else { return false }
-            return FileManager.default.fileExists(atPath: path)
+            guard let relativePath = asset.thumbnailPath, !relativePath.isEmpty else { return false }
+            guard let url = try? MediaCache.shared.thumbnailURL(forRelativePath: relativePath) else { return false }
+            return FileManager.default.fileExists(atPath: url.path)
         }
     }
 

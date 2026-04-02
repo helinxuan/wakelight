@@ -3,6 +3,8 @@ import CoreGraphics
 
 protocol MediaCacheProtocol {
     func thumbnailURL(for locator: MediaLocator, size: CGSize) throws -> URL
+    func thumbnailRelativePath(for locator: MediaLocator, size: CGSize) -> String
+    func thumbnailURL(forRelativePath relativePath: String) throws -> URL
     func ensureDirectories() throws
 
     /// Total disk usage (bytes) for thumbnails directory.
@@ -50,10 +52,19 @@ final class MediaCache: MediaCacheProtocol {
         _ = try thumbnailsDirectoryURL()
     }
 
-    func thumbnailURL(for locator: MediaLocator, size: CGSize) throws -> URL {
+    func thumbnailRelativePath(for locator: MediaLocator, size: CGSize) -> String {
         let key = "thumb|\(locator.stableKey)|\(Int(size.width))x\(Int(size.height))"
         let hashed = Self.fnv1a64Hex(key)
-        return try thumbnailsDirectoryURL().appendingPathComponent("\(hashed).jpg")
+        return "\(hashed).jpg"
+    }
+
+    func thumbnailURL(forRelativePath relativePath: String) throws -> URL {
+        try thumbnailsDirectoryURL().appendingPathComponent(relativePath)
+    }
+
+    func thumbnailURL(for locator: MediaLocator, size: CGSize) throws -> URL {
+        let relativePath = thumbnailRelativePath(for: locator, size: size)
+        return try thumbnailURL(forRelativePath: relativePath)
     }
 
     func thumbnailsDiskUsageBytes() throws -> UInt64 {

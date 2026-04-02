@@ -97,7 +97,6 @@ final class ImportPhotosUseCase {
                         duration: asset.mediaType == .video ? asset.duration : nil,
                         thumbnailPath: nil,
                         thumbnailUpdatedAt: nil,
-                        thumbnailCacheKey: nil,
                         burstGroupId: decision?.groupId,
                         bestShotScore: decision?.score,
                         selectionReason: decision?.reason.rawValue,

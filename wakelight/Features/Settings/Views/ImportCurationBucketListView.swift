@@ -59,6 +59,38 @@ struct ImportCurationBucketListView: View {
         }
     }
 
+    private enum DisplayFilter: String, CaseIterable, Identifiable {
+        case local
+        case remote
+        case raw
+        case live
+        case plain
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .local: return "本地"
+            case .remote: return "远程"
+            case .raw: return "RAW"
+            case .live: return "Live"
+            case .plain: return "普通"
+            }
+        }
+
+        var group: DisplayFilterGroup {
+            switch self {
+            case .local, .remote: return .source
+            case .raw, .live, .plain: return .media
+            }
+        }
+    }
+
+    private enum DisplayFilterGroup {
+        case source
+        case media
+    }
+
     private var isTrashMode: Bool {
         filter == .archived
     }
@@ -87,6 +119,7 @@ struct ImportCurationBucketListView: View {
     @State private var showArchiveAllConfirm = false
     @State private var archiveAllGroupId: String? = nil
     @State private var archiveAllTargets: [UUID] = []
+    @State private var selectedDisplayFilters: Set<DisplayFilter> = []
 
 
     var body: some View {
@@ -274,6 +307,41 @@ struct ImportCurationBucketListView: View {
                         promptDelete(scope: .all)
                     } label: {
                         Label("清空回收站", systemImage: "trash")
+                    }
+                }
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                if !groupedDisplayItems.isEmpty {
+                    Menu {
+                        Section("来源") {
+                            ForEach(DisplayFilter.allCases.filter { $0.group == .source }) { option in
+                                Button {
+                                    toggleDisplayFilter(option)
+                                } label: {
+                                    Label(option.title, systemImage: selectedDisplayFilters.contains(option) ? "checkmark" : "")
+                                }
+                            }
+                        }
+
+                        Section("类型") {
+                            ForEach(DisplayFilter.allCases.filter { $0.group == .media }) { option in
+                                Button {
+                                    toggleDisplayFilter(option)
+                                } label: {
+                                    Label(option.title, systemImage: selectedDisplayFilters.contains(option) ? "checkmark" : "")
+                                }
+                            }
+                        }
+
+                        if !selectedDisplayFilters.isEmpty {
+                            Divider()
+                            Button("清除筛选") {
+                                selectedDisplayFilters.removeAll()
+                            }
+                        }
+                    } label: {
+                        Label("筛选", systemImage: selectedDisplayFilters.isEmpty ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
                     }
                 }
             }
@@ -541,6 +609,23 @@ struct ImportCurationBucketListView: View {
             return id
         }
         return nil
+    }
+
+    private func isLocal(_ row: Row) -> Bool {
+        if let localIdentifier = row.localIdentifier, !localIdentifier.isEmpty {
+            return true
+        }
+        if let key = locatorMap[row.id]?.locatorKey, let locator = MediaLocator.parse(key) {
+            if case .library = locator { return true }
+        }
+        return false
+    }
+
+    private func isRemote(_ row: Row) -> Bool {
+        if let key = locatorMap[row.id]?.locatorKey, let locator = MediaLocator.parse(key) {
+            if case .webdav = locator { return true }
+        }
+        return false
     }
 
     private func isArchived(_ row: Row) -> Bool {
@@ -1175,6 +1260,55 @@ struct ImportCurationBucketListView: View {
         return locatorKey
     }
 
+    private func toggleDisplayFilter(_ option: DisplayFilter) {
+        if selectedDisplayFilters.contains(option) {
+            selectedDisplayFilters.remove(option)
+        } else {
+            selectedDisplayFilters.insert(option)
+        }
+    }
+
+    private func matchesDisplayFilter(group: DisplayGroup) -> Bool {
+        if selectedDisplayFilters.isEmpty {
+            return true
+        }
+
+        let sourceFilters = selectedDisplayFilters.filter { $0.group == .source }
+        let mediaFilters = selectedDisplayFilters.filter { $0.group == .media }
+
+        let sourceMatched: Bool = {
+            guard !sourceFilters.isEmpty else { return true }
+            return sourceFilters.contains { option in
+                switch option {
+                case .local:
+                    return group.items.contains { isLocal($0) }
+                case .remote:
+                    return group.items.contains { isRemote($0) }
+                default:
+                    return false
+                }
+            }
+        }()
+
+        let mediaMatched: Bool = {
+            guard !mediaFilters.isEmpty else { return true }
+            return mediaFilters.contains { option in
+                switch option {
+                case .raw:
+                    return group.items.contains { hasRaw(for: $0) }
+                case .live:
+                    return group.items.contains { hasLive(for: $0) }
+                case .plain:
+                    return group.items.contains { !hasRaw(for: $0) && !hasLive(for: $0) }
+                default:
+                    return false
+                }
+            }
+        }()
+
+        return sourceMatched && mediaMatched
+    }
+
     private var groupedDisplayItems: [DisplayGroup] {
         let grouped = Array(groupedRows.values)
         let groupedIds = Set(grouped.flatMap { $0.map(\.id) })
@@ -1188,6 +1322,8 @@ struct ImportCurationBucketListView: View {
         if !singletonItems.isEmpty {
             groups.append(contentsOf: singletonItems.map { DisplayGroup(id: $0.id.uuidString, items: [$0]) })
         }
+
+        groups = groups.filter(matchesDisplayFilter)
 
         if isTrashMode {
             return groups.sorted { lhs, rhs in

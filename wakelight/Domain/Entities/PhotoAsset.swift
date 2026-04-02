@@ -25,7 +25,6 @@ struct PhotoAsset: Codable, FetchableRecord, PersistableRecord {
     // MARK: - Cached thumbnails
     var thumbnailPath: String?
     var thumbnailUpdatedAt: Date?
-    var thumbnailCacheKey: String?
 
     // MARK: - Curation
     var burstGroupId: String?
