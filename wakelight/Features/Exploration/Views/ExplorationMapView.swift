@@ -20,6 +20,8 @@ struct ExplorationMapView: UIViewRepresentable {
     final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var parent: ExplorationMapView
         var currentAnnotations: [ClusterAnnotation] = []
+        private var lastAnnotationZoomBucket: Int?
+        private var lastDisplayedClusterIds: Set<UUID> = []
         private var panGesture: UIPanGestureRecognizer?
         weak var fogScreenView: FogScreenView?
 
@@ -325,11 +327,82 @@ struct ExplorationMapView: UIViewRepresentable {
             return parent.isAwakenMode
         }
 
-        func applyAnnotations(to mapView: MKMapView) {
+        func applyAnnotations(to mapView: MKMapView, force: Bool = false) {
+            let displayedClusters = clustersToDisplay(for: mapView)
+            let displayedIds = Set(displayedClusters.map(\.id))
+            let zoomBucket = zoomBucketForCurrentRegion(mapView)
+
+            if !force,
+               zoomBucket == lastAnnotationZoomBucket,
+               displayedIds == lastDisplayedClusterIds,
+               displayedIds.count == currentAnnotations.count {
+                return
+            }
+
             mapView.removeAnnotations(currentAnnotations)
-            let annotations = parent.viewModel.clusters.map { ClusterAnnotation(cluster: $0) }
+            let annotations = displayedClusters.map { ClusterAnnotation(cluster: $0) }
             currentAnnotations = annotations
             mapView.addAnnotations(annotations)
+
+            lastAnnotationZoomBucket = zoomBucket
+            lastDisplayedClusterIds = displayedIds
+        }
+
+        private func clustersToDisplay(for mapView: MKMapView) -> [PlaceCluster] {
+            let clusters = parent.viewModel.clusters
+            guard !clusters.isEmpty else { return [] }
+
+            let span = mapView.region.span.longitudeDelta
+            // 远景：按更粗网格合并显示代表点，减少 annotation 数量。
+            let aggregatePrecision: Double?
+            if span > 90 {
+                aggregatePrecision = 3.2
+            } else if span > 50 {
+                aggregatePrecision = 1.6
+            } else if span > 24 {
+                aggregatePrecision = 0.9
+            } else if span > 12 {
+                aggregatePrecision = 0.45
+            } else if span > 6 {
+                aggregatePrecision = 0.24
+            } else {
+                aggregatePrecision = nil
+            }
+
+            guard let precision = aggregatePrecision else {
+                return clusters
+            }
+
+            var grouped: [String: PlaceCluster] = [:]
+            grouped.reserveCapacity(clusters.count / 2)
+
+            for cluster in clusters {
+                let key = GeoGrid.key(
+                    latitude: cluster.centerLatitude,
+                    longitude: cluster.centerLongitude,
+                    precisionDegrees: precision
+                )
+
+                if let existing = grouped[key] {
+                    if cluster.photoCount > existing.photoCount {
+                        grouped[key] = cluster
+                    }
+                } else {
+                    grouped[key] = cluster
+                }
+            }
+
+            return Array(grouped.values)
+        }
+
+        private func zoomBucketForCurrentRegion(_ mapView: MKMapView) -> Int {
+            let span = mapView.region.span.longitudeDelta
+            if span > 90 { return 0 }
+            if span > 50 { return 1 }
+            if span > 24 { return 2 }
+            if span > 12 { return 3 }
+            if span > 6 { return 4 }
+            return 5
         }
 
         func handleBlowUnlockIfNeeded(on mapView: MKMapView) {
@@ -708,6 +781,7 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            applyAnnotations(to: mapView)
             fogScreenView?.markNeedsFullUpdate()
             fogScreenView?.updateIfNeeded(interactionPhase: false)
         }
@@ -815,7 +889,7 @@ struct ExplorationMapView: UIViewRepresentable {
         let region = MKCoordinateRegion(center: initialCenter, span: span)
         mapView.setRegion(region, animated: false)
 
-        context.coordinator.applyAnnotations(to: mapView)
+        context.coordinator.applyAnnotations(to: mapView, force: true)
         context.coordinator.setupGestures(for: mapView)
         context.coordinator.prewarmBlowSweepIfNeeded(on: mapView)
 
@@ -845,9 +919,7 @@ struct ExplorationMapView: UIViewRepresentable {
         fogView.markNeedsFullUpdate()
         fogView.updateIfNeeded(interactionPhase: false)
 
-        if context.coordinator.currentAnnotations.count != viewModel.clusters.count {
-            context.coordinator.applyAnnotations(to: mapView)
-        }
+        context.coordinator.applyAnnotations(to: mapView)
 
         context.coordinator.handleBlowUnlockIfNeeded(on: mapView)
 

@@ -33,6 +33,14 @@ final class PhotoThumbnailGenerator {
         } else {
             resource = try await MediaResolver.shared.resolve(locator: locator)
         }
+
+        // WebDAV fallback/curation may resolve remote media to temporary local files.
+        // Ensure these temporary files are cleaned up after thumbnail generation.
+        defer {
+            if case .url(let url) = resource, shouldCleanupTemporaryURL(url) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
         
         let thumbnail: UIImage
         switch mediaType {
@@ -58,7 +66,7 @@ final class PhotoThumbnailGenerator {
         // Enforce disk cache limit (LRU trim)
         try? MediaCache.shared.trimThumbnailsIfNeeded()
 
-        return destinationURL.path
+        return relativePath
     }
     
     private func generateImageThumbnail(from resource: MediaResource) async throws -> UIImage {
@@ -75,7 +83,7 @@ final class PhotoThumbnailGenerator {
     private func generateVideoThumbnail(from resource: MediaResource) async throws -> UIImage {
         let asset: AVAsset
         var temporaryURL: URL?
-        
+
         switch resource {
         case .data(let data):
             // AVAsset needs a URL, so we write to a temp file
@@ -88,17 +96,17 @@ final class PhotoThumbnailGenerator {
         case .phAsset(let phAsset):
             asset = try await requestAVAsset(for: phAsset)
         }
-        
+
         defer {
             if let url = temporaryURL {
                 try? FileManager.default.removeItem(at: url)
             }
         }
-        
+
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = targetSize
-        
+
         let duration = try await asset.load(.duration)
         let durationSeconds = CMTimeGetSeconds(duration)
         let sampleSeconds: [Double] = {
@@ -114,7 +122,7 @@ final class PhotoThumbnailGenerator {
         for second in sampleSeconds {
             do {
                 let time = CMTime(seconds: second, preferredTimescale: 600)
-                let (cgImage, _) = try await generator.image(at: time)
+                let (cgImage, _) = try await imageWithTimeout(generator: generator, time: time, timeoutSeconds: 12)
                 return UIImage(cgImage: cgImage)
             } catch {
                 lastError = error
@@ -216,14 +224,60 @@ final class PhotoThumbnailGenerator {
             let options = PHVideoRequestOptions()
             options.isNetworkAccessAllowed = true
             options.deliveryMode = .highQualityFormat
-            
-            PHImageManager.default().requestAVAsset(forVideo: phAsset, options: options) { asset, _, _ in
+
+            PHImageManager.default().requestAVAsset(forVideo: phAsset, options: options) { asset, _, info in
                 if let asset = asset {
                     continuation.resume(returning: asset)
-                } else {
-                    continuation.resume(throwing: NSError(domain: "PhotoThumbnailGenerator", code: -6, userInfo: [NSLocalizedDescriptionKey: "AVAsset request failed"]))
+                    return
                 }
+
+                let nsError = info?[PHImageErrorKey] as? NSError
+                let message = nsError?.localizedDescription ?? "AVAsset request failed"
+                continuation.resume(throwing: NSError(
+                    domain: "PhotoThumbnailGenerator",
+                    code: -6,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                ))
             }
+        }
+    }
+
+    private func imageWithTimeout(
+        generator: AVAssetImageGenerator,
+        time: CMTime,
+        timeoutSeconds: Double
+    ) async throws -> (CGImage, CMTime) {
+        let timeoutNs = UInt64(max(1, Int(timeoutSeconds * 1_000_000_000)))
+        let worker = Task.detached(priority: .background) {
+            try await generator.image(at: time)
+        }
+
+        do {
+            let result = try await withThrowingTaskGroup(of: (CGImage, CMTime).self) { group in
+                group.addTask {
+                    try await worker.value
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: timeoutNs)
+                    throw NSError(
+                        domain: "PhotoThumbnailGenerator",
+                        code: -10,
+                        userInfo: [NSLocalizedDescriptionKey: "video frame extraction timeout after \(Int(timeoutSeconds))s"]
+                    )
+                }
+
+                guard let value = try await group.next() else {
+                    throw NSError(domain: "PhotoThumbnailGenerator", code: -10, userInfo: [NSLocalizedDescriptionKey: "video frame extraction timeout"])
+                }
+                group.cancelAll()
+                return value
+            }
+
+            worker.cancel()
+            return result
+        } catch {
+            worker.cancel()
+            throw error
         }
     }
 
@@ -248,5 +302,11 @@ final class PhotoThumbnailGenerator {
             context.fill(CGRect(origin: .zero, size: image.size))
             image.draw(in: CGRect(origin: .zero, size: image.size))
         }
+    }
+
+    private func shouldCleanupTemporaryURL(_ url: URL) -> Bool {
+        let tmpDir = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let target = url.standardizedFileURL.path
+        return target.hasPrefix(tmpDir)
     }
 }

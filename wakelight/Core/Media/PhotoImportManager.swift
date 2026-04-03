@@ -115,6 +115,7 @@ final class PhotoImportManager: ObservableObject {
         reconcileRestoredProgressIfNeeded()
         Task { [weak self] in
             guard let self else { return }
+            await self.normalizeLegacyThumbnailPathsIfNeeded()
             await PhotoThumbnailScheduler.shared.setAcceptingRequests(true)
             await PhotoThumbnailScheduler.shared.setProgressObserver { snapshot in
                 await MainActor.run {
@@ -791,19 +792,37 @@ final class PhotoImportManager: ObservableObject {
 
     private func loadThumbnailBackfillRequests(limit: Int?) async throws -> [PhotoThumbnailScheduler.Request] {
         try await DatabaseContainer.shared.db.reader.read { db in
-            // 性能优化：补齐队列仅负责“无缩略图引用”的资产，避免每次扫描全表并做高频 fileExists 检查。
-            // 缩略图文件缺失但 DB 仍有引用的情况，由缩略图读取链路 disk-miss 时触发按需补齐。
-            let maxCount = max(1, limit ?? 600)
-            let assets = try PhotoAsset
-                .filter(Column("thumbnailPath") == nil || Column("thumbnailPath") == "")
+            // 补齐队列优先处理“无路径引用”，并保留少量“路径存在但文件缺失”校验，避免重装后路径失效无法自动修复。
+            let maxCount = max(1, limit ?? 120)
+            let allCandidates = try PhotoAsset
                 .order(Column("importedAt").desc)
-                .limit(maxCount)
+                .limit(maxCount * 4)
                 .fetchAll(db)
 
-            guard !assets.isEmpty else { return [] }
+            var scheduledIds: [UUID] = []
+            var mediaTypeById: [UUID: PhotoAsset.MediaType] = [:]
+            scheduledIds.reserveCapacity(maxCount)
 
-            let scheduledIds = assets.map(\.id)
-            let mediaTypeById = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0.mediaType ?? .photo) })
+            for asset in allCandidates {
+                let path = asset.thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let shouldSchedule: Bool
+
+                if path.isEmpty {
+                    shouldSchedule = true
+                } else if let url = try? MediaCache.shared.thumbnailURL(forRelativePath: path) {
+                    shouldSchedule = !FileManager.default.fileExists(atPath: url.path)
+                } else {
+                    shouldSchedule = true
+                }
+
+                guard shouldSchedule else { continue }
+
+                scheduledIds.append(asset.id)
+                mediaTypeById[asset.id] = asset.mediaType ?? .photo
+                if scheduledIds.count >= maxCount { break }
+            }
+
+            guard !scheduledIds.isEmpty else { return [] }
 
             let locators = try PhotoAsset.fetchLocators(db: db, ids: scheduledIds)
             let locatorById = Dictionary(uniqueKeysWithValues: locators.map { ($0.photoAssetId, $0.locatorKey) })
@@ -817,8 +836,49 @@ final class PhotoImportManager: ObservableObject {
         }
     }
 
+    private func normalizeLegacyThumbnailPathsIfNeeded() async {
+        if UserDefaults.standard.bool(forKey: thumbnailPathNormalizationDoneKey) {
+            return
+        }
+
+        do {
+            let normalizedCount = try await DatabaseContainer.shared.writer.write { db in
+                let assets = try PhotoAsset
+                    .filter(Column("thumbnailPath") != nil && Column("thumbnailPath") != "")
+                    .fetchAll(db)
+
+                var changed = 0
+                for var asset in assets {
+                    guard let oldPath = asset.thumbnailPath, !oldPath.isEmpty else { continue }
+
+                    let normalized: String
+                    if oldPath.hasPrefix("/") {
+                        normalized = URL(fileURLWithPath: oldPath).lastPathComponent
+                    } else {
+                        normalized = (oldPath as NSString).lastPathComponent
+                    }
+
+                    guard normalized != oldPath else { continue }
+                    asset.thumbnailPath = normalized
+                    try asset.update(db)
+                    changed += 1
+                }
+
+                return changed
+            }
+
+            UserDefaults.standard.set(true, forKey: thumbnailPathNormalizationDoneKey)
+            if normalizedCount > 0 {
+                print("[ThumbBackfill] normalized legacy thumbnail paths count=\(normalizedCount)")
+            }
+        } catch {
+            print("[ThumbBackfill] normalize legacy thumbnail paths failed: \(error)")
+        }
+    }
+
     private let syncProgressKey = "com.wakelight.import.sync.progress"
     private let curationProgressKey = "com.wakelight.import.curation.progress"
+    private let thumbnailPathNormalizationDoneKey = "com.wakelight.thumbnail.path.normalization.done.v1"
 
     private func saveSyncProgress() {
         if let data = try? JSONEncoder().encode(syncProgress) {

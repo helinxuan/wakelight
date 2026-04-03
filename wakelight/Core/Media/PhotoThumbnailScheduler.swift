@@ -39,7 +39,7 @@ actor PhotoThumbnailScheduler {
     }
 
     private let maxConcurrent: Int
-    private let perTaskTimeoutSeconds: Double = 45
+    private let perTaskTimeoutSeconds: Double = 120
     private let maxRetryCountPerPhoto: Int = 2
     private var runningCount: Int = 0
     private var pendingOrder: [UUID] = []
