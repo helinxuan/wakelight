@@ -917,6 +917,9 @@ struct ExplorationMapView: UIViewRepresentable {
         context.coordinator.showExploreGuideIfNeeded()
 
         mapView.isScrollEnabled = !isAwakenMode
+        mapView.isZoomEnabled = !isAwakenMode
+        mapView.isRotateEnabled = !isAwakenMode
+        mapView.isPitchEnabled = !isAwakenMode
 
         if isAwakenMode {
             let zoomRange = MKMapView.CameraZoomRange(maxCenterCoordinateDistance: awakenMaxZoomOutDistance)
@@ -1002,8 +1005,8 @@ final class FogScreenView: UIView {
         didSet { needsFullUpdate = true }
     }
 
-    private let maxVisibleGlowLayers: Int = 180
-    private let maxVisibleNonStoryGlowLayers: Int = 180
+    private let maxVisibleGlowLayers: Int = 120
+    private let maxVisibleNonStoryGlowLayers: Int = 120
     private let fogAlpha: CGFloat = 0.65
     private let glowOpacity: Float = 0.55
     private let storyGlowColor = UIColor(red: 1.0, green: 0.84, blue: 0.0, alpha: 1.0).cgColor
@@ -1025,6 +1028,7 @@ final class FogScreenView: UIView {
     private let storyGlowImage = UIImage(named: "FogHoleSoftYellow")?.cgImage
 
     private var needsFullUpdate: Bool = true
+    private var interactionGeometryTick: Int = 0
 
     init(mapView: MKMapView) {
         self.mapView = mapView
@@ -1057,9 +1061,15 @@ final class FogScreenView: UIView {
 
     func updateIfNeeded(interactionPhase: Bool) {
         if interactionPhase {
-            updateActiveGlowLayerGeometryOnly()
+            interactionGeometryTick &+= 1
+            // 交互阶段降频：每 2 帧更新一次 glow 几何，降低主线程/GPU 压力。
+            if interactionGeometryTick % 2 == 0 {
+                updateActiveGlowLayerGeometryOnly()
+            }
             return
         }
+
+        interactionGeometryTick = 0
 
         guard needsFullUpdate else {
             updateActiveGlowLayerGeometryOnly()
@@ -1116,11 +1126,22 @@ final class FogScreenView: UIView {
 
         let visibleRect = rect.insetBy(dx: -visiblePadding, dy: -visiblePadding)
 
-        var keepIds = Set<UUID>()
-        keepIds.reserveCapacity(revealedClusterIds.count + 32)
+        struct VisibleGlowCandidate {
+            let cluster: PlaceCluster
+            let point: CGPoint
+            let isStory: Bool
+            let isRevealed: Bool
+            let priorityScore: Double
+        }
+
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        var candidates: [VisibleGlowCandidate] = []
+        candidates.reserveCapacity(min(clusters.count, 800))
 
         for c in clusters {
-            let shouldGlow = c.hasStory || revealedClusterIds.contains(c.id)
+            let isStory = c.hasStory
+            let isRevealed = revealedClusterIds.contains(c.id)
+            let shouldGlow = isStory || isRevealed
             guard shouldGlow else { continue }
 
             let coord = GeoCoordinateTransform.wgs84ToGcj02IfNeeded(
@@ -1130,10 +1151,29 @@ final class FogScreenView: UIView {
             let p = mapView.convert(coord, toPointTo: self)
             guard visibleRect.contains(p) else { continue }
 
+            let dx = Double(p.x - center.x)
+            let dy = Double(p.y - center.y)
+            let dist2 = dx * dx + dy * dy
+            // 高优先级：story > revealed；同级按更靠近屏幕中心优先。
+            let base = isStory ? 2_000_000.0 : 1_000_000.0
+            let score = base - dist2
+            candidates.append(VisibleGlowCandidate(cluster: c, point: p, isStory: isStory, isRevealed: isRevealed, priorityScore: score))
+        }
+
+        if candidates.count > maxVisibleGlowLayers {
+            candidates.sort { $0.priorityScore > $1.priorityScore }
+            candidates = Array(candidates.prefix(maxVisibleGlowLayers))
+        }
+
+        var keepIds = Set<UUID>()
+        keepIds.reserveCapacity(candidates.count + 8)
+
+        for item in candidates {
+            let c = item.cluster
             let layer = getOrCreateGlowLayer(for: c.id)
-            layer.position = p
-            layer.zPosition = c.hasStory ? 2 : 1
-            layer.contents = c.hasStory ? storyGlowImage : glowImage
+            layer.position = item.point
+            layer.zPosition = item.isStory ? 2 : 1
+            layer.contents = item.isStory ? storyGlowImage : glowImage
             layer.compositingFilter = "screenBlendMode"
             keepIds.insert(c.id)
         }
