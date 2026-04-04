@@ -352,29 +352,32 @@ struct ExplorationMapView: UIViewRepresentable {
             let clusters = parent.viewModel.clusters
             guard !clusters.isEmpty else { return [] }
 
-            let span = mapView.region.span.longitudeDelta
-            // 远景：按更粗网格合并显示代表点，减少 annotation 数量。
-            let aggregatePrecision: Double?
-            if span > 90 {
-                aggregatePrecision = 3.2
-            } else if span > 50 {
-                aggregatePrecision = 1.6
-            } else if span > 24 {
-                aggregatePrecision = 0.9
-            } else if span > 12 {
-                aggregatePrecision = 0.45
-            } else if span > 6 {
-                aggregatePrecision = 0.24
-            } else {
-                aggregatePrecision = nil
-            }
+            let span = max(mapView.region.span.longitudeDelta, 0.000_001)
+            let approxZoom = log2(360.0 / span)
 
-            guard let precision = aggregatePrecision else {
+            // 需求：zoom >= 8.27（刮擦可用区）必须全量显示，不做合并。
+            if approxZoom >= 8.27 {
                 return clusters
             }
 
+            // 其余缩放等级做手动网格聚合。
+            let precision: Double
+            if approxZoom < 3.8 {
+                precision = 3.2
+            } else if approxZoom < 4.8 {
+                precision = 1.6
+            } else if approxZoom < 5.8 {
+                precision = 0.9
+            } else if approxZoom < 6.8 {
+                precision = 0.45
+            } else if approxZoom < 7.6 {
+                precision = 0.24
+            } else {
+                precision = 0.16
+            }
+
             var grouped: [String: PlaceCluster] = [:]
-            grouped.reserveCapacity(clusters.count / 2)
+            grouped.reserveCapacity(max(1, clusters.count / 2))
 
             for cluster in clusters {
                 let key = GeoGrid.key(
@@ -396,13 +399,15 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         private func zoomBucketForCurrentRegion(_ mapView: MKMapView) -> Int {
-            let span = mapView.region.span.longitudeDelta
-            if span > 90 { return 0 }
-            if span > 50 { return 1 }
-            if span > 24 { return 2 }
-            if span > 12 { return 3 }
-            if span > 6 { return 4 }
-            return 5
+            let span = max(mapView.region.span.longitudeDelta, 0.000_001)
+            let approxZoom = log2(360.0 / span)
+            if approxZoom >= 8.27 { return 6 }
+            if approxZoom >= 7.6 { return 5 }
+            if approxZoom >= 6.8 { return 4 }
+            if approxZoom >= 5.8 { return 3 }
+            if approxZoom >= 4.8 { return 2 }
+            if approxZoom >= 3.8 { return 1 }
+            return 0
         }
 
         func handleBlowUnlockIfNeeded(on mapView: MKMapView) {
@@ -777,6 +782,13 @@ struct ExplorationMapView: UIViewRepresentable {
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            // #if DEBUG
+            // let span = max(mapView.region.span.longitudeDelta, 0.000_001)
+            // let approxZoom = log2(360.0 / span)
+            // let displayed = currentAnnotations.count
+            // let total = parent.viewModel.clusters.count
+            // print(String(format: "[MapZoom] span=%.6f zoom≈%.2f displayed=%d total=%d", span, approxZoom, displayed, total))
+            // #endif
             fogScreenView?.updateIfNeeded(interactionPhase: true)
         }
 
