@@ -2,12 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>AMAP_WEB_SERVICE_KEY</key>
+	<string>REDACTED_AMAP_WEB_SERVICE_KEY</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.wakelight.bg.webdav-import</string>
 	</array>
-	<key>AMAP_WEB_SERVICE_KEY</key>
-	<string>REDACTED_AMAP_WEB_SERVICE_KEY</string>
 	<key>DOUBAO_API_KEY</key>
 	<string>REDACTED_DOUBAO_API_KEY</string>
 	<key>MAPBOX_ACCESS_TOKEN</key>
