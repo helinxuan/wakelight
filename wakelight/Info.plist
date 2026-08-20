@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
 	<key>AMAP_WEB_SERVICE_KEY</key>
-	<string>REDACTED_AMAP_WEB_SERVICE_KEY</string>
+	<string>$(AMAP_WEB_SERVICE_KEY)</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.wakelight.bg.webdav-import</string>
 	</array>
 	<key>DOUBAO_API_KEY</key>
-	<string>REDACTED_DOUBAO_API_KEY</string>
+	<string>$(DOUBAO_API_KEY)</string>
 	<key>MAPBOX_ACCESS_TOKEN</key>
-	<string>REDACTED_MAPBOX_ACCESS_TOKEN</string>
+	<string>$(MAPBOX_ACCESS_TOKEN)</string>
 	<key>SILICONFLOW_API_KEY</key>
-	<string>REDACTED_SILICONFLOW_API_KEY</string>
+	<string>$(SILICONFLOW_API_KEY)</string>
 </dict>
 </plist>

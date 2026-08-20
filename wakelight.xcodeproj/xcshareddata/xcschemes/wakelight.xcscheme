@@ -53,7 +53,7 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "MAPBOX_ACCESS_TOKEN"
-            value = "REDACTED_MAPBOX_ACCESS_TOKEN"
+            value = "$(MAPBOX_ACCESS_TOKEN)"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>
